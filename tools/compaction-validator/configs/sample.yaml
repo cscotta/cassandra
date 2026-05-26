@@ -1,0 +1,64 @@
+# compaction-validator.yaml — sample configuration
+#
+# A/B comparison framework. The validator generates one set of source SSTables
+# per seed, hard-links them into two output directories, then compacts each
+# directory using the configuration of one "side" (control or experiment) and
+# validates the two outputs are byte-/cell-identical.
+#
+# Anything left unset (or null) on a side gets a per-seed-randomised value
+# picked once and applied to BOTH sides — i.e. omitting an attribute means
+# "I'm not testing this; let the seed decide". Set an attribute on at least
+# one side when you want to vary it; set it on BOTH sides to pin a non-default
+# value identically.
+#
+# Required: --config <path> on every invocation.
+# Override knobs that are environment-specific stay on the CLI:
+#   --seed <hex>          override the seed (otherwise random per run)
+#   --working-dir <path>  output / temp directory base
+#   --log-file <path>     append-only run log
+#   --once                run a single iteration, then exit
+#
+# Schema-version field is for forward compatibility. Always 1 today.
+version: 1
+
+run:
+  target_bytes: 10G
+  datagen_threads: 8
+  compaction_threads: 4
+  validation_threads: 12
+  max_runs: 0           # 0 = unlimited
+  no_cleanup: false
+  no_ui: false
+  ignore_errata: []     # e.g. [equal-ts-tiebreaker] to suppress a known cursor bug
+
+schema:
+  partitioner: Murmur3  # only Murmur3 supported by the cursor pipeline today
+
+# The two sides under test. Schema CQL columns and data bytes are identical
+# across both — only the listed attributes differ.
+comparison:
+  control:
+    name: legacy
+    pipeline: ITERATOR
+    compaction:
+      class: UnifiedCompactionStrategy
+      options:
+        target_sstable_size: 64MiB
+        base_shard_count: 4
+    compression:
+      class: LZ4Compressor
+      chunk_length_in_kb: 16
+    io_mode: standard   # must match experiment.io_mode in this version
+
+  experiment:
+    name: cursor
+    pipeline: CURSOR
+    compaction:
+      class: UnifiedCompactionStrategy
+      options:
+        target_sstable_size: 64MiB
+        base_shard_count: 4
+    compression:
+      class: LZ4Compressor
+      chunk_length_in_kb: 16
+    io_mode: standard

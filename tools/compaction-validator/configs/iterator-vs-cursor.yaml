@@ -1,0 +1,35 @@
+# Iterator vs Cursor — the original comparison.
+#
+# Pins ONLY the compaction pipeline (ITERATOR vs CURSOR). Compaction strategy,
+# compression, chunk size, and column shape are all seed-driven and applied
+# identically to both sides — so any divergence is attributable to the
+# pipeline itself, not to asymmetric strategy/compression choices.
+#
+# Mirrors the parameters that surfaced the equal-ts-tiebreaker bug:
+#   --target-bytes 1G --datagen-threads 4
+#   --compaction-threads 12 --validation-threads 12
+#   --ignore-errata=equal-ts-tiebreaker
+
+version: 1
+
+run:
+  target_bytes: 1G
+  datagen_threads: 4
+  compaction_threads: 12
+  validation_threads: 12
+  max_runs: 0                       # unlimited — soak until 'q' is pressed
+  no_cleanup: false                 # delete working dir on PASS
+  no_ui: false
+  ignore_errata:
+    - equal-ts-tiebreaker
+
+schema:
+  partitioner: Murmur3
+
+comparison:
+  control:
+    name: legacy
+    pipeline: ITERATOR
+  experiment:
+    name: cursor
+    pipeline: CURSOR

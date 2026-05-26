@@ -39,7 +39,7 @@ if [ -d $CASSANDRA_HOME/build ] ; then
 
     if [ "$jars_cnt" = "1" ]; then
         cassandra_bin="`ls -1 $CASSANDRA_HOME/build/apache-cassandra*.jar | grep -v javadoc | grep -v sources`"
-        cassandra_bin="$cassandra_bin:$CASSANDRA_HOME/build/classes/stress:$CASSANDRA_HOME/build/classes/fqltool:$CASSANDRA_HOME/build/classes/sstableloader"
+        cassandra_bin="$cassandra_bin:$CASSANDRA_HOME/build/classes/stress:$CASSANDRA_HOME/build/classes/fqltool:$CASSANDRA_HOME/build/classes/sstableloader:$CASSANDRA_HOME/build/classes/compaction-validator"
         CLASSPATH="$CLASSPATH:$cassandra_bin"
     fi
 fi
@@ -57,6 +57,50 @@ done
 for jar in "$CASSANDRA_HOME"/lib/*.jar; do
     CLASSPATH="$CLASSPATH:$jar"
 done
+
+# Architecture-specific native dependencies — most notably the Amazon Corretto
+# Crypto Provider, which Cassandra registers eagerly on startup and warns about
+# if missing ("AmazonCorrettoCryptoProvider is not on the class path"). The main
+# daemon's bin/cassandra.in.sh already does this; mirroring it here makes every
+# tool launched via tools/bin/* (sstableloader, fqltool, compaction-validator,
+# etc.) pick up the right native bindings on linux-aarch_64 / linux-x86_64.
+# macOS reports `uname -m` as "arm64" while the JAR ships under lib/aarch64/,
+# so map that one alias before checking for the directory.
+#
+# Both linux and macOS ACCP jars share the same Java class names but bundle
+# different native libraries — putting both on the classpath would cause one to
+# fail its health check at startup. We pick by filename suffix so the two
+# variants can coexist in lib/<arch>/ (e.g. AmazonCorrettoCryptoProvider-*-linux-aarch_64.jar
+# alongside AmazonCorrettoCryptoProvider-*-osx-aarch_64.jar). Jars without a
+# linux/osx infix are platform-agnostic and always included.
+platform=$(uname -m)
+case "$platform" in
+    arm64) platform=aarch64 ;;
+    amd64) platform=x86_64 ;;
+esac
+case "$(uname -s)" in
+    Linux)  os_infix=linux ;;
+    Darwin) os_infix=osx ;;
+    *)      os_infix= ;;  # unknown OS — only platform-agnostic jars get included
+esac
+if [ -d "$CASSANDRA_HOME"/lib/"$platform" ]; then
+    for jar in "$CASSANDRA_HOME"/lib/"$platform"/*.jar ; do
+        [ -e "$jar" ] || continue
+        base=$(basename "$jar")
+        case "$base" in
+            *-linux-*|*-osx-*)
+                # OS-specific: include only if it matches THIS host's OS
+                if [ -n "$os_infix" ] && [ "$base" != "${base#*-${os_infix}-}" ] ; then
+                    CLASSPATH="$CLASSPATH:${jar}"
+                fi
+                ;;
+            *)
+                # No OS infix — platform-agnostic, always include
+                CLASSPATH="$CLASSPATH:${jar}"
+                ;;
+        esac
+    done
+fi
 
 
 #

@@ -1,0 +1,143 @@
+#!/bin/sh
+
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+if [ "x$CASSANDRA_INCLUDE" = "x" ]; then
+    # Locations (in order) to use when searching for an include file.
+    for include in "`dirname "$0"`/cassandra.in.sh" \
+                   "$HOME/.cassandra.in.sh" \
+                   /usr/share/cassandra/cassandra.in.sh \
+                   /usr/local/share/cassandra/cassandra.in.sh \
+                   /opt/cassandra/cassandra.in.sh; do
+        if [ -r "$include" ]; then
+            . "$include"
+            break
+        fi
+    done
+elif [ -r "$CASSANDRA_INCLUDE" ]; then
+    . "$CASSANDRA_INCLUDE"
+fi
+
+if [ -z "$CLASSPATH" ]; then
+    echo "You must set the CLASSPATH var" >&2
+    exit 1
+fi
+
+# Belt-and-suspenders: ensure the architecture-specific lib dir (containing the
+# Amazon Corretto Crypto Provider native binding) is on $CLASSPATH. The shared
+# tools/bin/cassandra.in.sh already adds it, but if a stale copy of that file is
+# being sourced, we still want this tool to start without the
+# "AmazonCorrettoCryptoProvider is not on the class path" warning. Skip silently
+# if the dir doesn't exist (e.g. a platform we don't ship native libs for).
+# macOS reports `uname -m` as "arm64" while the JAR ships under lib/aarch64/,
+# so map common aliases before checking the directory.
+#
+# Linux and macOS ACCP jars share Java class names but bundle different native
+# libraries; we filter by the upstream classifier infix (-linux- / -osx-) so
+# both variants can coexist in lib/<arch>/ without one breaking the other's
+# native health check.
+ARCH=$(uname -m)
+case "$ARCH" in
+    arm64) ARCH=aarch64 ;;
+    amd64) ARCH=x86_64 ;;
+esac
+case "$(uname -s)" in
+    Linux)  OS_INFIX=linux ;;
+    Darwin) OS_INFIX=osx ;;
+    *)      OS_INFIX= ;;
+esac
+ARCH_LIB_DIR="$CASSANDRA_HOME/lib/$ARCH"
+if [ -d "$ARCH_LIB_DIR" ]; then
+    for jar in "$ARCH_LIB_DIR"/*.jar; do
+        [ -e "$jar" ] || continue
+        base=$(basename "$jar")
+        case "$base" in
+            *-linux-*|*-osx-*)
+                if [ -n "$OS_INFIX" ] && [ "$base" != "${base#*-${OS_INFIX}-}" ] ; then
+                    case ":$CLASSPATH:" in
+                        *":$jar:"*) ;;
+                        *) CLASSPATH="$CLASSPATH:$jar" ;;
+                    esac
+                fi
+                ;;
+            *)
+                case ":$CLASSPATH:" in
+                    *":$jar:"*) ;;
+                    *) CLASSPATH="$CLASSPATH:$jar" ;;
+                esac
+                ;;
+        esac
+    done
+fi
+
+if [ "x$MAX_HEAP_SIZE" = "x" ]; then
+    MAX_HEAP_SIZE="24G"
+fi
+
+# Anchor cassandra.storagedir (the system-keyspace + commitlog + saved-caches root)
+# inside the user's --working-dir tree rather than at the project root's data/. This
+# keeps every Cassandra-managed file under the same base path the rest of the tool
+# uses, lets `rm -rf <working-dir>` reclaim everything cleanly, and prevents one run
+# from inheriting a corrupt transaction log from a prior crash. We wipe it on every
+# launch since the JVM starts fresh and the contents are ephemeral system state.
+WORKING_DIR=""
+prev=""
+for arg in "$@"; do
+    case "$prev" in --working-dir|-w) WORKING_DIR="$arg" ;; esac
+    case "$arg" in
+        --working-dir=*) WORKING_DIR="${arg#--working-dir=}" ;;
+        -w=*)            WORKING_DIR="${arg#-w=}" ;;
+    esac
+    prev="$arg"
+done
+if [ -z "$WORKING_DIR" ]; then
+    WORKING_DIR="${TMPDIR:-/tmp}/cassandra-compaction-validator"
+fi
+cassandra_storagedir="$WORKING_DIR/_cassandra-system"
+rm -rf "$cassandra_storagedir"
+mkdir -p "$cassandra_storagedir"
+
+# Default GC log path; override by exporting CV_GC_LOG before invocation.
+if [ "x$CV_GC_LOG" = "x" ]; then
+    CV_GC_LOG="/tmp/compaction-validator-gc.log"
+fi
+
+GC_OPTS="-Xlog:gc*=info,safepoint:file=$CV_GC_LOG:time,uptime,level,tags:filecount=5,filesize=20M"
+
+# Use generational ZGC. Requires JDK 21+ at runtime.
+#   -XX:+UseZGC          enable ZGC (low-pause concurrent collector)
+#   -XX:+ZGenerational   enable generational mode (Java 21 added; default in Java 23+)
+#   -XX:+ZUncommit       return unused heap memory to the OS once a region has been
+#                        idle past -XX:ZUncommitDelay (default 300s). On by default in
+#                        recent ZGC builds; passing explicitly so the intent is visible
+#                        and survives any future default change.
+# On Java 21/22 ZGenerational is needed; on Java 23+ it's the default but passing it
+# is harmless (still a recognised flag). To override and use a different collector,
+# export ANTHROPIC_GC_ALGO before invocation, e.g.
+#   ANTHROPIC_GC_ALGO="-XX:+UseG1GC"
+if [ "x$ANTHROPIC_GC_ALGO" = "x" ]; then
+    ANTHROPIC_GC_ALGO="-XX:+UseZGC -XX:+ZGenerational -XX:+ZUncommit"
+fi
+
+"$JAVA" $JAVA_AGENT -ea -cp "$CLASSPATH" $JVM_OPTS -Xmx$MAX_HEAP_SIZE \
+        $ANTHROPIC_GC_ALGO \
+        $GC_OPTS \
+        -Dcassandra.storagedir="$cassandra_storagedir" \
+        -Dlogback.configurationFile=logback-tools.xml \
+        org.apache.cassandra.tools.compactionvalidator.Main "$@"
+
+# vi:ai sw=4 ts=4 tw=0 et

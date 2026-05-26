@@ -1,0 +1,85 @@
+<!--
+  Licensed to the Apache Software Foundation (ASF) under one or more
+  contributor license agreements.  See the NOTICE file distributed with
+  this work for additional information regarding copyright ownership.
+  The ASF licenses this file to You under the Apache License, Version 2.0
+  (the "License"); you may not use this file except in compliance with
+  the License.  You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+-->
+<project basedir="../../" name="apache-cassandra-compaction-validator"
+         xmlns:if="ant:if"
+         xmlns:unless="ant:unless">
+
+    <!-- pull common definitions from parent project -->
+    <import file="../../build.xml"/>
+
+    <property name="cv.build.src"     value="${basedir}/tools/compaction-validator/src" />
+    <property name="cv.test.src"      value="${basedir}/tools/compaction-validator/test/unit" />
+    <property name="cv.build.classes" value="${build.classes}/compaction-validator" />
+    <property name="cv.test.classes"  value="${build.dir}/test/compaction-validator-classes" />
+    <property name="cv.manifest"      value="${cv.build.classes}/MANIFEST.MF" />
+
+    <target name="compaction-validator-init">
+        <mkdir dir="${cv.test.classes}"/>
+    </target>
+
+    <target name="compaction-validator-build" depends="compaction-validator-init,build"
+            description="build compaction-validator tool">
+        <antcall target="_compaction_validator_build"/>
+    </target>
+
+    <target name="_compaction_validator_build">
+        <mkdir dir="${cv.build.classes}" />
+        <javac compiler="modern" debug="true" debuglevel="${debuglevel}"
+               source="${ant.java.version}" target="${ant.java.version}"
+               encoding="utf-8" destdir="${cv.build.classes}" includeantruntime="true">
+            <src path="${cv.build.src}" />
+            <classpath>
+                <path refid="cassandra.classpath" />
+            </classpath>
+            <compilerarg value="-XDignore.symbol.file"/>
+            <compilerarg line="${jdk11plus-javac-exports}"/>
+        </javac>
+    </target>
+
+    <target name="compaction-validator-build-test" depends="compaction-validator-build"
+            description="Compile compaction-validator tests">
+        <javac debug="true" debuglevel="${debuglevel}" destdir="${cv.test.classes}"
+               source="${ant.java.version}" target="${ant.java.version}"
+               includeantruntime="false" encoding="utf-8">
+            <classpath>
+                <path refid="cassandra.classpath.test"/>
+                <pathelement location="${cv.build.classes}" />
+                <pathelement location="${build.dir}/lib/jars/lanterna-3.1.2.jar" />
+            </classpath>
+            <src path="${cv.test.src}"/>
+        </javac>
+    </target>
+
+    <target name="compaction-validator-test" depends="compaction-validator-build-test,maybe-build-test"
+            description="Runs compaction-validator tests">
+        <testmacro inputdir="${cv.test.src}" timeout="${test.timeout}"/>
+    </target>
+
+    <target name="compaction-validator-jar"
+            depends="compaction-validator-build"
+            description="Assemble compaction-validator JAR">
+        <manifest file="${cv.manifest}">
+            <attribute name="Built-By" value="Apache Cassandra Project"/>
+            <attribute name="Main-Class" value="org.apache.cassandra.tools.compactionvalidator.Main"/>
+        </manifest>
+        <mkdir dir="${cv.build.classes}/META-INF" />
+        <mkdir dir="${build.dir}/tools/lib/" />
+        <jar destfile="${build.dir}/tools/lib/compaction-validator.jar" manifest="${cv.manifest}">
+            <fileset dir="${cv.build.classes}"/>
+        </jar>
+    </target>
+</project>

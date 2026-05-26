@@ -965,7 +965,7 @@
     </target>
 
     <target name="jar"
-            depends="_main-jar,build-test,stress-jar,fqltool-jar,simulator-jars,sstableloader-jar,write-poms"
+            depends="_main-jar,build-test,stress-jar,fqltool-jar,simulator-jars,sstableloader-jar,compaction-validator-jar,write-poms"
             description="Assemble Cassandra JAR files">
     </target>
 
@@ -1202,7 +1202,7 @@
     <antcall target="build-test" inheritRefs="true"/>
   </target>
 
-  <target name="build-test" depends="_main-jar,stress-build-test,fqltool-build-test,sstableloader-build-test,resolver-dist-lib,simulator-jars"
+  <target name="build-test" depends="_main-jar,stress-build-test,fqltool-build-test,sstableloader-build-test,compaction-validator-build-test,resolver-dist-lib,simulator-jars"
           description="Compile test classes">
     <antcall target="_build-test"/>
     <antcall target="_check-test-names"/>
@@ -1222,6 +1222,7 @@
         <path refid="cassandra.classpath.test"/>
         <pathelement location="${fqltool.build.classes}"/>
         <pathelement location="${sstableloader.build.classes}"/>
+        <pathelement location="${cv.build.classes}"/>
      </classpath>
      <compilerarg value="-XDignore.symbol.file"/>
      <!-- needed to compile org.apache.cassandra.utils.memory.BufferPoolTest -->
@@ -1250,7 +1251,7 @@
     <macrodef name="check-test-names">
         <attribute name="annotationName"/>
         <attribute name="regex"/>
-        <attribute name="scanClassPath" default="${test.classes}:${fqltool.test.classes}:${stress.test.classes}:${sstableloader.test.classes}"/>
+        <attribute name="scanClassPath" default="${test.classes}:${fqltool.test.classes}:${stress.test.classes}:${sstableloader.test.classes}:${cv.test.classes}"/>
         <attribute name="packageName" default="org.apache.cassandra"/>
         <attribute name="expand" default="true"/>
         <attribute name="normalize" default="true"/>
@@ -1263,10 +1264,12 @@
                     <pathelement location="${fqltool.build.classes}"/>
                     <pathelement location="${stress.build.classes}"/>
                     <pathelement location="${sstableloader.build.classes}"/>
+                    <pathelement location="${cv.build.classes}"/>
                     <pathelement location="${test.classes}"/>
                     <pathelement location="${fqltool.test.classes}"/>
                     <pathelement location="${stress.test.classes}"/>
                     <pathelement location="${sstableloader.test.classes}"/>
+                    <pathelement location="${cv.test.classes}"/>
                 </classpath>
                 <jvmarg line="${java-jvmargs}"/>
                 <jvmarg value="-DscanClassPath=@{scanClassPath}"/>
@@ -1396,11 +1399,13 @@
           <pathelement location="${stress.build.classes}"/>
           <pathelement location="${fqltool.build.classes}"/>
           <pathelement location="${sstableloader.build.classes}"/>
+          <pathelement location="${cv.build.classes}"/>
           <pathelement location="${test.classes}"/>
           <path refid="cassandra.classpath.test" />
           <pathelement location="${stress.test.classes}"/>
           <pathelement location="${fqltool.test.classes}"/>
           <pathelement location="${sstableloader.test.classes}"/>
+          <pathelement location="${cv.test.classes}"/>
           <pathelement location="${test.conf}"/>
           <pathelement path="${java.class.path}"/>
           <path refid="cassandra.classpath" />
@@ -2350,4 +2355,5 @@
   <import file="${build.helpers.dir}/build-sonar.xml"/>
   <import file="${build.helpers.dir}/build-accord.xml" />
   <import file="${basedir}/tools/sstableloader/build.xml"/>
+  <import file="${basedir}/tools/compaction-validator/build.xml"/>
 </project>
