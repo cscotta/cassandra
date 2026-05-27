@@ -19,6 +19,7 @@ package org.apache.cassandra.tools.compactionvalidator;
 
 import org.apache.cassandra.tools.compactionvalidator.compaction.CompactionStats;
 import org.apache.cassandra.tools.compactionvalidator.data.DataGenStats;
+import org.apache.cassandra.tools.compactionvalidator.validation.FormatViolation;
 import org.apache.cassandra.tools.compactionvalidator.validation.MismatchReport;
 import org.apache.cassandra.tools.compactionvalidator.validation.ValidationStats;
 
@@ -139,6 +140,33 @@ public final class RunResult
      */
     public final MismatchReport mismatchReport;
 
+    /**
+     * Format-level invariant violations found by {@link
+     * org.apache.cassandra.tools.compactionvalidator.validation.FormatAuditor}
+     * after compaction completes. Populated for every run (empty list when the
+     * cursor side's output is clean); a non-empty list typically indicates a
+     * compaction-writer bug like the {@code IS_DELETED}/{@code IS_EXPIRING} flag
+     * collision (compaction bug 1A). Never {@code null}.
+     */
+    public final java.util.List<FormatViolation> formatViolations;
+
+    /**
+     * Optional structural shape tag from the schema generator. {@code "NARROW"} for
+     * 3-8 regular columns or {@code "WIDE"} for 64+ regular columns. Logged so
+     * post-mortem analysis of soak runs can correlate failures with the column
+     * shape rolled. Falls back to "(unknown)" when the run failed before the
+     * schema was generated.
+     */
+    public final String schemaShape;
+
+    /**
+     * Per-run {@code gc_grace_seconds} table option — drives whether the
+     * compaction tombstone-purge code path runs at all. Set to {@code -1} when
+     * the run failed before the schema was generated. Logged so soak-run
+     * post-mortem can correlate failures with whether GC was active.
+     */
+    public final int gcGraceSeconds;
+
     // -------------------------------------------------------------------------
     // Constructor
     // -------------------------------------------------------------------------
@@ -169,6 +197,11 @@ public final class RunResult
         this.failureDetail = builder.failureDetail;
         this.preservedDir = builder.preservedDir;
         this.mismatchReport = builder.mismatchReport;
+        this.formatViolations = builder.formatViolations != null
+                                ? java.util.Collections.unmodifiableList(builder.formatViolations)
+                                : java.util.Collections.emptyList();
+        this.schemaShape = builder.schemaShape != null ? builder.schemaShape : "(unknown)";
+        this.gcGraceSeconds = builder.gcGraceSeconds;
     }
 
     // -------------------------------------------------------------------------
@@ -246,6 +279,9 @@ public final class RunResult
         private String failureDetail;
         private String preservedDir;
         private MismatchReport mismatchReport;
+        private java.util.List<FormatViolation> formatViolations;
+        private String schemaShape;
+        private int gcGraceSeconds = -1;
 
         public Builder seed(long seed) { this.seed = seed; return this; }
         public Builder runNumber(int runNumber) { this.runNumber = runNumber; return this; }
@@ -271,6 +307,9 @@ public final class RunResult
         public Builder failureDetail(String failureDetail) { this.failureDetail = failureDetail; return this; }
         public Builder preservedDir(String preservedDir) { this.preservedDir = preservedDir; return this; }
         public Builder mismatchReport(MismatchReport mismatchReport) { this.mismatchReport = mismatchReport; return this; }
+        public Builder formatViolations(java.util.List<FormatViolation> formatViolations) { this.formatViolations = formatViolations; return this; }
+        public Builder schemaShape(String schemaShape) { this.schemaShape = schemaShape; return this; }
+        public Builder gcGraceSeconds(int gcGraceSeconds) { this.gcGraceSeconds = gcGraceSeconds; return this; }
 
         /** Builds the {@link RunResult}. */
         public RunResult build()

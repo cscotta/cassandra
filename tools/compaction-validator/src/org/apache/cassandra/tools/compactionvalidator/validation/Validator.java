@@ -35,18 +35,27 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Clustering;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.PartitionPosition;
+import org.apache.cassandra.db.Slice;
+import org.apache.cassandra.db.Slices;
+import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.partitions.UnfilteredPartitionIterator;
 import org.apache.cassandra.db.partitions.UnfilteredPartitionIterators;
+import org.apache.cassandra.db.rows.Row;
+import org.apache.cassandra.db.rows.Unfiltered;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
+import org.apache.cassandra.db.rows.UnfilteredRowIterators;
 import org.apache.cassandra.dht.AbstractBounds;
 import org.apache.cassandra.dht.Bounds;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.dht.Murmur3Partitioner;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.sstable.ISSTableScanner;
+import org.apache.cassandra.io.sstable.SSTableReadsListener;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.io.sstable.format.big.BigTableReader;
 
 /**
  * Two-phase validator that compares the SSTables produced by the legacy and cursor
@@ -178,6 +187,16 @@ public final class Validator
         try
         {
             DecoratedKey mismatchKey = phaseAFindMismatch();
+
+            // If forward-scan Phase A passed, run the depth-checks pass next.
+            // This is a SINGLE combined walk that does both per-partition reverse
+            // iteration (catches bug 2's broken {@code prevUnfilteredSize}) and
+            // end-of-partition indexed point reads (catches bug 3's Index.db
+            // final-block off-by-one). Sharded across the same {@link
+            // #validationThreads} workers as Phase A so it saturates cores.
+            if (mismatchKey == null)
+                mismatchKey = phaseDepthChecksFindMismatch();
+
             if (mismatchKey == null)
                 return Optional.empty();
 
@@ -392,6 +411,269 @@ public final class Validator
                 if (legacyPart != null) legacyPart.close();
                 if (cursorPart != null) cursorPart.close();
             }
+        }
+    }
+
+    // ---- Phase Depth-Checks (reverse-scan + indexed point-read) ----------
+
+    /**
+     * Reverse-scan sampling stride. The pass opens one reverse iterator per
+     * sampled partition on every SSTable on each side; for soak runs that
+     * emit millions of partitions this becomes prohibitive (each open is a
+     * B-tree lookup + ~100 µs of partition-read setup, multiplied by per-side
+     * SSTable count). Compaction bug 2 affects {@em every} reverse iteration
+     * uniformly, so checking 1% of partitions per run still catches it
+     * essentially every time across a soak loop. Sampling determinism is
+     * preserved by indexing the loop counter — same seed → same sampled
+     * partitions on re-run within a given shard count.
+     */
+    private static final int REVERSE_SCAN_STRIDE = 100;
+
+    /**
+     * Indexed point-read sampling stride. Same motivation as the reverse-scan
+     * stride: per-partition iterator opens are expensive at scale. Bug 3 only
+     * manifests on partitions ≥ 64 KiB, so the sampling probability of
+     * catching it scales with how many large partitions the run produces;
+     * with the data generator's 5% wide-row + 1% large-cell knobs that's
+     * still hundreds of large partitions per 1 GiB run, easily enough to
+     * hit at the 1% sampling rate.
+     */
+    private static final int POINT_READ_STRIDE = 100;
+
+    /**
+     * Runs the combined depth-checks pass: a single forward walk that does
+     * both per-partition reverse iteration and end-of-partition indexed
+     * point reads. Sharded across {@link #validationThreads} workers using
+     * the same token-range splitter Phase A uses.
+     *
+     * <p>Combining the two checks into one walk saves the second forward
+     * pass and gives both checks the same warm scanner state per partition.
+     * Sharding lets the pass saturate cores instead of running serially on
+     * the orchestrator's thread — important because each per-partition
+     * iterator open is a small synchronous I/O that doesn't otherwise yield.
+     *
+     * <p>Returns the partition key of the first divergence (by smallest
+     * token, deterministic across shards), or {@code null} if no sampled
+     * partition diverged on either check.
+     */
+    private DecoratedKey phaseDepthChecksFindMismatch() throws Exception
+    {
+        if (validationThreads == 1)
+            return phaseDepthChecksOneShard(null);
+
+        IPartitioner partitioner = legacyCfs.getPartitioner();
+        if (!(partitioner instanceof Murmur3Partitioner))
+        {
+            // Token-range sharding requires a numeric token space we can divide
+            // evenly; same constraint as Phase A. Fall back to single-threaded
+            // walk so non-Murmur3 setups still get coverage, just serially.
+            logger.warn("Partitioner {} is not Murmur3 — depth-checks falling back to single-threaded",
+                        partitioner.getClass().getSimpleName());
+            return phaseDepthChecksOneShard(null);
+        }
+
+        List<AbstractBounds<PartitionPosition>> shards = splitMurmur3Ring(validationThreads);
+        ExecutorService pool = Executors.newFixedThreadPool(validationThreads,
+                                                            new NamedThreadFactory("compaction-validator-depth"));
+        List<Future<DecoratedKey>> futures = new ArrayList<>(shards.size());
+        try
+        {
+            for (AbstractBounds<PartitionPosition> bounds : shards)
+            {
+                final AbstractBounds<PartitionPosition> b = bounds;
+                futures.add(pool.submit(() -> phaseDepthChecksOneShard(b)));
+            }
+
+            // Collect every shard's result (don't short-circuit) so we pick the
+            // smallest-token mismatch deterministically — same convention as
+            // Phase A. Any failures across shards are merged via addSuppressed.
+            DecoratedKey best = null;
+            Exception failure = null;
+            for (Future<DecoratedKey> f : futures)
+            {
+                try
+                {
+                    DecoratedKey k = f.get();
+                    if (k != null && (best == null || k.compareTo(best) < 0))
+                        best = k;
+                }
+                catch (ExecutionException ee)
+                {
+                    Throwable cause = ee.getCause();
+                    Exception ex = (cause instanceof Exception) ? (Exception) cause : ee;
+                    if (failure == null) failure = ex;
+                    else failure.addSuppressed(ex);
+                }
+            }
+            if (failure != null)
+                throw failure;
+            return best;
+        }
+        finally
+        {
+            pool.shutdownNow();
+        }
+    }
+
+    /**
+     * Walks one shard's worth of partitions doing reverse-iter hash + indexed
+     * point-read sampling. {@code bounds == null} means "the whole ring" —
+     * used by the single-thread fallback path.
+     *
+     * <p>The forward walk enumerates partition keys (and, for indexed reads,
+     * captures the partition's last clustering). Per partition the loop
+     * decides — based on the shard-local iteration counter — whether to
+     * spend the per-partition reverse-iter cost and/or the per-partition
+     * point-read cost. Sampling makes per-iteration work bounded; sharding
+     * makes the whole pass parallel.
+     */
+    private DecoratedKey phaseDepthChecksOneShard(AbstractBounds<PartitionPosition> bounds) throws Exception
+    {
+        ColumnFilter columnFilter = ColumnFilter.all(legacyCfs.metadata());
+        SSTableReadsListener listener = new SSTableReadsListener() {};
+        boolean hasClusteringKeys = !legacyCfs.metadata().clusteringColumns().isEmpty();
+
+        long iterationIndex = 0;
+        List<ISSTableScanner> ls = openScanners(legacySSTables, bounds);
+        List<ISSTableScanner> cs = openScanners(cursorSSTables, bounds);
+        try (UnfilteredPartitionIterator legacyIter = mergeScanners(ls);
+             UnfilteredPartitionIterator cursorIter = mergeScanners(cs))
+        {
+            while (legacyIter.hasNext() && cursorIter.hasNext())
+            {
+                DecoratedKey key;
+                Clustering<?> lastClustering;
+                try (UnfilteredRowIterator lp = legacyIter.next();
+                     UnfilteredRowIterator cp = cursorIter.next())
+                {
+                    if (!lp.partitionKey().equals(cp.partitionKey()))
+                    {
+                        // Forward Phase A would already have caught this — defensive
+                        // bail so the depth-checks pass doesn't do extra work on a
+                        // known mismatch.
+                        return lp.partitionKey();
+                    }
+                    key = lp.partitionKey();
+                    // Walk the legacy side forward to find the last clustering
+                    // (used by the point-read check). Drain cursor side too so
+                    // both merge iterators advance past this partition before the
+                    // next loop iteration.
+                    Clustering<?> tail = null;
+                    while (lp.hasNext())
+                    {
+                        Unfiltered u = lp.next();
+                        if (u.isRow())
+                            tail = ((Row) u).clustering();
+                    }
+                    lastClustering = tail;
+                    while (cp.hasNext()) cp.next();
+                }
+
+                boolean checkReverse   = (iterationIndex % REVERSE_SCAN_STRIDE) == 0;
+                boolean checkPointRead = hasClusteringKeys
+                                         && lastClustering != null
+                                         && (iterationIndex % POINT_READ_STRIDE) == 0;
+                iterationIndex++;
+
+                if (checkReverse)
+                {
+                    long legacyHash = reverseHashPartition(key, legacySSTables, columnFilter, listener);
+                    long cursorHash = reverseHashPartition(key, cursorSSTables, columnFilter, listener);
+                    if (legacyHash != cursorHash)
+                        return key;
+                }
+
+                if (checkPointRead)
+                {
+                    Slices slices = Slices.with(legacyCfs.metadata().comparator,
+                                                Slice.make(lastClustering));
+                    long legacyHash = pointReadHash(key, slices, legacySSTables, columnFilter, listener);
+                    long cursorHash = pointReadHash(key, slices, cursorSSTables, columnFilter, listener);
+                    if (legacyHash != cursorHash)
+                        return key;
+                }
+            }
+            // A length mismatch here would already have been flagged by Phase A.
+        }
+        return null;
+    }
+
+    /**
+     * Opens a reversed {@link UnfilteredRowIterator} on every SSTable that may contain
+     * {@code key}, merges them, and returns the hash of the merged reverse-stream.
+     *
+     * <p>Casts each {@link SSTableReader} to {@link BigTableReader} since the
+     * validator's bootstrap forces the BIG SSTable format — the reverse-iterator API
+     * is defined on the format-specific reader, not the abstract base.
+     */
+    private static long reverseHashPartition(DecoratedKey key,
+                                             Collection<SSTableReader> sstables,
+                                             ColumnFilter columnFilter,
+                                             SSTableReadsListener listener)
+    {
+        List<UnfilteredRowIterator> iters = new ArrayList<>(sstables.size());
+        try
+        {
+            for (SSTableReader r : sstables)
+            {
+                if (!(r instanceof BigTableReader))
+                    throw new IllegalStateException(
+                        "Reverse-scan validator requires BIG format; got: " + r.getClass().getName());
+                BigTableReader btr = (BigTableReader) r;
+                iters.add(btr.rowIterator(key, Slices.ALL, columnFilter, /* reversed = */ true, listener));
+            }
+            try (UnfilteredRowIterator merged = UnfilteredRowIterators.merge(iters))
+            {
+                return PartitionHasher.hashPartition(merged);
+            }
+        }
+        catch (Throwable t)
+        {
+            // Close any opened iterators that the merge() call didn't take ownership
+            // of (most paths do; this finally is for the throw-during-construction case).
+            for (UnfilteredRowIterator it : iters)
+            {
+                try { it.close(); } catch (Throwable ignored) {}
+            }
+            throw t;
+        }
+    }
+
+    /**
+     * Opens a slice-restricted {@link UnfilteredRowIterator} on every SSTable that
+     * may contain {@code key}, merges them, and returns the hash of the resulting
+     * (forward) slice stream. Used by the indexed point-read check to compare what
+     * each side returns when seeking into a specific clustering position.
+     */
+    private static long pointReadHash(DecoratedKey key,
+                                      Slices slices,
+                                      Collection<SSTableReader> sstables,
+                                      ColumnFilter columnFilter,
+                                      SSTableReadsListener listener)
+    {
+        List<UnfilteredRowIterator> iters = new ArrayList<>(sstables.size());
+        try
+        {
+            for (SSTableReader r : sstables)
+            {
+                if (!(r instanceof BigTableReader))
+                    throw new IllegalStateException(
+                        "Indexed point-read validator requires BIG format; got: " + r.getClass().getName());
+                BigTableReader btr = (BigTableReader) r;
+                iters.add(btr.rowIterator(key, slices, columnFilter, /* reversed = */ false, listener));
+            }
+            try (UnfilteredRowIterator merged = UnfilteredRowIterators.merge(iters))
+            {
+                return PartitionHasher.hashPartition(merged);
+            }
+        }
+        catch (Throwable t)
+        {
+            for (UnfilteredRowIterator it : iters)
+            {
+                try { it.close(); } catch (Throwable ignored) {}
+            }
+            throw t;
         }
     }
 

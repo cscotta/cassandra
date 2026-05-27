@@ -113,10 +113,12 @@ public class RunLogger implements Closeable
         writer.newLine();
 
         // Schema line
-        writer.write(String.format("  Schema:  %s.%s  (%d PK, %d CK, %d static, %d regular cols)",
+        writer.write(String.format("  Schema:  %s.%s  (%d PK, %d CK, %d static, %d regular cols, shape=%s, gc_grace=%ds)",
                                    result.keyspaceName, result.tableName,
                                    result.partitionKeyCount, result.clusteringKeyCount,
-                                   result.staticColumnCount, result.regularColumnCount));
+                                   result.staticColumnCount, result.regularColumnCount,
+                                   result.schemaShape,
+                                   result.gcGraceSeconds));
         writer.newLine();
 
         // UCS configuration line
@@ -249,6 +251,44 @@ public class RunLogger implements Closeable
             }
         }
 
+        // Format-violation block — emitted whenever the FormatAuditor reported something,
+        // regardless of pass/fail. Top-line shows total + per-kind counts; full per-violation
+        // detail follows so a grep on the log gives both quick ("how many?") and deep
+        // ("which cells?") investigations from the same artifact.
+        if (result.formatViolations != null && !result.formatViolations.isEmpty())
+        {
+            java.util.Map<org.apache.cassandra.tools.compactionvalidator.validation.FormatViolation.Kind, Integer> kindCounts =
+                new java.util.EnumMap<>(org.apache.cassandra.tools.compactionvalidator.validation.FormatViolation.Kind.class);
+            for (org.apache.cassandra.tools.compactionvalidator.validation.FormatViolation v : result.formatViolations)
+                kindCounts.merge(v.kind, 1, Integer::sum);
+
+            writer.write(String.format("  Format:  %d violation(s) on experiment side:",
+                                       result.formatViolations.size()));
+            writer.newLine();
+            for (java.util.Map.Entry<org.apache.cassandra.tools.compactionvalidator.validation.FormatViolation.Kind, Integer> e
+                 : kindCounts.entrySet())
+            {
+                writer.write(String.format("    %-32s  %d", e.getKey().cliName(), e.getValue()));
+                writer.newLine();
+            }
+            // Cap the per-violation detail dump at 32 entries so a runaway audit doesn't
+            // blow the log file up. Anything past that is summarised in the line above.
+            int capped = Math.min(32, result.formatViolations.size());
+            for (int i = 0; i < capped; i++)
+            {
+                org.apache.cassandra.tools.compactionvalidator.validation.FormatViolation v = result.formatViolations.get(i);
+                writer.write("    [" + v.kind.cliName() + "] sstable=" + shortName(v.sstableFilename)
+                             + " pk=" + v.partitionKeyHex + " — " + v.detail);
+                writer.newLine();
+            }
+            if (result.formatViolations.size() > capped)
+            {
+                writer.write(String.format("    ... %d more violations elided",
+                                           result.formatViolations.size() - capped));
+                writer.newLine();
+            }
+        }
+
         writer.flush();
     }
 
@@ -311,5 +351,17 @@ public class RunLogger implements Closeable
         if (count >= 1_000L)
             return String.format("%.1fK", count / 1_000.0);
         return Long.toString(count);
+    }
+
+    /**
+     * Returns the basename of an absolute SSTable path so format-violation lines stay
+     * single-screen-readable. Falls back to the full path when the input has no
+     * separator.
+     */
+    private static String shortName(String fullPath)
+    {
+        if (fullPath == null) return "(unknown)";
+        int slash = Math.max(fullPath.lastIndexOf('/'), fullPath.lastIndexOf('\\'));
+        return slash >= 0 ? fullPath.substring(slash + 1) : fullPath;
     }
 }

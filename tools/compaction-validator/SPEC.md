@@ -47,23 +47,35 @@ tools/compaction-validator/
   build.xml                             ant subproject (imports root)
   configs/
     sample.yaml                         starting-point YAML
+    iterator-vs-cursor.yaml             baseline ITERATOR-vs-CURSOR comparison
+    smoke-coverage.yaml                 small-target smoke run for the bug-coverage features
+  plans/
+    cursor-bug-coverage.md              design doc for the bug-1A-through-1B-through-4 coverage extensions
   src/
     org/apache/cassandra/db/compaction/
       PipelineSelector.java             enum + pipeline factory
-      DirectCompactionRunner.java       same-package bridge into CompactionTask
+      DirectCompactionRunner.java       same-package bridge into CompactionTask;
+                                          accepts a fixed-nowInSec override
     org/apache/cassandra/tools/compactionvalidator/
       Main.java                         picocli entry
       RunLoop.java                      seed-progressing outer loop
-      RunOrchestrator.java              one-run orchestration
-      RunResult.java                    immutable result record + Builder
+      RunOrchestrator.java              one-run orchestration; pins nowInSec,
+                                          runs FormatAuditor, classifies
+                                          format violations, catches
+                                          CorruptSSTableException
+      RunResult.java                    immutable result record + Builder;
+                                          carries schemaShape, gcGraceSeconds,
+                                          formatViolations
       RunSeed.java                      SplitMix64-based seed progression
       SstableInfo.java                  POJO for events
       ProgressTap.java                  reporter interface
       PlainTextReporter.java            --no-ui sink
       compaction/
-        CompactionDriver.java           drives one CFS through compaction
+        CompactionDriver.java           drives one CFS through compaction;
+                                          accepts pinned-nowInSec
         CompactionStats.java            mutable counters
-        ParallelCompactor.java          runs control + experiment in parallel
+        ParallelCompactor.java          runs control + experiment in parallel;
+                                          captures the pinned nowInSec
         SstableSetManager.java          per-run dir + hard-link layout
       config/
         RunConfig.java                  top-level YAML root
@@ -75,15 +87,23 @@ tools/compaction-validator/
         CompressionSpec.java            {class, options} for compression
         ConfigParser.java               SnakeYAML-backed loader
       data/
-        DataGenerator.java              parallel CQLSSTableWriter driver
+        DataGenerator.java              parallel CQLSSTableWriter driver;
+                                          multi-row partitions, TTL gen,
+                                          power-law cells, wide-row clause
         DataGenStats.java               counters w/ monotonic estimate
         DataGeneratorDeterminismDriver.java   stand-alone determinism check
       logging/
-        RunLogger.java                  append-only run log
+        RunLogger.java                  append-only run log; emits Schema:,
+                                          Errata:, Format: blocks
         SystemInfo.java                 startup-header system stats
       schema/
-        SchemaGenerator.java            seed-driven schema generator
-        GeneratedSchema.java            schema + per-side CQL builder
+        SchemaGenerator.java            seed-driven schema generator;
+                                          rolls SchemaShape and
+                                          gc_grace_seconds
+        GeneratedSchema.java            schema + per-side CQL builder;
+                                          carries shape / nullFraction /
+                                          gcGraceSeconds
+        SchemaShape.java                NARROW vs WIDE shape tag
         ColumnInfo.java                 column descriptor POJO
       tui/
         TuiManager.java                 Lanterna lifecycle + render loop
@@ -105,20 +125,33 @@ tools/compaction-validator/
         SeedUtil.java                   per-component seed derivation
         RateTracker.java                EWMA helper
       validation/
-        Validator.java                  Phase A / Phase B driver
+        Validator.java                  Phase A / depth checks / Phase B driver;
+                                          combined parallel reverse-scan +
+                                          point-read pass; CorruptSSTableException
+                                          handling
         PartitionHasher.java            xxhash64 over Unfiltered stream
-        PartitionComparator.java        cell-by-cell deep equals
+        PartitionComparator.java        cell-by-cell deep equals;
+                                          keyspace-agnostic column equivalence
         MismatchReport.java             mismatch detail bundle
         ValidationStats.java            atomic counters + errata map
-        ErrataRule.java                 known-bug catalogue (enum)
-        ErrataChecker.java              rule-based partition matcher
+        ErrataRule.java                 known-bug catalogue (enum) with
+                                          cell-pair / resurrected-row /
+                                          resurrected-cell matchers and
+                                          forFormatViolation Kind→Rule mapping
+        ErrataChecker.java              rule-based partition matcher with
+                                          merge-walk column iteration
+        FormatAuditor.java              parallel byte-/semantic-level
+                                          invariant audit on experiment SSTables
+        FormatViolation.java            kind enum + violation record
   test/unit/
     org/apache/cassandra/db/compaction/
       DirectCompactionRunnerApiTest.java
     org/apache/cassandra/tools/compactionvalidator/
       compaction/SstableSetManagerTest.java
       data/DataGeneratorDeterminismTest.java
+      schema/WideSchemaTest.java
       validation/ErrataCheckerTest.java
+      validation/FormatAuditorTest.java
       validation/PartitionHasherTest.java
       validation/ValidatorTest.java
 ```
@@ -253,26 +286,45 @@ directory names are routing slots, not display labels; see §10.)
 
 ### Phase 1 — schema generation
 `SchemaGenerator.generate(rootSeed)`:
-- 1–2 partition-key columns from `{int, bigint, uuid, ascii, text}`
-- 0–2 clustering-key columns with random ASC/DESC; if any STATIC columns are
-  picked but ckCount==0, statics drop (CQL doesn't allow them)
-- 0–2 STATIC columns from the regular type set
-- 3–8 regular columns from
+- Rolls a {@link SchemaShape}: 90% `NARROW`, 10% `WIDE`. Stored on the
+  `GeneratedSchema` so the data generator and the run log can act on it.
+- Per-shape column-count bands:
+  - `NARROW`: 1–2 PK, 0–2 CK, 0–2 STATIC, 3–8 regular
+  - `WIDE`: 1–2 PK, 0–2 CK, 0–32 STATIC, 64–200 regular
+- Clustering keys get random ASC/DESC; if any STATIC columns are picked
+  but ckCount==0, statics drop (CQL doesn't allow them).
+- Type catalogue:
+  PKs from `{int, bigint, uuid, ascii, text}`, regulars from
   `{int, bigint, uuid, ascii, text, timestamp, boolean, float, double, blob,
     varint, decimal, frozen<set<text>>, frozen<list<int>>,
     frozen<map<text,int>>, tuple<int,text>}`
   (collections frozen because `CursorCompactor.unsupportedSchema` rejects
-  non-frozen / "complex" columns)
+  non-frozen / "complex" columns).
 - UCS defaults: `target_sstable_size` ∈ {64, 128, 256, 512} MiB,
-  `base_shard_count` ∈ {1, 2, 4}
-- LZ4 chunk size ∈ {4, 16, 64, 256, 1024} KiB
+  `base_shard_count` ∈ {1, 2, 4}; LZ4 chunk size ∈ {4, 16, 64, 256, 1024} KiB.
+- **Per-run NULL fraction** rolled into the schema: `NARROW` from
+  `[0.05, 0.50]`, `WIDE` from `[0.70, 0.95]`. Wide-shape values are tuned
+  high so cursor compaction's column-subset encoding path actually fires
+  on the rows the data generator emits — it only kicks in when the row's
+  cell count is much smaller than the regular-column count.
+- **`gc_grace_seconds` rotation** sampled per seed so soak runs exercise
+  the tombstone-purge code path some of the time:
+  - 40% `0` — aggressive purge, every tombstone eligible during compaction
+  - 30% `3 600` — 1 hour, GC machinery active but nothing in our run window
+    is purgeable
+  - 20% `86 400` — 1 day
+  - 10% `864 000` — Cassandra default (no purge in any reasonable run window)
+  Both pipelines see the same option, so a divergence in their purge
+  decisions is necessarily a cursor-vs-iterator bug.
 - Keyspace name `cvtest_<low32(seed)>`, table name `t`, deterministic
-  `TableId` derived from `keyspace.tableName` for predictable disk paths
-- Returns `GeneratedSchema` with column lists + `defaultCompaction` /
-  `defaultCompression` specs (populated even when not testing those axes).
+  `TableId` derived from `keyspace.tableName` for predictable disk paths.
+- Returns `GeneratedSchema` with column lists, `defaultCompaction` /
+  `defaultCompression` specs, the rolled `shape`, `nullFraction`, and
+  `gcGraceSeconds`.
 
 `GeneratedSchema.buildCqlForSide(keyspaceOverride, side)` overlays the side's
-specs on the defaults and emits `CREATE TABLE`.
+specs on the defaults and emits `CREATE TABLE ... WITH compaction = {...}
+AND compression = {...} AND gc_grace_seconds = N [AND CLUSTERING ORDER BY ...]`.
 
 ### Phase 2 — data generation
 `DataGenerator` runs `datagen_threads` parallel `CQLSSTableWriter` instances,
@@ -283,14 +335,63 @@ counter raced on `AtomicLong` updates from per-thread flush listeners and
 made the same `(seed, threads)` produce slightly different per-thread
 partition counts.
 
+The INSERT statement always carries a trailing `USING TTL ?` bind so the
+writer can choose per row whether to apply a TTL (TTL=0 maps to "no TTL"
+in Cassandra; the cell is written without `IS_EXPIRING_MASK`).
+
+**Partition shape — depends on whether the schema has clustering keys:**
+- `ckCount >= 1` → multi-row partitions. The PK is generated *once* per
+  outer iteration via `generatePartitionKey(...)` and reused across
+  `rowsPerPartition` rows that each get fresh CK / static / regular cells
+  via `buildRowValuesWithTtlSharingPk(...)`. `recordPartition()` fires
+  once per outer iteration. This is the partition shape Cassandra's
+  format actually expects: many rows, single partition key.
+- `ckCount == 0` → each row IS its own partition (CQL semantics: multiple
+  writes with the same PK on a CK-less table merge into one row, so emitting
+  multi-row "partitions" with the same PK would just be redundant
+  overwrites). Each row generates a fresh PK and bumps `recordPartition()`
+  per row, so `partitionsWritten` matches the actual unique partition
+  count the validator will see post-compaction.
+
 Per-thread RNG draws (deterministic given the seed):
 1. `maxSstableMib` (range `[1, 512]`)
 2. Loop:
-   - `rowsPerPartition = 1 + nextInt(16)`
-   - For each row: `Object[] values = buildRowValuesStatic(schema, rng)`
-     (PK columns never null; non-PK columns null with `NULL_FRACTION = 0.10`)
+   - **Wide-row roll**: with probability 5%, `rowsPerPartition` is drawn
+     from `[100, 1000]`; otherwise `[1, 16]`. Wide rows + occasional large
+     cells (below) drive partition size past the 64 KiB Index.db block
+     boundary that compaction bug 3 needs.
+   - For each row in the partition: build values via
+     `buildRowValuesWithTtl[SharingPk]`, append a TTL bind, call
+     `writer.addRow(values)`.
 
-`writer.addRow(values)` → CQLSSTableWriter buffers and flushes when the
+**Per-cell value choice (`pickColumnValue`)**:
+- `NARROW` shape: each non-PK / non-CK column rolls live with probability
+  `1 - schema.nullFraction`, otherwise NULL (which CQL serialises as a
+  per-cell tombstone).
+- `WIDE` shape: each non-PK / non-CK column rolls
+  - `ByteBufferUtil.UNSET_BYTE_BUFFER` (the column is OMITTED — no cell
+    written, exercises cursor compaction's column-subset encoding path)
+    with probability `nullFraction`,
+  - NULL (tombstone) with a fixed 10% probability of the remainder,
+  - a typed live value otherwise.
+
+**Per-cell size distribution** — bumped from the original 256-byte cap so
+some partitions cross 64 KiB:
+- `blob`: 99% drawn from `[1, 256]` bytes, 1% drawn from `[1024, 1 048 576]`
+  (1 MiB max).
+- `text` / `ascii`: 99% drawn from `[1, 64]` chars, 1% from `[256, 16 384]`.
+- Numeric / boolean / uuid columns are unchanged.
+
+**TTL distribution** — appended once per row:
+- 90% TTL = 0 (no expiry).
+- 10% TTL drawn from `[7 days, 30 days]`. Long enough that no cell can
+  expire during a single validator run regardless of how long compaction or
+  validation takes — avoids the false-positive class where the cursor and
+  iterator pipelines might otherwise evaluate expiry at slightly different
+  wall-clock times. The bug-1B trigger only depends on cells carrying the
+  `IS_EXPIRING_MASK` flag, not on their actually expiring.
+
+`writer.addRow(values)` → `CQLSSTableWriter` buffers and flushes when the
 buffer hits `maxSstableMib`. The on-flush listener releases SSTableReader
 refs immediately to avoid file-descriptor pressure.
 
@@ -329,8 +430,21 @@ instant its driver returns so a side that finishes first immediately freezes
 its rate metrics (avoids the rate counter visibly drifting toward zero while
 the other side is still going).
 
+**Pinned `nowInSec`:** `ParallelCompactor.run()` captures one
+`FBUtilities.nowInSeconds()` *before* dispatching the two drivers and
+threads it through `CompactionDriver` → `DirectCompactionRunner`. Both
+sides therefore compute the same `gcBefore = nowInSec - gcGraceSeconds`
+and make identical tombstone-purge / TTL-expiry decisions. Without this,
+a 1–2 second drift between when the two threads enter their pipeline
+loop could let one side drop a near-expiry cell that the other still
+considered live — a spurious "divergence" that's actually just clock
+noise. With the pin, GCGS rotation (Phase 1) becomes a clean correctness
+test: both pipelines see identical inputs *and* identical purge time.
+
 `CompactionDriver`:
-- Accepts a `taskConcurrency` per backend (config `compaction_threads`).
+- Accepts a `taskConcurrency` per backend (config `compaction_threads`)
+  and an optional `fixedNowInSec` override propagated from
+  `ParallelCompactor`.
 - Outer loop: `getNextBackgroundTasks(now)` until empty, with
   `MAX_ITERATIONS = 1000` cap as anti-spin
 - Per round: submit each `CompactionTask` to a fixed-size pool, wait for all
@@ -359,12 +473,61 @@ specifically so it can access `CompactionTask`'s `protected` fields):
   `PipelineSelector.create(backend, ...)` → opens the
   `CompactionAwareWriter` from `task.getCompactionAwareWriter` → loops
   `pipeline.processNextPartitionKey()` → `task.finish(pipeline)`
+- Uses `fixedNowInSecOverride` when set (instead of reading
+  `FBUtilities.nowInSeconds()` at compaction-start time) so both sides of
+  an A/B comparison see the same `nowInSec`
 - Periodically (every ~1MB) invokes `ProgressCallback.onProgress(...)` and
   `onSStableEmitted(...)` so the TUI gets live throughput
 
 `PipelineSelector.Backend` enum: `ITERATOR`, `CURSOR`. `create(...)` selects
 between `IteratorCompactionPipeline` and `CursorCompactionPipeline`,
 bypassing the global `cursorCompactionEnabled` flag.
+
+### Phase 4b — format-level invariant audit
+`FormatAuditor.audit(experimentSSTables, clusteringComparator)` walks each
+experiment-side SSTable in parallel (up to `availableProcessors()` workers,
+one task per SSTable) and records `FormatViolation`s on cells/rows that
+violate well-formedness invariants the standard SSTable reader is too
+tolerant to surface. Synchronised result list, no shared writer state past
+the appended violations.
+
+The control side is the format reference and is never audited — any
+divergence-relative-to-itself would be a different (more serious) class of
+bug than the cursor-vs-iterator validation this tool is built for.
+
+**Invariants checked** (per cell, except where noted):
+
+- `FLAG_DELETE_AND_EXPIRE` — an "expiring" cell whose `localDeletionTime`
+  doesn't satisfy `(timestamp / 1_000_000) + ttl` (within ±2 seconds).
+  This is the read-side fingerprint of compaction bug 1A: the writer set
+  both `IS_DELETED_MASK` and `IS_EXPIRING_MASK` in the on-disk flags
+  byte; the deserialiser's `else if` chain takes the IS_EXPIRING branch
+  and reads `(ttl, ldt)` where the value on disk was the IS_DELETED-style
+  deletion time, not `writetime + ttl`.
+- `ROW_OUT_OF_ORDER` — strict reverse (`prev > curr`) clustering ordering
+  within a partition. A real writer-ordering bug; *not* mapped to any
+  cascade rule.
+- `DUPLICATE_CLUSTERING` — equal (`prev == curr`) clustering ordering
+  within a partition. Structurally invalid, but in practice almost always
+  the downstream symptom of bug 1A: once the deserialiser drifts past a
+  misaligned flag-byte cell, garbage bytes can parse as a "row marker"
+  with the same clustering as the previous row.
+- `TIMESTAMP_NEGATIVE` / `TTL_NEGATIVE` — the deserialiser's `vint`
+  decode underflows the long range from misaligned bytes, surfacing
+  wildly negative values that no `CQLSSTableWriter` codepath produces.
+  Both are downstream cascade symptoms of bug 1A.
+- `SCANNER_FAILURE` — wrapper kind for the `CorruptSSTableException` (or
+  any other `Throwable`) the deserialiser throws when it eventually hits
+  bounds it can't satisfy. Catches the terminal point of the bug-1A
+  cascade.
+
+`RunOrchestrator` collects the full violation list into `RunResult`,
+classifies each into "suppressed by an active errata" vs "unsuppressed" via
+`ErrataRule.forFormatViolation(kind)`, and folds the suppression decision
+into the standard pass/fail flow (§8). The `Validator` (§5 Phase 5) is
+also wrapped in a `try/catch (CorruptSSTableException)` that converts the
+exception to a `SCANNER_FAILURE` violation rather than letting it abort the
+run before suppression is consulted.
 
 ### Phase 5 — validation
 `Validator.validate()`:
@@ -379,6 +542,29 @@ bypassing the global `cursorCompactionEnabled` flag.
   returns the partition key. Aggregator picks the **smallest-token**
   mismatch across all shards as the canonical report — keeps reproductions
   deterministic regardless of shard scheduling.
+- **Phase Depth-Checks (parallel, sampled)**: only runs if Phase A passed.
+  A *single combined* forward walk per shard (sharded across the same
+  `validation_threads` token ranges as Phase A) does both:
+  - **Reverse-iter hash** — opens a per-partition reversed
+    `UnfilteredRowIterator` (via `BigTableReader.rowIterator(key, Slices.ALL,
+    ColumnFilter.all, reversed=true, ...)`), merges across SSTables, hashes
+    the reverse stream, and compares. Catches compaction bug 2's broken
+    `prevUnfilteredSize` (forward bytes are correct, reverse seek lands in
+    the wrong place).
+  - **Indexed point-read** — for partitions whose schema has clustering
+    keys, captures the partition's last clustering during the forward walk,
+    then issues a point read via `BigTableReader.rowIterator(key,
+    Slices.with(Slice.make(lastClustering)), ...)` on each side and
+    compares the slice hash. Catches compaction bug 3's off-by-one in the
+    Index.db final-block width.
+  Sampled at one in 100 partitions per shard (`REVERSE_SCAN_STRIDE` /
+  `POINT_READ_STRIDE`). Bug 2 affects every reverse iteration uniformly so
+  1% sampling still catches it essentially every run; bug 3 only fires on
+  partitions ≥ 64 KiB and the data generator's wide-row + power-law-cell
+  knobs produce enough of those per 1 GiB run that 1% sampling reliably
+  hits multiple. The combined forward walk avoids re-iterating the
+  partition list twice; the sharding lets the pass saturate cores instead
+  of running serially on the orchestrator's thread.
 - **Phase B (deep compare)**: re-opens both sides' scanners restricted to
   the offending partition's bounds and runs `PartitionComparator.compare`,
   producing a `MismatchReport` that walks partition key → partition-level
@@ -386,12 +572,21 @@ bypassing the global `cursorCompactionEnabled` flag.
   deletion / cells (column metadata, value bytes, timestamp, TTL,
   localDeletionTime, counter flag, complex path). First difference wins.
 
+  Column equality inside `PartitionComparator.compareColumnData` uses a
+  keyspace-agnostic check (name + kind + position + CQL3 type) rather
+  than `ColumnMetadata.equals` — the two sides come from independent
+  per-side keyspaces, so the strict equals would always return false and
+  produce a misleading "column metadata differs" error before the
+  cell-value check ran. This mirrors `ErrataChecker.sameColumn`'s
+  workaround.
+
 `ValidationStats`:
 - `partitionsChecked`, `rowsChecked`, `partitionMismatches` — `AtomicLong`
   (concurrent shard updates)
 - `errataOccurrences: EnumMap<ErrataRule, AtomicLong>` — pre-populated for
   all rules, incremented from the Validator's hash-mismatch path when
-  `ErrataChecker.matches(...)` fires (§8)
+  `ErrataChecker.matches(...)` fires (§8) and from `RunOrchestrator`'s
+  format-violation classification path (Phase 4b)
 - `durationMs` — single writer (Validator's outer block), volatile long
 - `hasMismatches()` returns `true` only when `partitionMismatches > 0` —
   errata-suppressed partitions don't count.
@@ -400,6 +595,10 @@ bypassing the global `cursorCompactionEnabled` flag.
 - `RunResult.Builder` is populated through every phase; the orchestrator
   builds the final immutable `RunResult` and fires `reporter.onRunComplete`
   or `onRunFailed` (with the `MismatchReport`).
+- `RunResult` carries the schema's rolled `shape` (`NARROW` / `WIDE`) and
+  `gcGraceSeconds` so post-mortem analysis can correlate failures with
+  the structural / GC dimensions of the run, plus the
+  `formatViolations` list from Phase 4b for the same reason.
 - On success and `cleanupOnSuccess`, the per-run dir is wiped AFTER
   `cfs.invalidate(false, dropData=true)` — invalidate writes a transaction
   log that needs the dir to still exist.
@@ -473,43 +672,96 @@ Mechanism for tolerating known cursor-compaction bugs while a fix is
 in-flight. When a Phase A hash mismatch's per-cell differences are fully
 explained by an active rule, the validator records an occurrence under that
 rule and continues — the run still PASSes if no other divergence is found.
-Any new divergence still halts loudly.
+Any new divergence still halts loudly. The same suppression set also
+governs whether `FormatAuditor` violations from Phase 4b cause failure.
 
-### Rules (as of writing)
+### Active rules
 
-`ErrataRule.EQUAL_TIMESTAMP_TIEBREAKER` — CLI name `equal-ts-tiebreaker`.
+| `cliName()` | `ErrataRule` | Bug |
+|---|---|---|
+| `equal-ts-tiebreaker` | `EQUAL_TIMESTAMP_TIEBREAKER` | Cursor's `mergeCells` `COMPARE` branch inverts `compareUnsigned` — picks smaller value bytes when two cells share `(ts, ttl, ldt, counter-flag)` but differ in value. |
+| `tombstone-expiring-flags-both-set` | `TOMBSTONE_EXPIRING_FLAGS_BOTH_SET` | Bug 1A — cursor sets BOTH `IS_DELETED_MASK` and `IS_EXPIRING_MASK` in the on-disk flags byte. Detected via the `FormatAuditor`'s expiration-formula invariant. |
+| `tombstone-resurrected-by-expiring` | `TOMBSTONE_RESURRECTED_BY_EXPIRING` | Bug 1B — at equal timestamp, cursor wins for an expiring cell where `Cells.resolveRegular` requires the tombstone to win (silently resurrects deleted data). |
+| `prev-unfiltered-size-zero` | `PREV_UNFILTERED_SIZE_ZERO` | Bug 2 — cursor always writes `prevUnfilteredSize=0`. Caught by the depth-checks pass's reverse-iter hash. |
+| `index-block-width-off-by-one` | `INDEX_BLOCK_WIDTH_OFF_BY_ONE` | Bug 3 — cursor's `Index.db` final-block width is off by one for partitions ≥ 64 KiB. Caught by the depth-checks pass's indexed point-read. |
+| `wide-column-subset-dropped-last` | `WIDE_COLUMN_SUBSET_DROPPED_LAST` | Bug 4 — cursor's column-subset row encoder drops the highest-position cell. Reserved for soak-loop suppression; no per-cell matcher today (Phase B's row diff catches it directly). |
 
-Discovered 2026-05-25 against seed `0x693F6A0B09368F0C` partition `wUZ`.
-`CursorCompactor.mergeCells()`'s `COMPARE` branch inverts the tie-breaker:
-when two cells share a timestamp, TTL, and `localDeletionTime` but differ in
-value bytes, cursor picks the cell with the **smaller** bytes; legacy
-correctly picks the larger one per `Cells.resolveRegular()`'s
-`compareValues(left,right) >= 0 ? left : right`.
+### Matcher methods on `ErrataRule`
 
-The rule's matcher predicate fires when:
-- `legacy.timestamp() == cursor.timestamp()`
-- `legacy.ttl() == cursor.ttl()`
-- `legacy.localDeletionTime() == cursor.localDeletionTime()`
-- `legacy.isCounterCell() == cursor.isCounterCell()`
+- `explainsCellValueDifference(legacy, cursor)` — narrow value-only check.
+  Default false. Used by `equal-ts-tiebreaker` whose entire signature is
+  "everything matches except the value bytes."
+- `explainsCellPairDifference(legacy, cursor)` — broad multi-field check.
+  Consulted *before* the value-only path so a rule that spans multiple
+  fields (e.g. bug 1B's tombstone-vs-expiring with different ttl, ldt,
+  AND value) can suppress without being disqualified by the
+  "non-value field also differs" guard. Used by
+  `tombstone-resurrected-by-expiring` and
+  `tombstone-expiring-flags-both-set`.
+- `explainsResurrectedRow(cursorRow)` — row-level asymmetry: legacy's row
+  collapsed to empty (e.g. via `Row.Merger` when same-TS tombstones
+  reconcile away), cursor's row still carries cells. Used by
+  `tombstone-resurrected-by-expiring`'s static-cell variant — fires
+  when the cursor row contains only expiring + tombstone cells with at
+  least one expiring.
+- `explainsResurrectedCell(cursorCell)` — column-within-row asymmetry:
+  cursor has an extra cell for a column legacy doesn't carry in this
+  row (cursor's bug-1B kept an expiring cell that legacy's compaction
+  correctly dropped). Used by `tombstone-resurrected-by-expiring`'s
+  column-extra variant — fires when the extra cell is expiring.
 
-(Anything else is treated as a different defect and not suppressed.)
+### Format-violation → rule mapping (`forFormatViolation`)
+
+The `FormatAuditor` produces violations whose kinds correspond to specific
+checkpoints in compaction bug 1A's cascade. `ErrataRule.forFormatViolation(kind)`
+maps each suppressible kind to `TOMBSTONE_EXPIRING_FLAGS_BOTH_SET` so a
+soak run with that rule active rides through the whole cascade rather than
+halting on each downstream symptom:
+
+| `FormatViolation.Kind` | Maps to | Comment |
+|---|---|---|
+| `FLAG_DELETE_AND_EXPIRE` | `TOMBSTONE_EXPIRING_FLAGS_BOTH_SET` | Direct cell-level signature. |
+| `DUPLICATE_CLUSTERING` | `TOMBSTONE_EXPIRING_FLAGS_BOTH_SET` | Cascade: deserialiser reads garbage as a row marker with the same clustering as the previous row. |
+| `TIMESTAMP_NEGATIVE` | `TOMBSTONE_EXPIRING_FLAGS_BOTH_SET` | Cascade: vint timestamp reads from misaligned bytes underflow. |
+| `TTL_NEGATIVE` | `TOMBSTONE_EXPIRING_FLAGS_BOTH_SET` | Cascade: same idea on the TTL slot. |
+| `SCANNER_FAILURE` | `TOMBSTONE_EXPIRING_FLAGS_BOTH_SET` | Cascade terminus: deserialiser hits bounds checks and throws. |
+| `ROW_OUT_OF_ORDER` | *unmapped* | Strict reverse (`prev > curr`) — would indicate a real ordering bug outside the bug-1A cascade. Always fails. |
 
 ### Architecture
 
-- `ErrataRule` enum — each entry has `cliName()`, `description()`, and a
-  per-rule `explainsCellValueDifference(legacy, cursor)` predicate. CLI
-  parsing via `ErrataRule.parseCliList(commaSeparated)` rejects unknown
-  names with the full known-rule list in the error message.
+- `ErrataRule` enum — each entry has `cliName()`, `description()`, and
+  per-rule overrides of the matcher methods listed above. CLI parsing via
+  `ErrataRule.parseCliList(commaSeparated)` rejects unknown names with the
+  full known-rule list in the error message.
 - `ErrataChecker` — given a partition pair, walks both sides in lockstep
   (mirroring `PartitionComparator`'s structure) and asks each active rule
-  whether each cell-pair difference fits its predicate. If EVERY
-  difference is covered by SOME rule, returns the set of fired rules. Any
-  unrelated difference (length mismatch, partition-level deletion diff,
-  row liveness diff, range-tombstone diff, complex column data, etc.)
-  returns the empty set → caller treats as a real mismatch.
+  whether each per-cell, per-row, or row-asymmetry difference fits its
+  predicates. The walk uses a *merge-walk* by column name (not lockstep)
+  so cursor-extra columns can be consulted via
+  `explainsResurrectedCell` without bailing on the first column-metadata
+  mismatch. The body iteration tail also handles cursor-has-more-rows
+  asymmetry via `explainsResurrectedRow`. Static-row asymmetry
+  (legacy empty / cursor non-empty) goes through the same per-row
+  matcher. If EVERY difference is covered by SOME rule, returns the set
+  of fired rules; otherwise returns the empty set → caller treats as a
+  real mismatch.
+- Column equality inside `ErrataChecker.sameColumn` uses a
+  name+kind+position check, NOT `ColumnMetadata.equals`, because the
+  two sides come from different keyspaces (different `ksName`) and the
+  default equals would never agree. `PartitionComparator.compareColumnData`
+  uses the same workaround to avoid producing misleading "column metadata
+  differs: control=c3 experiment=c3" failures.
 - `Validator.checkErrataForPartition(key)` — re-scans just that partition
   with bounds-restricted scanners (cheap), runs the matcher, and returns
   the rule set.
+- `RunOrchestrator` classifies `FormatAuditor` violations into "suppressed
+  by an active errata" vs "unsuppressed" using
+  `forFormatViolation(kind)`; the unsuppressed list is treated as a hard
+  failure (with a synthetic `MismatchReport` pointing at the first
+  violation) when Phase A passes but the auditor saw something. The
+  validator's `validate()` is wrapped in `try/catch (CorruptSSTableException)`
+  that converts the throwable to a `SCANNER_FAILURE` violation and
+  re-enters the suppression decision rather than aborting the run.
 - `ValidationStats.errataOccurrences` — `EnumMap<ErrataRule, AtomicLong>`
   pre-populated for all rules. Multiple shards bump counters via
   `incrementAndGet` without locking.
@@ -517,12 +769,8 @@ The rule's matcher predicate fires when:
   - `PlainTextReporter.onValidationComplete` prints a Unicode-bordered
     block listing each rule + count when total > 0.
   - `RunLogger` writes an `Errata: N suppressed (run still PASS):` block
-    with per-rule counts.
-
-`ErrataChecker.matches` uses a name+kind+position column-equality check
-rather than `ColumnMetadata.equals` because the two sides come from
-different keyspaces (different `ksName`) and the default equals check
-would never agree.
+    with per-rule counts, and a `Format: N violation(s)` block listing
+    auditor findings (suppressed and unsuppressed alike) for post-mortem.
 
 ---
 
@@ -685,19 +933,32 @@ Per run entry:
 
 ```
 [2026-05-24T18:49:09Z] Run #47 seed=0xDEADBEEF12345678
-  Schema:  cvtest_deadbeef.t  (2 PK, 1 CK, 2 static, 5 regular cols)
+  Schema:  cvtest_deadbeef.t  (2 PK, 1 CK, 2 static, 5 regular cols, shape=NARROW, gc_grace=3600s)
   UCS:     target_sstable_size=256MiB  base_shard_count=2  compression_chunk=16KiB
   Schema CQL:
     CREATE TABLE cvtest_deadbeef.t (
       ...
-    )
+    ) WITH compaction = {...} AND compression = {...} AND gc_grace_seconds = 3600;
   DataGen: 10.3 GiB  |  1.4M partitions  |  52M rows  |  310 MiB/s avg
   legacy:    18.4s  |  290 MiB/s  |  1.4M partitions/s
   cursor:    15.7s  |  340 MiB/s  |  1.6M partitions/s  |  Speedup: 1.17x
   Valid:   PASS  |  1.4M partitions matched  |  52M rows matched
   Errata:  3 suppressed (run still PASS):
     equal-ts-tiebreaker             3
+  Format:  2 violation(s) on experiment side:
+    flag-delete-and-expire          1
+    scanner-failure                 1
+    [flag-delete-and-expire] sstable=pa-12-big-Data.db pk=...
+    [scanner-failure] sstable=pa-12-big-Data.db pk=(scan failed) — scanner threw CorruptSSTableException: ...
 ```
+
+The `Schema:` line includes the schema's rolled `shape` (`NARROW` or
+`WIDE`) and effective `gc_grace_seconds` so post-mortem analysis can
+correlate failures with structural / GC dimensions of the run. The
+`Format:` block is emitted whenever `FormatAuditor` reported anything
+(suppressed or not); per-kind counts plus the first ~32 violation
+descriptions land in the log so a grep across a long-running soak can
+quickly surface "are we still seeing this known bug?".
 
 Side labels are user-supplied (control name and experiment name), padded to
 8 chars + `:` for column alignment via `padLabel(name)` (truncates over-long
@@ -810,9 +1071,11 @@ macOS JVM's classpath, so this filter matters.
 | `DirectCompactionRunnerApiTest` | Compile-time guard that `CompactionTask`'s protected fields haven't been renamed |
 | `SstableSetManagerTest` | Per-run dir layout + hard-link replication + cleanup |
 | `DataGeneratorDeterminismTest` | Per-thread RNG sequence is deterministic for `(seed, threads)`; threads have distinct seeds (the Java-Random-48-bit-mask bug) |
+| `WideSchemaTest` | `SchemaShape` rotation hits all four GCGS values + WIDE roll probability sits in the expected band; wide schemas have ≥64 regular columns and high NULL fraction; CQL contains `gc_grace_seconds = N` |
 | `ValidatorTest` | Synthetic UnfilteredRowIterator paths through PartitionHasher / PartitionComparator; `MismatchReport.formatForDisplay` shape |
 | `PartitionHasherTest` | xxhash determinism + sensitivity to differences |
-| `ErrataCheckerTest` | The matcher fires on the equal-ts-tiebreaker pattern and stays silent on real divergences (length mismatch, missing rows, timestamp diff) |
+| `FormatAuditorTest` | Each invariant check fires on the synthetic violation and stays silent on the well-formed case (`FLAG_DELETE_AND_EXPIRE`, `ROW_OUT_OF_ORDER`, `DUPLICATE_CLUSTERING`, `TIMESTAMP_NEGATIVE`, well-formed expiring cell, expiration-tolerance edge case) |
+| `ErrataCheckerTest` | The cell-pair matcher fires on the equal-ts-tiebreaker pattern, the bug-1B tombstone-vs-expiring pattern, and the bug-1A broken-expiration-formula pattern; stays silent on real divergences (length mismatch, missing rows, timestamp diff). Also covers the row-asymmetry path (legacy empty / cursor non-empty), the column-extra path (cursor has an extra expiring column), and the `forFormatViolation` Kind→Rule mapping. |
 
 Stand-alone driver: `DataGeneratorDeterminismDriver` is a `main`-class
 program (NOT a JUnit test) that prints inline determinism-check results
@@ -928,19 +1191,40 @@ values is the supported way to compare across modes.
 
 ## 18. Open issues / known gaps
 
-- **Validation `partitionsChecked` exceeding unique count** — observed in a
-  failing-seed report: 1.4M unique partitions, 8.1M `partitionsChecked` at
-  ~4% bar. Disjoint-shards math says total should top out at 1.4M. The
-  denominator fix (§9) made the bar percentage meaningful, but the
-  numerator anomaly is not fully diagnosed. Suspect: `Bounds<PartitionPosition>`
-  semantics around `minKeyBound`/`maxKeyBound` boundaries with the
-  `(t+1).minKeyBound()` trick — needs per-shard counter instrumentation.
+- **`partitionsChecked` count alignment** — fixed by the `DataGenerator`
+  multi-row-partition rework. Validator's `partitionsChecked` and
+  `dataGen.partitionsWritten` now agree post-compaction, so the TUI bar
+  reaches 100% at end of validation rather than topping out at a few
+  percent of a vastly-too-large denominator.
 - **Per-side `disk_access_mode`** — currently parity-required. Subprocess
   isolation is the plausible path forward.
-- **Validation-thread scaling** — 2.5 cores observed under
-  `--validation-threads 18` on a real run. Per-shard cost may be small
-  enough that scanner-open / merge-construction overhead dominates;
-  diagnostics needed before further parallelism work.
+- **Range-tombstone / partition-tombstone generation** — the
+  `DataGenerator` emits cell tombstones (via `INSERT NULL`) but no
+  `DELETE FROM t WHERE pk=?` (partition tombstone) or
+  `DELETE FROM t WHERE pk=? AND ck >= ?` (range tombstone). With the
+  GCGS rotation in place, those code paths in cursor compaction are
+  technically reachable but currently unexercised. Worth adding as a
+  follow-on so the range-tombstone reconciliation path gets coverage.
+- **`PREV_UNFILTERED_SIZE_ZERO` direct field check** — bug 2 is caught
+  via the depth-checks pass's reverse-iter hash divergence. A
+  byte-level check on the experiment side that walks `Data.db` and
+  asserts `prevUnfilteredSize > 0` directly would fire even if the
+  reverse-iter sample missed the affected partition (we sample 1-in-100).
+- **`INDEX_BLOCK_WIDTH_OFF_BY_ONE` direct field check** — same idea for
+  bug 3: the indexed point-read sample catches it, a byte-level
+  comparison of `Index.db` final-block width against the
+  `Data.db`-derived extent would catch it on every affected partition.
+- **`WIDE_COLUMN_SUBSET_DROPPED_LAST` cell matcher** — the rule today
+  is a suppression marker. The Phase B row diff catches the pattern
+  (legacy has the cell, cursor doesn't, on a wide-shape row), but
+  the rule has no narrow per-cell predicate yet. Adding one would let
+  the matcher count occurrences distinctly from generic
+  `tombstone-resurrected-by-expiring`.
+- **Strict-reverse `ROW_OUT_OF_ORDER`** — the only `FormatViolation`
+  kind that always fails the run (no errata maps to it). If a real
+  cursor bug ever produces `prev > curr` clusterings as part of the
+  bug-1A cascade, this rule would need a guard like the others — but
+  we haven't observed that in the wild.
 - **TUI side-name labels in `RunHistoryPanel`** — the history panel shows
   the seed but not the side names. With matrix-style soak runs comparing
   many configurations, history rows ought to show a short config tag.

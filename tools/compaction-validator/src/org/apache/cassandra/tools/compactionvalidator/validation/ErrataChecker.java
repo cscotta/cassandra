@@ -88,7 +88,12 @@ public final class ErrataChecker
             return EnumSet.noneOf(ErrataRule.class);
 
         // Body unfiltereds. Walk in lockstep; if either side has a different
-        // length, no rule currently covers that — caller treats it as real.
+        // length, the extra unfiltereds may be the bug-1B body-row variant
+        // (same mechanism as the static-row case: legacy's same-TS tombstones
+        // collapse the body row to {@code null} via Row.Merger, cursor's bug-1B
+        // keeps an expiring cell that survives as an extra row). We consult
+        // the same {@code explainsResurrectedRow} matcher on each leftover
+        // cursor row; if it matches, suppress and keep walking.
         while (legacy.hasNext() && cursor.hasNext())
         {
             Unfiltered lu = legacy.next();
@@ -113,10 +118,43 @@ public final class ErrataChecker
                     return EnumSet.noneOf(ErrataRule.class);
             }
         }
-        if (legacy.hasNext() || cursor.hasNext())
+        // Asymmetric end-of-iteration. Cursor-has-more is the bug-1B body-row
+        // direction; for each leftover Row on the cursor side ask if it matches
+        // the resurrected-row signature.
+        while (cursor.hasNext() && !legacy.hasNext())
+        {
+            Unfiltered cu = cursor.next();
+            if (!cu.isRow())
+                return EnumSet.noneOf(ErrataRule.class);
+            if (!resurrectedRowExplainable((Row) cu, fired))
+                return EnumSet.noneOf(ErrataRule.class);
+        }
+        // Legacy-has-more (cursor lost data) has no known signature — surface as
+        // real mismatch even with rules active.
+        if (legacy.hasNext())
             return EnumSet.noneOf(ErrataRule.class);
 
         return fired;
+    }
+
+    /**
+     * Returns {@code true} when {@code cursorRow} matches the
+     * {@code explainsResurrectedRow} signature of at least one active rule.
+     * Used by both the static-row asymmetry check inside
+     * {@link #rowsExplainable} and the body-row asymmetry check at the tail of
+     * {@link #matches}.
+     */
+    private boolean resurrectedRowExplainable(Row cursorRow, EnumSet<ErrataRule> fired)
+    {
+        for (ErrataRule rule : activeRules)
+        {
+            if (rule.explainsResurrectedRow(cursorRow))
+            {
+                fired.add(rule);
+                return true;
+            }
+        }
+        return false;
     }
 
     // -------------------------------------------------------------------------
@@ -130,7 +168,24 @@ public final class ErrataChecker
         if (lEmpty && cEmpty)
             return true;
         if (lEmpty != cEmpty)
-            return false; // missing-row mismatch — no rule covers this
+        {
+            // Asymmetric: one side has the row, the other doesn't. The cursor-
+            // has-more direction can match bug 1B's static-row signature:
+            // legacy's same-TS tombstones collapse the row to empty via
+            // Row.Merger, while cursor's bug-1B keeps an expiring cell that
+            // survives. Consult per-rule matchers; if any matches, suppress.
+            //
+            // The cursor-has-less direction (lEmpty=false, cEmpty=true) would
+            // mean cursor lost data the legacy side kept — there's no known
+            // cursor-compaction bug with that signature, so it stays a real
+            // failure.
+            if (lEmpty && !cEmpty)
+            {
+                if (resurrectedRowExplainable(cursor, fired))
+                    return true;
+            }
+            return false; // unsuppressed asymmetry — real failure
+        }
 
         // Clustering, primary-key liveness, and row deletion must match exactly:
         // none of the known errata produces divergence at these levels.
@@ -138,32 +193,106 @@ public final class ErrataChecker
         if (!livenessEqual(legacy.primaryKeyLivenessInfo(), cursor.primaryKeyLivenessInfo())) return false;
         if (!rowDeletionEqual(legacy.deletion(), cursor.deletion())) return false;
 
-        // ColumnData lockstep. The known cell-value errata only fires when both
-        // sides have the same column in the same position — anything else is real.
+        // ColumnData merge-walk. Lockstep would bail at the first column-metadata
+        // mismatch — but bug 1B can produce an asymmetric row where cursor has
+        // an extra column (same root cause as the row-asymmetry path: legacy's
+        // same-TS tombstone correctly won and {@code Row.Merger} pruned the
+        // cell from the row body, while cursor's bug-1B kept the expiring
+        // cell). Walk both iterators ordered by column name so we can consult
+        // the per-cell resurrected matcher on the extras.
         Iterator<ColumnData> li = legacy.iterator();
         Iterator<ColumnData> ci = cursor.iterator();
-        while (li.hasNext() && ci.hasNext())
+        ColumnData lcd = li.hasNext() ? li.next() : null;
+        ColumnData ccd = ci.hasNext() ? ci.next() : null;
+        while (lcd != null || ccd != null)
         {
-            ColumnData lcd = li.next();
-            ColumnData ccd = ci.next();
-            if (!sameColumn(lcd, ccd))
+            // Complex / non-Cell column data isn't covered by any rule.
+            if (lcd != null && !(lcd instanceof Cell<?>))
                 return false;
-            if (!(lcd instanceof Cell<?>) || !(ccd instanceof Cell<?>))
-                return false; // complex / non-Cell column data — no rule covers this
-            if (!cellPairExplainable((Cell<?>) lcd, (Cell<?>) ccd, fired))
+            if (ccd != null && !(ccd instanceof Cell<?>))
                 return false;
+
+            int cmp;
+            if (lcd == null)
+                cmp = 1;       // legacy exhausted → cursor's column is the "extra"
+            else if (ccd == null)
+                cmp = -1;      // cursor exhausted → legacy has a column cursor doesn't
+            else
+                cmp = compareColumnsByName(lcd, ccd);
+
+            if (cmp == 0)
+            {
+                // Same column on both sides → normal pair comparison.
+                if (!cellPairExplainable((Cell<?>) lcd, (Cell<?>) ccd, fired))
+                    return false;
+                lcd = li.hasNext() ? li.next() : null;
+                ccd = ci.hasNext() ? ci.next() : null;
+            }
+            else if (cmp < 0)
+            {
+                // Legacy has a column cursor doesn't — cursor-lost-data
+                // direction has no known bug-1B variant.
+                return false;
+            }
+            else
+            {
+                // Cursor has a column legacy doesn't — could be the bug-1B
+                // resurrected-cell signature. Consult per-cell matchers.
+                if (!cellExplainsResurrection((Cell<?>) ccd, fired))
+                    return false;
+                ccd = ci.hasNext() ? ci.next() : null;
+            }
         }
-        if (li.hasNext() || ci.hasNext())
-            return false; // extra column on one side — no rule covers this
 
         return true;
     }
 
     /**
-     * For one cell pair, determine whether the difference (if any) is value-only
-     * AND covered by at least one active rule. Returns true when the pair matches
-     * exactly OR when the value-only difference matches a rule (whose counter we
-     * then add to {@code fired}).
+     * Position-style ordering helper: returns the comparison result for the two
+     * cells' column names, keyspace-agnostic. Both sides come from independent
+     * {@code TableMetadata} objects (different keyspaces), so we can't rely on
+     * {@code ColumnMetadata.compareTo} which folds keyspace into the comparison.
+     * Within a single row, columns iterate in name order, so name-based
+     * comparison is enough to align two iterators.
+     */
+    private static int compareColumnsByName(ColumnData a, ColumnData b)
+    {
+        return a.column().name.bytes.compareTo(b.column().name.bytes);
+    }
+
+    /**
+     * Consults each active rule's {@link ErrataRule#explainsResurrectedCell}
+     * matcher on a single cursor-extra cell. Returns {@code true} when any
+     * rule covers it (and records that rule in {@code fired}); {@code false}
+     * otherwise.
+     */
+    private boolean cellExplainsResurrection(Cell<?> cursorCell, EnumSet<ErrataRule> fired)
+    {
+        for (ErrataRule rule : activeRules)
+        {
+            if (rule.explainsResurrectedCell(cursorCell))
+            {
+                fired.add(rule);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * For one cell pair, determine whether the difference (if any) is covered by at
+     * least one active rule. Returns true when the pair matches exactly OR when the
+     * difference matches a rule (whose counter we then add to {@code fired}).
+     *
+     * <p>The matcher checks rules in two passes:
+     * <ol>
+     *   <li>First, ask each rule whether it explains the broader cell-pair difference
+     *       (any combination of value, ttl, ldt, etc). This catches multi-field
+     *       signatures like bug 1B's tombstone-vs-expiring divergence.</li>
+     *   <li>Falling through to the narrower value-only path: if the cells differ
+     *       only in their value bytes (timestamp, ttl, ldt all equal), ask each
+     *       rule whether the value-only difference is its signature.</li>
+     * </ol>
      */
     private boolean cellPairExplainable(Cell<?> legacy, Cell<?> cursor, EnumSet<ErrataRule> fired)
     {
@@ -180,19 +309,29 @@ public final class ErrataChecker
         if (valuesEqual && tsEqual && ttlEqual && ldtEqual && counterFlagEqual && pathEqual)
             return true;
 
-        // Path differences are never explained by a value-only rule.
+        // Path differences are never explained by any current rule.
         if (!pathEqual)
             return false;
-        // Any non-value difference disqualifies all current rules — they're all
-        // value-only. Add per-rule branches here when future rules cover other
-        // kinds of differences.
+
+        // First pass: broad multi-field matchers. Rules that override
+        // explainsCellPairDifference() can suppress differences across multiple
+        // fields at once (bug 1B's tombstone-vs-expiring is the canonical case —
+        // it differs in ttl AND ldt AND value all simultaneously).
+        for (ErrataRule rule : activeRules)
+        {
+            if (rule.explainsCellPairDifference(legacy, cursor))
+            {
+                fired.add(rule);
+                return true;
+            }
+        }
+
+        // Second pass: narrow value-only matchers. Any non-value difference
+        // disqualifies these rules — they're for cases where the bug only
+        // affects which value-bytes win the tie-break.
         if (!tsEqual || !ttlEqual || !ldtEqual || !counterFlagEqual)
             return false;
 
-        // We have a value-only difference. Ask each active rule whether its
-        // explainsCellValueDifference covers this signature; the first match wins.
-        // (Multiple rules COULD match the same difference, but in practice each
-        // rule's predicate is specific enough that only one will fire.)
         for (ErrataRule rule : activeRules)
         {
             if (rule.explainsCellValueDifference(legacy, cursor))

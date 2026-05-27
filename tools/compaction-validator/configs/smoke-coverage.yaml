@@ -1,0 +1,33 @@
+# Smoke test config — small target for fast verification of the harness.
+#
+# Target 64 MiB instead of the default 1 GiB. Useful for quick repro of new
+# code paths without committing 5+ minutes per smoke iteration.
+
+version: 1
+
+run:
+  target_bytes: 64M
+  datagen_threads: 2
+  compaction_threads: 4
+  validation_threads: 4
+  max_runs: 1
+  no_cleanup: false
+  no_ui: true
+  ignore_errata:
+    - equal-ts-tiebreaker
+    - tombstone-expiring-flags-both-set
+    - tombstone-resurrected-by-expiring
+    - prev-unfiltered-size-zero
+    - index-block-width-off-by-one
+    - wide-column-subset-dropped-last
+
+schema:
+  partitioner: Murmur3
+
+comparison:
+  control:
+    name: legacy
+    pipeline: ITERATOR
+  experiment:
+    name: cursor
+    pipeline: CURSOR

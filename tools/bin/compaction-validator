@@ -85,7 +85,7 @@ if [ -d "$ARCH_LIB_DIR" ]; then
 fi
 
 if [ "x$MAX_HEAP_SIZE" = "x" ]; then
-    MAX_HEAP_SIZE="24G"
+    MAX_HEAP_SIZE="32G"
 fi
 
 # Anchor cassandra.storagedir (the system-keyspace + commitlog + saved-caches root)

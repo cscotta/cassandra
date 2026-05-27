@@ -231,8 +231,19 @@ public final class PartitionComparator
 
     private static String compareColumnData(ColumnData legacy, ColumnData cursor, String context)
     {
-        if (!legacy.column().equals(cursor.column()))
-            return context + ": column metadata differs: control=" + legacy.column().name + " experiment=" + cursor.column().name;
+        // ColumnMetadata.equals folds in keyspace + table name, but our two
+        // compaction outputs live in independent keyspaces — so the strict
+        // equals would always return false for cross-side cells even when the
+        // logical column is identical. Compare on the bits that actually have
+        // to match for a comparison to be meaningful (name + kind + position +
+        // type). Mirrors ErrataChecker.sameColumn's workaround; both pieces
+        // need the same treatment because they run on the same cross-keyspace
+        // cell pairs.
+        if (!columnsEquivalentAcrossKeyspaces(legacy.column(), cursor.column()))
+            return context + ": column metadata differs: control=" + legacy.column().ksName + '.'
+                   + legacy.column().cfName + '.' + legacy.column().name
+                   + " experiment=" + cursor.column().ksName + '.' + cursor.column().cfName + '.'
+                   + cursor.column().name;
 
         if (legacy instanceof Cell<?> && cursor instanceof Cell<?>)
             return compareCells((Cell<?>) legacy, (Cell<?>) cursor, context);
@@ -242,6 +253,23 @@ public final class PartitionComparator
 
         return context + ": ColumnData subtype differs: control=" + legacy.getClass().getSimpleName()
                + " experiment=" + cursor.getClass().getSimpleName();
+    }
+
+    /**
+     * Keyspace-agnostic column equivalence. We can't use
+     * {@code ColumnMetadata.equals} because it includes keyspace + table, and
+     * our two sides live in independent keyspaces (so equals always returns
+     * false). Check the bits that actually have to match for the column to be
+     * the same column in the schema sense: name, kind, position, and the
+     * (in-keyspace-agnostic) type representation.
+     */
+    private static boolean columnsEquivalentAcrossKeyspaces(org.apache.cassandra.schema.ColumnMetadata a,
+                                                            org.apache.cassandra.schema.ColumnMetadata b)
+    {
+        return a.name.equals(b.name)
+            && a.kind == b.kind
+            && a.position() == b.position()
+            && a.type.asCQL3Type().toString().equals(b.type.asCQL3Type().toString());
     }
 
     private static String compareComplex(ComplexColumnData legacy, ComplexColumnData cursor, String context)

@@ -21,7 +21,18 @@ run:
   no_cleanup: false                 # delete working dir on PASS
   no_ui: false
   ignore_errata:
+    # The originally surfaced bug — value-only tiebreaker inversion under
+    # equal-timestamp cell merges.
     - equal-ts-tiebreaker
+    # Five additional known-bug rules added with the bug-coverage extension.
+    # Soak runs continue to PASS while any of these fire (they're suppressed
+    # but counted in the per-run errata block); a NEW divergence still halts
+    # the run loudly.
+    - tombstone-expiring-flags-both-set      # bug 1A
+    - tombstone-resurrected-by-expiring      # bug 1B
+    - prev-unfiltered-size-zero              # bug 2
+    - index-block-width-off-by-one           # bug 3
+    - wide-column-subset-dropped-last        # bug 4
 
 schema:
   partitioner: Murmur3
@@ -33,3 +44,4 @@ comparison:
   experiment:
     name: cursor
     pipeline: CURSOR
+

@@ -29,6 +29,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.compaction.PipelineSelector;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.utils.FBUtilities;
 
 /**
  * Runs two {@link CompactionDriver}s — one for the legacy iterator pipeline and one for
@@ -135,6 +136,15 @@ public final class ParallelCompactor
         CompactionStats legacyStats = new CompactionStats();
         CompactionStats cursorStats = new CompactionStats();
 
+        // Capture wall-clock NOW once and pin it across both pipelines. Without this,
+        // the two CompactionDrivers each call FBUtilities.nowInSeconds() at slightly
+        // different points in their setup, so a near-expiry cell or a near-gc-grace
+        // tombstone might be dropped by one side and kept by the other — a spurious
+        // post-compaction divergence flagged by Phase A even though both pipelines are
+        // correct. Pinning the value forces identical GC / TTL purge decisions and
+        // eliminates the false-positive class entirely.
+        final long pinnedNowInSec = FBUtilities.nowInSeconds();
+
         ExecutorService pool = Executors.newFixedThreadPool(2, new NamedThreadFactory("compaction-validator-pair"));
         try
         {
@@ -149,7 +159,8 @@ public final class ParallelCompactor
                                                                    legacyBackend,
                                                                    legacyStats,
                                                                    taskConcurrencyPerBackend,
-                                                                   reporter).run();
+                                                                   reporter,
+                                                                   pinnedNowInSec).run();
                 if (reporter != null)
                 {
                     try { reporter.onCompactionComplete("legacy", legacyStats); }
@@ -162,7 +173,8 @@ public final class ParallelCompactor
                                                                    cursorBackend,
                                                                    cursorStats,
                                                                    taskConcurrencyPerBackend,
-                                                                   reporter).run();
+                                                                   reporter,
+                                                                   pinnedNowInSec).run();
                 if (reporter != null)
                 {
                     try { reporter.onCompactionComplete("cursor", cursorStats); }

@@ -75,17 +75,49 @@ public final class DirectCompactionRunner
 
     private final PipelineSelector.Backend backend;
     private final ProgressCallback callback;
+    private final Long fixedNowInSecOverride;
 
     /**
      * Creates a runner that will use the given backend and invoke {@code callback} during execution.
+     *
+     * <p>Each compaction will compute its own {@code nowInSec} from {@link FBUtilities#nowInSeconds()}.
+     * Use {@link #DirectCompactionRunner(PipelineSelector.Backend, ProgressCallback, Long)} to
+     * pin a fixed {@code nowInSec} across multiple parallel compactions — important for the
+     * compaction-validator's A/B comparison where the two pipelines must make identical
+     * tombstone-GC and TTL-purge decisions.
      *
      * @param backend  which pipeline implementation to use
      * @param callback receives progress and emission events
      */
     public DirectCompactionRunner(PipelineSelector.Backend backend, ProgressCallback callback)
     {
+        this(backend, callback, null);
+    }
+
+    /**
+     * Creates a runner that uses {@code fixedNowInSec} for all in-pipeline GC / TTL
+     * decisions, instead of reading the wall clock at compaction-start time.
+     *
+     * <p>Pinning the value across two parallel runs (the iterator side and the cursor
+     * side of the validator's A/B comparison) guarantees that both pipelines see the
+     * same input data {@em and} make the same decision about which expired cells and
+     * tombstones to drop. Without this, a 1-2-second skew between when the two threads
+     * enter their pipeline loop could let one side drop a near-expiry cell that the
+     * other still considers live, surfacing as a spurious post-compaction divergence
+     * even though both pipelines are correct.
+     *
+     * @param backend           which pipeline implementation to use
+     * @param callback          receives progress and emission events
+     * @param fixedNowInSec     forced "now" value in seconds since epoch, or
+     *                          {@code null} to fall back to {@link FBUtilities#nowInSeconds()}
+     */
+    public DirectCompactionRunner(PipelineSelector.Backend backend,
+                                  ProgressCallback callback,
+                                  Long fixedNowInSec)
+    {
         this.backend = backend;
         this.callback = callback;
+        this.fixedNowInSecOverride = fixedNowInSec;
     }
 
     /**
@@ -134,7 +166,10 @@ public final class DirectCompactionRunner
                 controller.refreshOverlaps();
 
             TimeUUID taskId = task.transaction.opId();
-            long nowInSec = FBUtilities.nowInSeconds();
+            // Honour the fixed-nowInSec override when set; this is what keeps the iterator
+            // and cursor sides of the validator's A/B comparison making identical GC / TTL
+            // purge decisions even when their pipeline loops start a second or two apart.
+            long nowInSec = fixedNowInSecOverride != null ? fixedNowInSecOverride : FBUtilities.nowInSeconds();
 
             RateLimiter limiter = CompactionManager.instance.getRateLimiter();
 

@@ -64,17 +64,16 @@ public final class GeneratedSchema
     private final List<ColumnInfo> regularColumns;
     private final CompactionSpec defaultCompaction;
     private final CompressionSpec defaultCompression;
+    private final SchemaShape shape;
+    private final double nullFraction;
+    private final int gcGraceSeconds;
 
     /**
-     * @param cql                 full {@code CREATE TABLE} CQL with seed-picked defaults
-     * @param keyspaceName        keyspace name
-     * @param tableName           table name
-     * @param partitionKeys       partition-key columns (must not be null)
-     * @param clusteringKeys      clustering-key columns (must not be null)
-     * @param staticColumns       static columns (must not be null)
-     * @param regularColumns      regular columns (must not be null)
-     * @param defaultCompaction   seed-picked compaction spec — used by sides that omit theirs
-     * @param defaultCompression  seed-picked compression spec — used by sides that omit theirs
+     * Legacy constructor that defaults the shape to {@link SchemaShape#NARROW},
+     * the null fraction to {@code 0.10}, and {@code gc_grace_seconds} to the
+     * Cassandra default (864000 = 10 days). Kept so existing tests that build
+     * a {@code GeneratedSchema} directly without a generator round-trip don't
+     * have to be touched. New code should call the full constructor.
      */
     public GeneratedSchema(String cql,
                            String keyspaceName,
@@ -86,6 +85,58 @@ public final class GeneratedSchema
                            CompactionSpec defaultCompaction,
                            CompressionSpec defaultCompression)
     {
+        this(cql, keyspaceName, tableName,
+             partitionKeys, clusteringKeys, staticColumns, regularColumns,
+             defaultCompaction, defaultCompression,
+             SchemaShape.NARROW, 0.10, 864_000);
+    }
+
+    /**
+     * Full constructor including the shape tag, per-run null fraction, and
+     * per-run {@code gc_grace_seconds}.
+     *
+     * @param cql                 full {@code CREATE TABLE} CQL with seed-picked defaults
+     * @param keyspaceName        keyspace name
+     * @param tableName           table name
+     * @param partitionKeys       partition-key columns (must not be null)
+     * @param clusteringKeys      clustering-key columns (must not be null)
+     * @param staticColumns       static columns (must not be null)
+     * @param regularColumns      regular columns (must not be null)
+     * @param defaultCompaction   seed-picked compaction spec — used by sides that omit theirs
+     * @param defaultCompression  seed-picked compression spec — used by sides that omit theirs
+     * @param shape               structural shape rolled for this schema
+     * @param nullFraction        probability that a non-PK / non-CK column is written
+     *                            as {@code NULL} in any given row. Wide schemas roll
+     *                            high (≥0.70) so most rows trip the column-subset
+     *                            encoding path; narrow schemas roll low (≤0.50) so
+     *                            most rows are dense.
+     * @param gcGraceSeconds      seed-picked {@code gc_grace_seconds} table option.
+     *                            Drives whether the compaction tombstone-purge code
+     *                            path runs at all: at the Cassandra default of
+     *                            10 days nothing in our test data is purgeable, so
+     *                            both pipelines skip the purge logic; at 0 every
+     *                            tombstone is eligible and the iterator and cursor
+     *                            sides must agree on the resulting purge decisions.
+     */
+    public GeneratedSchema(String cql,
+                           String keyspaceName,
+                           String tableName,
+                           List<ColumnInfo> partitionKeys,
+                           List<ColumnInfo> clusteringKeys,
+                           List<ColumnInfo> staticColumns,
+                           List<ColumnInfo> regularColumns,
+                           CompactionSpec defaultCompaction,
+                           CompressionSpec defaultCompression,
+                           SchemaShape shape,
+                           double nullFraction,
+                           int gcGraceSeconds)
+    {
+        if (shape == null)
+            throw new IllegalArgumentException("shape must not be null");
+        if (Double.isNaN(nullFraction) || nullFraction < 0.0 || nullFraction > 1.0)
+            throw new IllegalArgumentException("nullFraction must be in [0,1]: " + nullFraction);
+        if (gcGraceSeconds < 0)
+            throw new IllegalArgumentException("gcGraceSeconds must be non-negative: " + gcGraceSeconds);
         this.cql = cql;
         this.keyspaceName = keyspaceName;
         this.tableName = tableName;
@@ -95,6 +146,9 @@ public final class GeneratedSchema
         this.regularColumns = Collections.unmodifiableList(regularColumns);
         this.defaultCompaction = defaultCompaction;
         this.defaultCompression = defaultCompression;
+        this.shape = shape;
+        this.nullFraction = nullFraction;
+        this.gcGraceSeconds = gcGraceSeconds;
     }
 
     /** @return full CREATE TABLE CQL with seed-picked compaction/compression defaults */
@@ -114,6 +168,20 @@ public final class GeneratedSchema
     public CompactionSpec getDefaultCompaction()  { return defaultCompaction; }
     /** @return seed-picked compression defaults */
     public CompressionSpec getDefaultCompression() { return defaultCompression; }
+    /** @return the structural shape rolled for this schema */
+    public SchemaShape getShape() { return shape; }
+    /**
+     * @return per-run NULL probability for non-PK / non-CK columns. Wide schemas
+     *         roll a high value to force sparse-row encoding; narrow schemas roll
+     *         a low-to-moderate value to keep most rows dense.
+     */
+    public double getNullFraction() { return nullFraction; }
+    /**
+     * @return per-run {@code gc_grace_seconds} table option. Drives whether the
+     *         compaction tombstone-purge path runs at all. Logged so soak-run
+     *         post-mortem can correlate divergences with whether GC was active.
+     */
+    public int getGcGraceSeconds() { return gcGraceSeconds; }
 
     /**
      * Builds a per-side {@code CREATE TABLE} CQL: same column structure as
@@ -137,17 +205,20 @@ public final class GeneratedSchema
         return SchemaGenerator.assembleCql(keyspaceOverride, tableName,
                                            partitionKeys, clusteringKeys,
                                            staticColumns, regularColumns,
-                                           compaction, compression);
+                                           compaction, compression, gcGraceSeconds);
     }
 
     @Override
     public String toString()
     {
         return "GeneratedSchema{keyspace='" + keyspaceName + "', table='" + tableName + "', "
-               + "pkCols=" + partitionKeys.size()
+               + "shape=" + shape
+               + ", pkCols=" + partitionKeys.size()
                + ", ckCols=" + clusteringKeys.size()
                + ", staticCols=" + staticColumns.size()
                + ", regularCols=" + regularColumns.size()
+               + ", nullFraction=" + String.format("%.2f", nullFraction)
+               + ", gcGraceSeconds=" + gcGraceSeconds
                + ", defaultCompaction=" + defaultCompaction
                + ", defaultCompression=" + defaultCompression
                + "}";

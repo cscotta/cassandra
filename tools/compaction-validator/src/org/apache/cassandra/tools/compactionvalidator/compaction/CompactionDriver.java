@@ -87,6 +87,14 @@ public final class CompactionDriver
     private final org.apache.cassandra.tools.compactionvalidator.ProgressTap reporter;
     private final String backendLabel;
     private final int taskConcurrency;
+    /**
+     * Optional fixed {@code nowInSec} override propagated to every {@link DirectCompactionRunner}
+     * we spawn so the iterator and cursor sides of the validator's A/B comparison see the same
+     * "now" for tombstone GC and TTL purge decisions. {@code null} means each compaction reads
+     * the wall clock independently — fine for stand-alone use, harmful only for parallel A/B
+     * comparison runs.
+     */
+    private final Long fixedNowInSec;
 
     /**
      * @param cfs     the column family store to compact
@@ -123,6 +131,22 @@ public final class CompactionDriver
                             int taskConcurrency,
                             org.apache.cassandra.tools.compactionvalidator.ProgressTap reporter)
     {
+        this(cfs, backend, stats, taskConcurrency, reporter, null);
+    }
+
+    /**
+     * Variant that accepts a fixed {@code nowInSec} override propagated through to every
+     * {@link DirectCompactionRunner} it spawns. Pass a non-null value when running this
+     * driver alongside a sibling driver on the other side of an A/B comparison so both
+     * sides see identical "now" semantics; pass {@code null} for stand-alone use.
+     */
+    public CompactionDriver(ColumnFamilyStore cfs,
+                            PipelineSelector.Backend backend,
+                            CompactionStats stats,
+                            int taskConcurrency,
+                            org.apache.cassandra.tools.compactionvalidator.ProgressTap reporter,
+                            Long fixedNowInSec)
+    {
         if (cfs == null)
             throw new IllegalArgumentException("cfs must not be null");
         if (backend == null)
@@ -137,6 +161,7 @@ public final class CompactionDriver
         this.reporter = reporter;
         this.taskConcurrency = taskConcurrency;
         this.backendLabel = backend == PipelineSelector.Backend.CURSOR ? "cursor" : "legacy";
+        this.fixedNowInSec = fixedNowInSec;
     }
 
     /**
@@ -203,7 +228,10 @@ public final class CompactionDriver
             // Outer loop: drain background tasks until the strategy has nothing more to do.
             for (int iter = 0; iter < MAX_ITERATIONS; iter++)
             {
-                long nowInSec = FBUtilities.nowInSeconds();
+                // Use the fixed override here too — getNextBackgroundTasks consults nowInSec
+                // for tombstone-driven re-compaction triggers; if the two sides see different
+                // "now"s they may emit different task sets even on identical inputs.
+                long nowInSec = fixedNowInSec != null ? fixedNowInSec : FBUtilities.nowInSeconds();
                 Collection<AbstractCompactionTask> tasks = strategy.getNextBackgroundTasks(nowInSec);
                 if (tasks == null || tasks.isEmpty())
                     break;
@@ -226,7 +254,7 @@ public final class CompactionDriver
 
             // Final maximal pass to ensure the table is fully compacted under the chosen backend.
             // Any SSTables produced by the loop above are visible to the strategy by now.
-            long nowInSec = FBUtilities.nowInSeconds();
+            long nowInSec = fixedNowInSec != null ? fixedNowInSec : FBUtilities.nowInSeconds();
             try (CompactionTasks maximal = strategy.getMaximalTasks(nowInSec, false, Integer.MAX_VALUE, OperationType.COMPACTION))
             {
                 if (maximal != null && !maximal.isEmpty())
@@ -344,7 +372,8 @@ public final class CompactionDriver
                         DirectCompactionRunner.ProgressCallback cb = makeCallback(taskIndex, inputBytes,
                                                                                   cumBytes, cumParts, cumRows,
                                                                                   tracker);
-                        produced = new DirectCompactionRunner(backend, cb).run(ct, ActiveCompactionsTracker.NOOP);
+                        produced = new DirectCompactionRunner(backend, cb, fixedNowInSec)
+                                       .run(ct, ActiveCompactionsTracker.NOOP);
                     }
                     finally
                     {

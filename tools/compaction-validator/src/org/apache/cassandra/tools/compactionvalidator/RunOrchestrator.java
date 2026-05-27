@@ -57,6 +57,8 @@ import org.apache.cassandra.tools.compactionvalidator.data.DataGenerator;
 import org.apache.cassandra.tools.compactionvalidator.schema.GeneratedSchema;
 import org.apache.cassandra.tools.compactionvalidator.schema.SchemaGenerator;
 import org.apache.cassandra.tools.compactionvalidator.util.SeedUtil;
+import org.apache.cassandra.tools.compactionvalidator.validation.FormatAuditor;
+import org.apache.cassandra.tools.compactionvalidator.validation.FormatViolation;
 import org.apache.cassandra.tools.compactionvalidator.validation.MismatchReport;
 import org.apache.cassandra.tools.compactionvalidator.validation.ValidationStats;
 import org.apache.cassandra.tools.compactionvalidator.validation.Validator;
@@ -359,10 +361,29 @@ public final class RunOrchestrator
                                                                               controlBackend, experimentBackend,
                                                                               compactionThreads, reporter).run();
             builder.legacyStats(compactionResult.legacyStats)
-                   .cursorStats(compactionResult.cursorStats);
+                   .cursorStats(compactionResult.cursorStats)
+                   .schemaShape(schema.getShape().name())
+                   .gcGraceSeconds(schema.getGcGraceSeconds());
+
+            // ---- Phase 4b: format-level invariant audit on the experiment side -------------
+            // Walks the experiment-side SSTables byte-by-byte and asserts cell-flag /
+            // ordering invariants that the standard SSTable reader is too tolerant to
+            // surface. Catches compaction-bug 1A (IS_DELETED + IS_EXPIRING set in the
+            // same flags byte) and out-of-order rows. Cheap: O(scanned bytes) and adds
+            // a few seconds to a 1 GiB run. We only audit the experiment side — the
+            // control side is the format reference, and any divergence relative to
+            // itself would be a different (more serious) class of bug.
+            //
+            // Wrapped in a fresh ArrayList because the validator below may also append
+            // SCANNER_FAILURE violations on a CorruptSSTableException, and
+            // FormatAuditor.audit returns an empty immutable list when given no input.
+            java.util.List<FormatViolation> formatViolations = new java.util.ArrayList<>(
+                FormatAuditor.audit(compactionResult.cursorSSTables,
+                                    cursorCfsLocal.metadata().comparator));
 
             // ---- Phase 5: validation -------------------------------------------------------
             ValidationStats validationStats = new ValidationStats();
+
             Validator validator = new Validator(legacyCfs,
                                                 cursorCfs,
                                                 compactionResult.legacySSTables,
@@ -396,10 +417,60 @@ public final class RunOrchestrator
             {
                 mismatch = validator.validate();
             }
+            catch (org.apache.cassandra.io.sstable.CorruptSSTableException corrupt)
+            {
+                // Validator scanner hit an unreadable experiment-side SSTable. This
+                // is the documented cascading symptom of compaction bug 1A: once a
+                // flag-byte-misaligned cell desynchronises the deserialiser, every
+                // subsequent cell in the SSTable looks malformed and reads throw.
+                //
+                // Convert to a SCANNER_FAILURE FormatViolation so the standard
+                // suppression logic below decides whether to fail the run (errata
+                // active → suppressed, soak loop rides through) or surface it
+                // (errata inactive → fail with the same detail the auditor would
+                // have produced). Throwing through here would have terminated the
+                // run on the first corrupted SSTable, bypassing the suppression
+                // path entirely.
+                String path = corrupt.path != null
+                              ? corrupt.path.toString()
+                              : "(unknown experiment-side SSTable)";
+                String detail = corrupt.getCause() != null
+                                ? corrupt.getCause().getClass().getSimpleName()
+                                  + (corrupt.getCause().getMessage() != null
+                                     ? ": " + corrupt.getCause().getMessage() : "")
+                                : corrupt.getClass().getSimpleName()
+                                  + (corrupt.getMessage() != null
+                                     ? ": " + corrupt.getMessage() : "");
+                formatViolations.add(new FormatViolation(
+                    FormatViolation.Kind.SCANNER_FAILURE,
+                    path,
+                    "(validator scan failed)",
+                    detail));
+                mismatch = Optional.empty();
+            }
             finally
             {
                 validateTicker.shutdownNow();
             }
+
+            // Now that the validator (and any of its scanner-side exceptions) has
+            // contributed to formatViolations, classify the full list. Suppressed
+            // violations bump their rule's counter in ValidationStats so the
+            // Errata: line in the run log reports them alongside Phase A mismatches;
+            // unsuppressed violations are folded into the failure decision below.
+            java.util.List<FormatViolation> unsuppressedViolations = new java.util.ArrayList<>();
+            for (FormatViolation v : formatViolations)
+            {
+                org.apache.cassandra.tools.compactionvalidator.validation.ErrataRule rule =
+                    org.apache.cassandra.tools.compactionvalidator.validation.ErrataRule
+                        .forFormatViolation(v.kind);
+                if (rule != null && activeErrata.contains(rule))
+                    validationStats.recordErrata(rule);
+                else
+                    unsuppressedViolations.add(v);
+            }
+
+            builder.formatViolations(formatViolations);
             builder.validationStats(validationStats);
 
             // ---- Result assembly -----------------------------------------------------------
@@ -417,6 +488,39 @@ public final class RunOrchestrator
                                           .build();
                 reporter.onValidationComplete(validationStats, false);
                 reporter.onRunFailed(report, result);
+                return result;
+            }
+
+            // Phase A passed: now decide whether the FormatAuditor's unsuppressed
+            // violations should fail the run. They might not have surfaced as Phase A
+            // mismatches if the bug's symptom is intra-cell metadata (e.g. a broken
+            // expiration formula whose bytes happen to hash the same as legacy's
+            // expiring cell). Treat any unsuppressed violation as a failure so we
+            // don't silently pass when the auditor saw something the hash sweep
+            // missed.
+            if (!unsuppressedViolations.isEmpty())
+            {
+                FormatViolation first = unsuppressedViolations.get(0);
+                String detail = String.format(
+                    "FormatAuditor reported %d unsuppressed violation(s); first: [%s] %s — %s",
+                    unsuppressedViolations.size(),
+                    first.kind.cliName(),
+                    first.partitionKeyHex,
+                    first.detail);
+                String preserved = sstableSet.runDir().getAbsolutePath();
+                MismatchReport synthetic = new MismatchReport(
+                    first.partitionKeyHex,
+                    detail,
+                    "(no cell-level dump: format-violation failure, see Format: block in run log)",
+                    "(no cell-level dump: format-violation failure, see Format: block in run log)",
+                    validationStats.partitionsChecked.get());
+                RunResult result = builder.success(false)
+                                          .failureDetail(detail)
+                                          .preservedDir(preserved)
+                                          .mismatchReport(synthetic)
+                                          .build();
+                reporter.onValidationComplete(validationStats, false);
+                reporter.onRunFailed(synthetic, result);
                 return result;
             }
 
