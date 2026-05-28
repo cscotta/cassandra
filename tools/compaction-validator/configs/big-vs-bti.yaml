@@ -1,0 +1,54 @@
+# BIG vs BTI — compare the two SSTable output formats.
+#
+# Both sides use the iterator compaction pipeline (cursor compaction's
+# {@code unsupportedSchema} rejects non-BIG output, so cross-format runs
+# can't put cursor on the BTI side). The compaction strategy and
+# compression are seed-driven and applied identically to both sides — so
+# any divergence is attributable to the format axis itself.
+#
+# Cross-format runs serialise the two compactions internally because
+# {@code DatabaseDescriptor.getSelectedSSTableFormat()} is JVM-global at
+# write time. Expect roughly 2x the wall-clock duration of a same-format
+# parallel run.
+#
+# Source data is always written in the JVM-global default format (BIG)
+# during data-gen; the {@code format:} attribute only affects each
+# side's compaction OUTPUT.
+
+version: 1
+
+run:
+  target_bytes: 1G
+  datagen_threads: 4
+  compaction_threads: 12
+  validation_threads: 12
+  max_runs: 0                       # unlimited — soak until 'q' is pressed
+  no_cleanup: false                 # delete working dir on PASS
+  no_ui: false
+  ignore_errata:
+    # The originally surfaced bug — value-only tiebreaker inversion under
+    # equal-timestamp cell merges. Applies to both pipelines, so it can
+    # show up on either side regardless of format.
+    - equal-ts-tiebreaker
+    # Bug-1A and friends are cursor-compaction signatures, so they don't
+    # apply when both sides use ITERATOR — but listing them here keeps
+    # the same suppression set as the iterator-vs-cursor.yaml baseline
+    # so soak runs that swap configs see consistent log output.
+    - tombstone-expiring-flags-both-set
+    - tombstone-resurrected-by-expiring
+    - prev-unfiltered-size-zero
+    - index-block-width-off-by-one
+    - wide-column-subset-dropped-last
+
+schema:
+  partitioner: Murmur3
+
+comparison:
+  control:
+    name: big
+    pipeline: ITERATOR
+    format: BIG
+  experiment:
+    name: bti
+    pipeline: ITERATOR
+    format: BTI

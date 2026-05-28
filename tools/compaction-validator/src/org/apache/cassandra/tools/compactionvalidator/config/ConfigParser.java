@@ -163,7 +163,8 @@ public final class ConfigParser
         if (m.containsKey("compaction"))  s.compaction  = bindCompaction(asMap(m.get("compaction"), path + ".compaction"), path + ".compaction");
         if (m.containsKey("compression")) s.compression = bindCompression(asMap(m.get("compression"), path + ".compression"), path + ".compression");
         if (m.containsKey("io_mode"))     s.ioMode      = asString(m.get("io_mode"), path + ".io_mode");
-        rejectUnknownKeys(m, path, "name", "pipeline", "compaction", "compression", "io_mode");
+        if (m.containsKey("format"))      s.format      = asString(m.get("format"), path + ".format");
+        rejectUnknownKeys(m, path, "name", "pipeline", "compaction", "compression", "io_mode", "format");
         return s;
     }
 

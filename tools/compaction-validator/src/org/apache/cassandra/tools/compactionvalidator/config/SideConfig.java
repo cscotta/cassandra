@@ -58,6 +58,35 @@ public final class SideConfig
      */
     public String ioMode;
 
+    /**
+     * SSTable output format for this side. {@code "BIG"} or {@code "BTI"};
+     * {@code null} → use whatever {@code DatabaseDescriptor.getSelectedSSTableFormat()}
+     * is when compaction runs (BIG by default, set by {@code Main.bootstrapJvm}).
+     *
+     * <p>Constraints:
+     * <ul>
+     *   <li>{@code CursorCompactor.unsupportedSchema} rejects non-BIG outputs,
+     *       so a side declaring {@code pipeline: CURSOR} must use {@code BIG}.
+     *       Specifying {@code CURSOR + BTI} fails at config validation.</li>
+     *   <li>When the two sides specify different formats, {@code ParallelCompactor}
+     *       runs the two compactions <em>serially</em> (toggling
+     *       {@link org.apache.cassandra.config.DatabaseDescriptor#setSelectedSSTableFormat}
+     *       around each side) instead of in parallel — the format selection is
+     *       JVM-global at write time and there's no per-CFS override hook in
+     *       Cassandra's compaction-writer path. When both sides specify the
+     *       same format (or both omit it), they continue to run in parallel.</li>
+     *   <li>The validator's reverse-iter and indexed-point-read passes
+     *       dispatch on the SSTable's concrete reader type
+     *       ({@code BigTableReader} or {@code BtiTableReader}) so cross-format
+     *       output sets are read correctly.</li>
+     *   <li>Source data (written by {@code DataGenerator}) is always emitted
+     *       in whatever format is set at boot (BIG by default). Both sides
+     *       read the same source; format selection only affects each side's
+     *       compaction <em>output</em>.</li>
+     * </ul>
+     */
+    public String format; // BIG | BTI
+
     public SideConfig() {}
 
     public String getName() { return name; }
@@ -65,16 +94,19 @@ public final class SideConfig
     public CompactionSpec getCompaction() { return compaction; }
     public CompressionSpec getCompression() { return compression; }
     public String getIoMode() { return ioMode; }
+    public String getFormat() { return format; }
 
     /** SnakeYAML uses snake_case in YAML; map `io_mode` → ioMode. */
     public void setIoMode(String ioMode) { this.ioMode = ioMode; }
     public void setIo_mode(String ioMode) { this.ioMode = ioMode; }
+
+    public void setFormat(String format) { this.format = format; }
 
     @Override
     public String toString()
     {
         return "SideConfig{name=" + name + ", pipeline=" + pipeline
                + ", compaction=" + compaction + ", compression=" + compression
-               + ", ioMode=" + ioMode + '}';
+               + ", ioMode=" + ioMode + ", format=" + format + '}';
     }
 }

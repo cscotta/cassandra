@@ -147,6 +147,27 @@ public final class CompactionDriver
                             org.apache.cassandra.tools.compactionvalidator.ProgressTap reporter,
                             Long fixedNowInSec)
     {
+        this(cfs, backend, stats, taskConcurrency, reporter, fixedNowInSec, null);
+    }
+
+    /**
+     * Most-explicit constructor — also accepts a {@code routingTag} that overrides the
+     * automatic derivation of {@code backendLabel} from the pipeline type. Required for
+     * cross-format A/B runs where both sides happen to use the same pipeline backend
+     * (e.g. iterator-on-BIG vs iterator-on-BTI): without an explicit tag both drivers
+     * would self-label as {@code "legacy"} and the experiment side's events would all
+     * route into the control side's TUI panel and reporter counters. Pass {@code "legacy"}
+     * for the control slot and {@code "cursor"} for the experiment slot. {@code null}
+     * preserves the legacy auto-derivation for stand-alone use.
+     */
+    public CompactionDriver(ColumnFamilyStore cfs,
+                            PipelineSelector.Backend backend,
+                            CompactionStats stats,
+                            int taskConcurrency,
+                            org.apache.cassandra.tools.compactionvalidator.ProgressTap reporter,
+                            Long fixedNowInSec,
+                            String routingTag)
+    {
         if (cfs == null)
             throw new IllegalArgumentException("cfs must not be null");
         if (backend == null)
@@ -160,7 +181,8 @@ public final class CompactionDriver
         this.stats = stats;
         this.reporter = reporter;
         this.taskConcurrency = taskConcurrency;
-        this.backendLabel = backend == PipelineSelector.Backend.CURSOR ? "cursor" : "legacy";
+        this.backendLabel = routingTag != null ? routingTag
+                          : backend == PipelineSelector.Backend.CURSOR ? "cursor" : "legacy";
         this.fixedNowInSec = fixedNowInSec;
     }
 

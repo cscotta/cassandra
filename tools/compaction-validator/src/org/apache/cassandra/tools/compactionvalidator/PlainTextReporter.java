@@ -176,6 +176,13 @@ public class PlainTextReporter implements ProgressTap
     }
 
     @Override
+    public synchronized void onCompactionStatus(String backend, String message)
+    {
+        if (message == null || message.isEmpty()) return;
+        out.printf("[compact:%s] %s%n", labelFor(backend), message);
+    }
+
+    @Override
     public synchronized void onValidationProgress(long partitionsChecked)
     {
         long now = System.currentTimeMillis();

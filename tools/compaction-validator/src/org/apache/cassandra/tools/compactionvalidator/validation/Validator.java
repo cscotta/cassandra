@@ -56,6 +56,7 @@ import org.apache.cassandra.io.sstable.ISSTableScanner;
 import org.apache.cassandra.io.sstable.SSTableReadsListener;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.big.BigTableReader;
+import org.apache.cassandra.io.sstable.format.bti.BtiTableReader;
 
 /**
  * Two-phase validator that compares the SSTables produced by the legacy and cursor
@@ -602,9 +603,12 @@ public final class Validator
      * Opens a reversed {@link UnfilteredRowIterator} on every SSTable that may contain
      * {@code key}, merges them, and returns the hash of the merged reverse-stream.
      *
-     * <p>Casts each {@link SSTableReader} to {@link BigTableReader} since the
-     * validator's bootstrap forces the BIG SSTable format — the reverse-iterator API
-     * is defined on the format-specific reader, not the abstract base.
+     * <p>Dispatches by SSTable format ({@code BigTableReader} or
+     * {@code BtiTableReader}) since the per-partition reverse-iterator API isn't
+     * abstract on the common {@link SSTableReader} parent — both subclasses define
+     * the same signature independently. This lets the validator handle cross-format
+     * output sets cleanly when the two sides specify different
+     * {@code format:} values in the YAML.
      */
     private static long reverseHashPartition(DecoratedKey key,
                                              Collection<SSTableReader> sstables,
@@ -615,13 +619,7 @@ public final class Validator
         try
         {
             for (SSTableReader r : sstables)
-            {
-                if (!(r instanceof BigTableReader))
-                    throw new IllegalStateException(
-                        "Reverse-scan validator requires BIG format; got: " + r.getClass().getName());
-                BigTableReader btr = (BigTableReader) r;
-                iters.add(btr.rowIterator(key, Slices.ALL, columnFilter, /* reversed = */ true, listener));
-            }
+                iters.add(openRowIterator(r, key, Slices.ALL, columnFilter, /* reversed = */ true, listener));
             try (UnfilteredRowIterator merged = UnfilteredRowIterators.merge(iters))
             {
                 return PartitionHasher.hashPartition(merged);
@@ -644,6 +642,8 @@ public final class Validator
      * may contain {@code key}, merges them, and returns the hash of the resulting
      * (forward) slice stream. Used by the indexed point-read check to compare what
      * each side returns when seeking into a specific clustering position.
+     *
+     * <p>Format-agnostic — see {@link #reverseHashPartition} for the same dispatch.
      */
     private static long pointReadHash(DecoratedKey key,
                                       Slices slices,
@@ -655,13 +655,7 @@ public final class Validator
         try
         {
             for (SSTableReader r : sstables)
-            {
-                if (!(r instanceof BigTableReader))
-                    throw new IllegalStateException(
-                        "Indexed point-read validator requires BIG format; got: " + r.getClass().getName());
-                BigTableReader btr = (BigTableReader) r;
-                iters.add(btr.rowIterator(key, slices, columnFilter, /* reversed = */ false, listener));
-            }
+                iters.add(openRowIterator(r, key, slices, columnFilter, /* reversed = */ false, listener));
             try (UnfilteredRowIterator merged = UnfilteredRowIterators.merge(iters))
             {
                 return PartitionHasher.hashPartition(merged);
@@ -675,6 +669,31 @@ public final class Validator
             }
             throw t;
         }
+    }
+
+    /**
+     * Format-agnostic dispatch for the per-partition row-iterator API.
+     *
+     * <p>{@code rowIterator(key, slices, columns, reversed, listener)} is declared
+     * on each format-specific subclass ({@link BigTableReader},
+     * {@link BtiTableReader}) but not on the common {@link SSTableReader} parent,
+     * so we have to dispatch by {@code instanceof} ourselves. Both subclasses
+     * implement identical signatures so the rest of the validator's code path
+     * stays format-agnostic.
+     */
+    private static UnfilteredRowIterator openRowIterator(SSTableReader reader,
+                                                         DecoratedKey key,
+                                                         Slices slices,
+                                                         ColumnFilter columnFilter,
+                                                         boolean reversed,
+                                                         SSTableReadsListener listener)
+    {
+        if (reader instanceof BigTableReader)
+            return ((BigTableReader) reader).rowIterator(key, slices, columnFilter, reversed, listener);
+        if (reader instanceof BtiTableReader)
+            return ((BtiTableReader) reader).rowIterator(key, slices, columnFilter, reversed, listener);
+        throw new IllegalStateException(
+            "Validator depth-checks pass requires BIG or BTI format; got: " + reader.getClass().getName());
     }
 
     // ---- Phase B --------------------------------------------------------

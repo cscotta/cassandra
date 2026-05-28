@@ -275,6 +275,12 @@ public class TuiManager implements ProgressTap, AutoCloseable
     }
 
     @Override
+    public void onCompactionStatus(String backend, String message)
+    {
+        bus.push(new TuiEvent.CompactionStatus(backend, message));
+    }
+
+    @Override
     public void onCompactionComplete(String backend, CompactionStats stats)
     {
         bus.push(new TuiEvent.CompactionComplete(backend, stats));

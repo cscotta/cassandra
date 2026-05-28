@@ -144,6 +144,18 @@ public class CompactionPanel implements TuiPanel
                     target.addSstable(s.filename, s.sizeBytes, s.level);
             }
         }
+        else if (event instanceof TuiEvent.CompactionStatus e)
+        {
+            // Free-form status text — used in cross-format serial runs to mark
+            // the not-yet-running side as "queued" so its panel doesn't look
+            // frozen. CompactionTaskStart will overwrite this once the side
+            // actually starts compacting.
+            String msg = e.message == null ? "" : e.message;
+            if (BACKEND_LEGACY.equals(e.backend))
+                legacyTaskStatus = msg;
+            else if (BACKEND_CURSOR.equals(e.backend))
+                cursorTaskStatus = msg;
+        }
         else if (event instanceof TuiEvent.CompactionTaskStart e)
         {
             String status = describeTaskStart(e);

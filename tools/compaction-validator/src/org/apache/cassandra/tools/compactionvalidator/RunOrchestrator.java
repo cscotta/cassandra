@@ -357,8 +357,21 @@ public final class RunOrchestrator
                 resolvePipeline(experimentSide.pipeline,
                                 org.apache.cassandra.db.compaction.PipelineSelector.Backend.CURSOR);
 
+            // Per-side SSTable output format. {@code null} → use the JVM-global
+            // default (set by Main.bootstrapJvm to BIG). The parallelisation
+            // behaviour of {@link ParallelCompactor#run} differs based on whether
+            // the two sides agree on a format: identical (or both null) → run in
+            // parallel, different → serialise (because format selection is
+            // JVM-global at write time). Cursor's unsupportedSchema rejects
+            // non-BIG output, so that combination is rejected at config time.
+            org.apache.cassandra.io.sstable.format.SSTableFormat<?, ?> controlFormat =
+                resolveFormat(controlSide.format, controlBackend, "control");
+            org.apache.cassandra.io.sstable.format.SSTableFormat<?, ?> experimentFormat =
+                resolveFormat(experimentSide.format, experimentBackend, "experiment");
+
             ParallelCompactor.Result compactionResult = new ParallelCompactor(legacyCfsLocal, cursorCfsLocal,
                                                                               controlBackend, experimentBackend,
+                                                                              controlFormat, experimentFormat,
                                                                               compactionThreads, reporter).run();
             builder.legacyStats(compactionResult.legacyStats)
                    .cursorStats(compactionResult.cursorStats)
@@ -682,6 +695,52 @@ public final class RunOrchestrator
                 throw new IllegalArgumentException("Unknown pipeline '" + name
                                                    + "' (expected ITERATOR or CURSOR)");
         }
+    }
+
+    /**
+     * Resolves the user-supplied SSTable format string ({@code "BIG"} or
+     * {@code "BTI"}, case-insensitive) to a registered {@code SSTableFormat}.
+     * {@code null} or empty → returns {@code null} so the caller falls back to
+     * the JVM-global default.
+     *
+     * <p>Cursor-compaction's {@code unsupportedSchema} check rejects non-BIG
+     * outputs, so a side configured with {@code pipeline: CURSOR} and
+     * {@code format: BTI} is rejected here at config-validation time rather
+     * than letting it fail mid-run with a misleading "schema unsupported"
+     * message after the data has already been compacted.
+     */
+    private static org.apache.cassandra.io.sstable.format.SSTableFormat<?, ?> resolveFormat(
+        String name,
+        org.apache.cassandra.db.compaction.PipelineSelector.Backend backend,
+        String sideLabel)
+    {
+        if (name == null || name.trim().isEmpty())
+            return null; // inherit the JVM-global default
+
+        String normalized = name.trim().toLowerCase();
+        // Use the registered-formats map rather than each format's static
+        // {@code getInstance} accessor — only {@code BigFormat} actually exposes
+        // a static getter, and going through the registry keeps this lookup
+        // working uniformly even if more formats are added.
+        org.apache.cassandra.io.sstable.format.SSTableFormat<?, ?> format =
+            org.apache.cassandra.config.DatabaseDescriptor.getSSTableFormats().get(normalized);
+        if (format == null)
+        {
+            throw new IllegalArgumentException(
+                "Unknown SSTable format '" + name + "' on " + sideLabel
+                + " side (expected one of "
+                + org.apache.cassandra.config.DatabaseDescriptor.getSSTableFormats().keySet() + ")");
+        }
+
+        if (backend == org.apache.cassandra.db.compaction.PipelineSelector.Backend.CURSOR
+            && !"big".equals(normalized))
+        {
+            throw new IllegalArgumentException(
+                "CursorCompactor only supports BIG-format output; cannot use "
+                + "pipeline=CURSOR with format=" + normalized.toUpperCase()
+                + " on " + sideLabel + " side");
+        }
+        return format;
     }
 
     /** Best-effort drop of {@code keyspaceName} from the global Schema. Never throws. */

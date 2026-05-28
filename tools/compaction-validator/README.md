@@ -97,6 +97,16 @@ The framework can vary any of:
 
 - **Compaction pipeline** — `ITERATOR` (legacy) vs `CURSOR` (the original
   motivating comparison).
+- **SSTable output format** — `BIG` (the historical format,
+  `pa-N-big-Data.db` + `Index.db`) vs `BTI` (the trie-indexed format,
+  `ea-N-bti-Data.db` + `Partitions.db` + `Rows.db`). Specified per side
+  via `format: BIG | BTI` in the YAML; `null` / omitted ⇒ inherit the
+  JVM-global default (BIG, set in `Main.bootstrapJvm`). Cursor compaction
+  only supports BIG output, so `pipeline: CURSOR + format: BTI` is
+  rejected at config-load time. When the two sides specify different
+  formats, the compaction phase runs the two sides serially (toggling
+  `DatabaseDescriptor.setSelectedSSTableFormat` between them) instead of
+  in parallel — see [How it works](#how-it-works-high-level).
 - **Compaction strategy** — `UnifiedCompactionStrategy`,
   `SizeTieredCompactionStrategy`, `LeveledCompactionStrategy`,
   `TimeWindowCompactionStrategy`, with their full per-strategy options.
@@ -344,6 +354,7 @@ decide."
 |---|---|---|
 | `name` | string | Display label used in TUI panels, log entries, and the `[compact:<name>]` plain-text lines. The keyspace suffix derives from this name (`<base>_<sanitized-name>`). |
 | `pipeline` | string | Compaction pipeline. `ITERATOR` (or aliases `LEGACY` / `ITER`) for the legacy iterator pipeline; `CURSOR` for cursor-based compaction. Omit to randomize. |
+| `format` | string | SSTable output format for this side's compaction. `BIG` or `BTI` (case-insensitive). Omit to inherit the JVM-global default (BIG, set in `Main.bootstrapJvm`). The combination `pipeline: CURSOR + format: BTI` is rejected at config-load time — `CursorCompactor.unsupportedSchema` only accepts BIG output. When the two sides agree on a format (or both omit it), compaction runs in parallel; when they differ, the two sides run serially while the JVM-global format is toggled around each. Source data (written by `DataGenerator`) always uses the JVM-global default; only each side's compaction *output* is affected. |
 | `compaction.class` | string | Compaction strategy class. Examples: `UnifiedCompactionStrategy`, `SizeTieredCompactionStrategy`, `LeveledCompactionStrategy`, `TimeWindowCompactionStrategy`. |
 | `compaction.options` | map | Strategy-specific options that go into the `WITH compaction = { ... }` clause. |
 | `compression.class` | string | Compression codec class. Examples: `LZ4Compressor`, `ZstdCompressor`, `SnappyCompressor`, `DeflateCompressor`, or `null` for uncompressed. |
@@ -390,6 +401,7 @@ comparison:
   control:
     name: legacy
     pipeline: ITERATOR
+    format: BIG                # BIG | BTI; null/omitted → JVM-global default (BIG)
     compaction:
       class: UnifiedCompactionStrategy
       options:
@@ -403,6 +415,7 @@ comparison:
   experiment:
     name: cursor
     pipeline: CURSOR
+    format: BIG                # CURSOR + BTI is rejected at config-load
     compaction:
       class: UnifiedCompactionStrategy
       options:
@@ -620,7 +633,74 @@ tools/bin/compaction-validator \
 `--once` and `--no-ui` (config or CLI) the output is grep-able log
 lines suitable for a CI step.
 
-### 8. Reproducing a known failure
+### 8. BIG vs BTI cross-format comparison
+
+```yaml
+version: 1
+
+run:
+  target_bytes: 1G
+  datagen_threads: 4
+  compaction_threads: 12
+  validation_threads: 12
+  max_runs: 0
+  ignore_errata:
+    - equal-ts-tiebreaker
+    - tombstone-expiring-flags-both-set
+    - tombstone-resurrected-by-expiring
+    - prev-unfiltered-size-zero
+    - index-block-width-off-by-one
+    - wide-column-subset-dropped-last
+
+schema:
+  partitioner: Murmur3
+
+comparison:
+  control:
+    name: big
+    pipeline: ITERATOR
+    format: BIG
+  experiment:
+    name: bti
+    pipeline: ITERATOR
+    format: BTI
+```
+
+```bash
+tools/bin/compaction-validator \
+    --config tools/compaction-validator/configs/big-vs-bti.yaml
+```
+
+Both sides must use `ITERATOR` because cursor compaction's
+`unsupportedSchema` only accepts BIG output (`pipeline: CURSOR + format:
+BTI` is rejected at config-load time with a clear error). Cross-format
+runs serialise the two compactions internally — the JVM-global
+`DatabaseDescriptor.getSelectedSSTableFormat()` is read by
+`ColumnFamilyStore.newSSTableDescriptor` at write time, so the validator
+toggles it between sides and runs them sequentially. Expect roughly 2×
+the wall-clock duration of a same-format parallel run.
+
+On disk afterward, the two sides produce visually distinguishable file
+names:
+
+```
+output-legacy/<keyspace>/<table>-<id>/pa-N-big-Data.db
+                                       pa-N-big-Index.db
+                                       pa-N-big-Statistics.db
+                                       ...
+output-cursor/<keyspace>/<table>-<id>/ea-N-bti-Data.db
+                                       ea-N-bti-Partitions.db
+                                       ea-N-bti-Rows.db
+                                       ea-N-bti-Statistics.db
+                                       ...
+```
+
+The validator's identity check works at the logical (partition + row +
+cell) layer regardless of file format — the byte-level encoding differs
+between BIG and BTI but the merged `Unfiltered` stream a reader yields
+must agree.
+
+### 9. Reproducing a known failure
 
 When a run fails, the log entry includes a re-run command:
 
@@ -813,13 +893,17 @@ Inspect with `tools/bin/sstabledump` — see Example 8 above.
            │
            ├─► hard-link into /output-legacy/*.db ──► CompactionDriver(control)  ┐
            │                                          (pipeline + strategy + compression
-           │                                            from comparison.control)│
+           │                                            + format from comparison.control)
+           │                                                                    │
            │                                                                    ├─► merged
            ├─► hard-link into /output-cursor/*.db ──► CompactionDriver(experiment)│   output
            │                                          (pipeline + strategy + compression
-           │                                            from comparison.experiment)│
-           │   (ParallelCompactor pins one nowInSec across both drivers so       ┘
-           │    tombstone-GC / TTL-purge decisions are deterministic and identical)
+           │                                            + format from comparison.experiment)
+           │                                                                    ┘
+           │   (ParallelCompactor: parallel when both sides agree on format /
+           │    serial+toggle when they differ; single pinned nowInSec
+           │    shared across both drivers so tombstone-GC / TTL-purge
+           │    decisions are deterministic and identical)
            │
            ├─► FormatAuditor ──► byte-/semantic-level invariants on
            │     experiment-side SSTables, parallelised across CPU pool

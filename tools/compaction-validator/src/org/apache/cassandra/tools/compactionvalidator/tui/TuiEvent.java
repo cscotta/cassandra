@@ -45,6 +45,7 @@ public sealed abstract class TuiEvent
                 TuiEvent.CompactionTaskEnd,
                 TuiEvent.SstableEmitted,
                 TuiEvent.CompactionComplete,
+                TuiEvent.CompactionStatus,
                 TuiEvent.ValidationProgress,
                 TuiEvent.ValidationComplete,
                 TuiEvent.RunComplete,
@@ -251,6 +252,26 @@ public sealed abstract class TuiEvent
         {
             this.backend = backend;
             this.stats = stats;
+        }
+    }
+
+    /**
+     * Free-form status text for one side, used to surface states that don't fit
+     * the task-start/task-end/progress sequence — most importantly the
+     * "queued, waiting for the other side to finish" state during cross-format
+     * serial runs (where one format runs to completion before the other can
+     * start, because {@code DatabaseDescriptor.setSelectedSSTableFormat} is
+     * JVM-global). Setting an empty {@code message} clears the status line.
+     */
+    public static final class CompactionStatus extends TuiEvent
+    {
+        public final String backend;
+        public final String message;
+
+        public CompactionStatus(String backend, String message)
+        {
+            this.backend = backend;
+            this.message = message;
         }
     }
 

@@ -26,8 +26,10 @@ import java.util.concurrent.Future;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.compaction.PipelineSelector;
+import org.apache.cassandra.io.sstable.format.SSTableFormat;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.utils.FBUtilities;
 
@@ -51,6 +53,21 @@ public final class ParallelCompactor
     private final ColumnFamilyStore cursorCfs;
     private final PipelineSelector.Backend legacyBackend;
     private final PipelineSelector.Backend cursorBackend;
+    /**
+     * Per-side SSTable output format. {@code null} → use whatever the JVM-global
+     * {@link DatabaseDescriptor#getSelectedSSTableFormat()} returns at compaction
+     * time (BIG by default, set in {@code Main.bootstrapJvm}).
+     *
+     * <p>When the two sides specify the <em>same</em> format (or both are
+     * {@code null}), {@link #run()} dispatches the two compactions in parallel
+     * as before. When they differ, {@code run()} falls back to a serial
+     * implementation that toggles
+     * {@link DatabaseDescriptor#setSelectedSSTableFormat} around each side —
+     * format selection is JVM-global at write time and there's no per-CFS
+     * override hook in Cassandra's {@code CompactionAwareWriter} path.
+     */
+    private final SSTableFormat<?, ?> legacyFormat;
+    private final SSTableFormat<?, ?> cursorFormat;
     private final int taskConcurrencyPerBackend;
     private final org.apache.cassandra.tools.compactionvalidator.ProgressTap reporter;
 
@@ -60,7 +77,9 @@ public final class ParallelCompactor
      */
     public ParallelCompactor(ColumnFamilyStore legacyCfs, ColumnFamilyStore cursorCfs)
     {
-        this(legacyCfs, cursorCfs, PipelineSelector.Backend.ITERATOR, PipelineSelector.Backend.CURSOR, 1, null);
+        this(legacyCfs, cursorCfs,
+             PipelineSelector.Backend.ITERATOR, PipelineSelector.Backend.CURSOR,
+             null, null, 1, null);
     }
 
     /**
@@ -72,7 +91,9 @@ public final class ParallelCompactor
                              ColumnFamilyStore cursorCfs,
                              org.apache.cassandra.tools.compactionvalidator.ProgressTap reporter)
     {
-        this(legacyCfs, cursorCfs, PipelineSelector.Backend.ITERATOR, PipelineSelector.Backend.CURSOR, 1, reporter);
+        this(legacyCfs, cursorCfs,
+             PipelineSelector.Backend.ITERATOR, PipelineSelector.Backend.CURSOR,
+             null, null, 1, reporter);
     }
 
     /**
@@ -86,14 +107,32 @@ public final class ParallelCompactor
     {
         this(legacyCfs, cursorCfs,
              PipelineSelector.Backend.ITERATOR, PipelineSelector.Backend.CURSOR,
-             taskConcurrencyPerBackend, reporter);
+             null, null, taskConcurrencyPerBackend, reporter);
+    }
+
+    /**
+     * Backwards-compatible constructor without per-side format selection.
+     * Equivalent to passing {@code null} for both formats — both sides use the
+     * JVM-global {@link DatabaseDescriptor#getSelectedSSTableFormat()}.
+     */
+    public ParallelCompactor(ColumnFamilyStore legacyCfs,
+                             ColumnFamilyStore cursorCfs,
+                             PipelineSelector.Backend legacyBackend,
+                             PipelineSelector.Backend cursorBackend,
+                             int taskConcurrencyPerBackend,
+                             org.apache.cassandra.tools.compactionvalidator.ProgressTap reporter)
+    {
+        this(legacyCfs, cursorCfs, legacyBackend, cursorBackend,
+             null, null, taskConcurrencyPerBackend, reporter);
     }
 
     /**
      * Full constructor. Each side names its own pipeline backend so a comparison can
      * exercise iterator-vs-cursor (the original use case), iterator-vs-iterator (testing
      * compaction strategies on the same pipeline), or cursor-vs-cursor (testing compression
-     * codecs on the cursor pipeline).
+     * codecs on the cursor pipeline). Each side may also pin its own SSTable
+     * output format (BIG / BTI); {@code null} on either side means "use the
+     * JVM-global default."
      *
      * <p>Both sides share the same {@code taskConcurrencyPerBackend} value so that the
      * cursor-vs-legacy speedup measurement isn't perturbed by asymmetric parallelism.
@@ -102,6 +141,8 @@ public final class ParallelCompactor
                              ColumnFamilyStore cursorCfs,
                              PipelineSelector.Backend legacyBackend,
                              PipelineSelector.Backend cursorBackend,
+                             SSTableFormat<?, ?> legacyFormat,
+                             SSTableFormat<?, ?> cursorFormat,
                              int taskConcurrencyPerBackend,
                              org.apache.cassandra.tools.compactionvalidator.ProgressTap reporter)
     {
@@ -117,6 +158,8 @@ public final class ParallelCompactor
         this.cursorCfs = cursorCfs;
         this.legacyBackend = legacyBackend;
         this.cursorBackend = cursorBackend;
+        this.legacyFormat = legacyFormat;
+        this.cursorFormat = cursorFormat;
         this.taskConcurrencyPerBackend = taskConcurrencyPerBackend;
         this.reporter = reporter;
     }
@@ -133,6 +176,29 @@ public final class ParallelCompactor
      */
     public Result run() throws Exception
     {
+        // Same format on both sides (or both unspecified) → run in parallel as
+        // before. Different formats → must run serially because format selection
+        // is JVM-global at write time and there's no per-CFS override hook in
+        // CompactionAwareWriter — we toggle the global around each side.
+        if (formatsCompatible(legacyFormat, cursorFormat))
+            return runParallel();
+        return runSerial();
+    }
+
+    /**
+     * Returns {@code true} when the two sides can compact concurrently —
+     * either both omit a format (use the JVM default) or both pin the same
+     * format. Cross-format runs need serial execution; see {@link #runSerial}.
+     */
+    private static boolean formatsCompatible(SSTableFormat<?, ?> a, SSTableFormat<?, ?> b)
+    {
+        if (a == null && b == null) return true;
+        if (a == null || b == null) return false;
+        return a.name().equals(b.name());
+    }
+
+    private Result runParallel() throws Exception
+    {
         CompactionStats legacyStats = new CompactionStats();
         CompactionStats cursorStats = new CompactionStats();
 
@@ -144,6 +210,14 @@ public final class ParallelCompactor
         // correct. Pinning the value forces identical GC / TTL purge decisions and
         // eliminates the false-positive class entirely.
         final long pinnedNowInSec = FBUtilities.nowInSeconds();
+
+        // If a format is pinned (and both sides agree), set it once before the
+        // parallel pool starts so both threads see the right global. {@code null}
+        // means "use whatever's already set" — typically BIG from bootstrapJvm.
+        SSTableFormat<?, ?> previousGlobal = DatabaseDescriptor.getSelectedSSTableFormat();
+        SSTableFormat<?, ?> sharedFormat = legacyFormat != null ? legacyFormat : cursorFormat;
+        if (sharedFormat != null && sharedFormat != previousGlobal)
+            DatabaseDescriptor.setSelectedSSTableFormat(sharedFormat);
 
         ExecutorService pool = Executors.newFixedThreadPool(2, new NamedThreadFactory("compaction-validator-pair"));
         try
@@ -160,7 +234,8 @@ public final class ParallelCompactor
                                                                    legacyStats,
                                                                    taskConcurrencyPerBackend,
                                                                    reporter,
-                                                                   pinnedNowInSec).run();
+                                                                   pinnedNowInSec,
+                                                                   "legacy").run();
                 if (reporter != null)
                 {
                     try { reporter.onCompactionComplete("legacy", legacyStats); }
@@ -174,7 +249,8 @@ public final class ParallelCompactor
                                                                    cursorStats,
                                                                    taskConcurrencyPerBackend,
                                                                    reporter,
-                                                                   pinnedNowInSec).run();
+                                                                   pinnedNowInSec,
+                                                                   "cursor").run();
                 if (reporter != null)
                 {
                     try { reporter.onCompactionComplete("cursor", cursorStats); }
@@ -221,7 +297,133 @@ public final class ParallelCompactor
         finally
         {
             pool.shutdownNow();
+            // Restore the global format if we changed it. The orchestrator's next
+            // run will reset it from its own configured side anyway, but we leave
+            // the JVM in the same state we found it for cleanliness.
+            if (sharedFormat != null && sharedFormat != previousGlobal)
+                DatabaseDescriptor.setSelectedSSTableFormat(previousGlobal);
         }
+    }
+
+    /**
+     * Cross-format dispatch: toggle the JVM-global format between sides and run
+     * them serially. {@code DatabaseDescriptor.setSelectedSSTableFormat} controls
+     * which {@code SSTableFormat} {@code ColumnFamilyStore.newSSTableDescriptor}
+     * picks for compaction-output writers, so we must set the right format on the
+     * thread that constructs each side's {@code CompactionAwareWriter}.
+     *
+     * <p>Both sides still share a single pinned {@code nowInSec} captured before
+     * either runs — we lose parallelism for cross-format runs but we cannot
+     * lose the clock-pinning safeguard, otherwise GCGS=0 runs would spuriously
+     * diverge whenever the two compactions straddle a wall-clock-second
+     * boundary (gcBefore = nowInSec − gcGraceSeconds, so each side picking its
+     * own nowInSec means each side gets a slightly different gcBefore and they
+     * disagree on which tombstones are purgeable).
+     */
+    private Result runSerial() throws Exception
+    {
+        CompactionStats legacyStats = new CompactionStats();
+        CompactionStats cursorStats = new CompactionStats();
+
+        // Pin nowInSec ONCE so both sides see the same gcBefore. Same reasoning
+        // as runParallel(); the only difference is that here both sides run on
+        // this thread sequentially while format-toggling.
+        final long pinnedNowInSec = FBUtilities.nowInSeconds();
+
+        // Pre-emit onCompactionInputs for BOTH sides at the start of the serial
+        // run. Without this, the not-yet-running side's TUI panel sits empty
+        // for the duration of the first side's compaction and looks broken;
+        // pre-emitting lets both panels render their input SSTables and a
+        // "queued" status the moment the phase begins. The legacy side's
+        // CompactionDriver will fire onCompactionInputs again with the same
+        // payload when it actually starts, which is a harmless re-render.
+        if (reporter != null)
+        {
+            try { reporter.onCompactionInputs("legacy", liveInputsOf(legacyCfs)); }
+            catch (Throwable ignored) {}
+            try { reporter.onCompactionInputs("cursor", liveInputsOf(cursorCfs)); }
+            catch (Throwable ignored) {}
+            // Mark the cursor side as queued so its panel doesn't look frozen
+            // while the legacy side compacts. The first CompactionTaskStart on
+            // the cursor side will replace this string.
+            try { reporter.onCompactionStatus("cursor", "Queued (waiting for control format to finish)"); }
+            catch (Throwable ignored) {}
+        }
+
+        SSTableFormat<?, ?> previousGlobal = DatabaseDescriptor.getSelectedSSTableFormat();
+        try
+        {
+            // Legacy side first.
+            if (legacyFormat != null)
+                DatabaseDescriptor.setSelectedSSTableFormat(legacyFormat);
+            else if (previousGlobal != null)
+                DatabaseDescriptor.setSelectedSSTableFormat(previousGlobal);
+
+            Collection<SSTableReader> legacyOut = new CompactionDriver(legacyCfs,
+                                                                       legacyBackend,
+                                                                       legacyStats,
+                                                                       taskConcurrencyPerBackend,
+                                                                       reporter,
+                                                                       pinnedNowInSec,
+                                                                       "legacy").run();
+            if (reporter != null)
+            {
+                try { reporter.onCompactionComplete("legacy", legacyStats); }
+                catch (Throwable ignored) {}
+            }
+
+            // Switch to the experiment side's format.
+            if (cursorFormat != null)
+                DatabaseDescriptor.setSelectedSSTableFormat(cursorFormat);
+            else if (previousGlobal != null)
+                DatabaseDescriptor.setSelectedSSTableFormat(previousGlobal);
+
+            Collection<SSTableReader> cursorOut = new CompactionDriver(cursorCfs,
+                                                                       cursorBackend,
+                                                                       cursorStats,
+                                                                       taskConcurrencyPerBackend,
+                                                                       reporter,
+                                                                       pinnedNowInSec,
+                                                                       "cursor").run();
+            if (reporter != null)
+            {
+                try { reporter.onCompactionComplete("cursor", cursorStats); }
+                catch (Throwable ignored) {}
+            }
+
+            return new Result(legacyStats, cursorStats, legacyOut, cursorOut);
+        }
+        finally
+        {
+            DatabaseDescriptor.setSelectedSSTableFormat(previousGlobal);
+        }
+    }
+
+    /**
+     * Snapshots a CFS's currently-live SSTables as the boundary-friendly
+     * {@code SstableInfo} list used by {@code ProgressTap.onCompactionInputs}.
+     * Used by {@link #runSerial} to pre-emit both sides' input sets so the
+     * not-yet-running side's TUI panel doesn't sit blank during the other
+     * side's compaction.
+     */
+    private static java.util.List<org.apache.cassandra.tools.compactionvalidator.SstableInfo>
+    liveInputsOf(ColumnFamilyStore cfs)
+    {
+        Collection<SSTableReader> live = cfs.getLiveSSTables();
+        java.util.List<org.apache.cassandra.tools.compactionvalidator.SstableInfo> out =
+            new java.util.ArrayList<>(live.size());
+        for (SSTableReader r : live)
+        {
+            String full = r.getFilename();
+            int slash = Math.max(full.lastIndexOf('/'), full.lastIndexOf('\\'));
+            String basename = slash >= 0 ? full.substring(slash + 1) : full;
+            int level = 0;
+            try { level = r.getSSTableLevel(); }
+            catch (Throwable ignored) {}
+            out.add(new org.apache.cassandra.tools.compactionvalidator.SstableInfo(
+                basename, r.onDiskLength(), level));
+        }
+        return out;
     }
 
     private static Exception unwrap(ExecutionException ee)

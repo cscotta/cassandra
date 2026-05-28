@@ -48,7 +48,9 @@ tools/compaction-validator/
   configs/
     sample.yaml                         starting-point YAML
     iterator-vs-cursor.yaml             baseline ITERATOR-vs-CURSOR comparison
+    big-vs-bti.yaml                     ITERATOR(BIG) vs ITERATOR(BTI) cross-format comparison
     smoke-coverage.yaml                 small-target smoke run for the bug-coverage features
+    smoke-big-vs-bti.yaml               small-target smoke run for the cross-format path
   plans/
     cursor-bug-coverage.md              design doc for the bug-1A-through-1B-through-4 coverage extensions
   src/
@@ -74,8 +76,12 @@ tools/compaction-validator/
         CompactionDriver.java           drives one CFS through compaction;
                                           accepts pinned-nowInSec
         CompactionStats.java            mutable counters
-        ParallelCompactor.java          runs control + experiment in parallel;
-                                          captures the pinned nowInSec
+        ParallelCompactor.java          runs control + experiment in parallel
+                                          when their formats agree; serialises
+                                          (toggling DatabaseDescriptor.set-
+                                          SelectedSSTableFormat) when they
+                                          differ. Captures pinned nowInSec
+                                          shared across both sides.
         SstableSetManager.java          per-run dir + hard-link layout
       config/
         RunConfig.java                  top-level YAML root
@@ -127,8 +133,10 @@ tools/compaction-validator/
       validation/
         Validator.java                  Phase A / depth checks / Phase B driver;
                                           combined parallel reverse-scan +
-                                          point-read pass; CorruptSSTableException
-                                          handling
+                                          point-read pass. Format-agnostic
+                                          dispatch on BigTableReader /
+                                          BtiTableReader; CorruptSSTableException
+                                          handling.
         PartitionHasher.java            xxhash64 over Unfiltered stream
         PartitionComparator.java        cell-by-cell deep equals;
                                           keyspace-agnostic column equivalence
@@ -223,6 +231,7 @@ comparison:
   control:                                 # baseline / "known good" side
     name: legacy                           # display label (logs, TUI, mismatch reports)
     pipeline: ITERATOR                     # ITERATOR | CURSOR (with aliases)
+    format: BIG                            # BIG | BTI; null/omitted → JVM-global default
     compaction:                            # WITH compaction = { ... }
       class: UnifiedCompactionStrategy
       options:
@@ -236,6 +245,7 @@ comparison:
   experiment:                              # variation under test
     name: cursor
     pipeline: CURSOR
+    format: BIG                            # CURSOR + BTI is rejected at config-load time
     compaction: { class: UnifiedCompactionStrategy, options: { ... } }
     compression: { class: LZ4Compressor, chunk_length_in_kb: 16 }
     io_mode: standard                      # MUST equal control.io_mode
@@ -255,6 +265,24 @@ comparison:
 - **`io_mode` parity**: required for now (validated in `RunConfig.validate`).
   Per-side I/O modes require subprocess isolation since
   `DatabaseDescriptor.disk_access_mode` is JVM-global.
+- **`format` choice**: `BIG` or `BTI` (case-insensitive). Resolved through
+  `DatabaseDescriptor.getSSTableFormats()` so any registered format works
+  uniformly; unknown names fail with the registered set in the error
+  message. `null`/omitted → use the JVM-global default (BIG, set by
+  `Main.bootstrapJvm`). The combination
+  `pipeline: CURSOR + format: BTI` is rejected at config-load time:
+  `CursorCompactor.unsupportedSchema` requires BIG output, so the
+  combination would fail mid-run with a misleading "schema unsupported"
+  message after the data has already been compacted. When the two sides
+  agree on a format (or both omit it), compaction runs in parallel as
+  before; when they differ, `ParallelCompactor` falls back to a serial
+  implementation that toggles
+  `DatabaseDescriptor.setSelectedSSTableFormat` around each side — the
+  format selection is JVM-global at write time and there's no per-CFS
+  override hook in `CompactionAwareWriter`. Source data (written by
+  `DataGenerator`) is always emitted in whatever format is set at boot
+  (BIG by default); the per-side `format` only affects each side's
+  compaction *output*.
 - **CLI overrides**: `--seed`, `--working-dir`, `--log-file`, `--once`
   override the YAML / per-run defaults. No way to override individual YAML
   fields from the CLI — by design, the YAML is the source of truth.
@@ -424,11 +452,26 @@ For each side:
    explicitly
 
 ### Phase 4 — parallel compaction
-`ParallelCompactor` runs two `CompactionDriver` instances in a 2-thread pool,
-one per side. Each fires `reporter.onCompactionComplete(backend, stats)` the
+`ParallelCompactor` runs two `CompactionDriver` instances concurrently when
+both sides agree on the SSTable output format (or both omit it), one per
+side. Each fires `reporter.onCompactionComplete(backend, stats)` the
 instant its driver returns so a side that finishes first immediately freezes
 its rate metrics (avoids the rate counter visibly drifting toward zero while
 the other side is still going).
+
+**Cross-format runs:** `ParallelCompactor.run()` checks whether the two
+sides specify compatible formats. When the formats differ (e.g. `control:
+BIG` / `experiment: BTI`), it dispatches to a serial implementation
+instead — `DatabaseDescriptor.setSelectedSSTableFormat` is JVM-global at
+write time, and `ColumnFamilyStore.newSSTableDescriptor(directory)` reads
+that global, so two compaction threads writing concurrently with
+different formats would race on the global. The serial path runs the
+sides one after another and toggles the global between them. Both sides
+still share a single `pinnedNowInSec` (captured before either starts) so
+that GCGS=0 runs don't spuriously diverge whenever the two compactions
+straddle a wall-clock-second boundary. Cross-format runs lose
+parallelism (~2× wall-clock for the compaction phase) but produce
+correct results; same-format runs are unchanged.
 
 **Pinned `nowInSec`:** `ParallelCompactor.run()` captures one
 `FBUtilities.nowInSeconds()` *before* dispatching the two drivers and
@@ -546,17 +589,18 @@ run before suppression is consulted.
   A *single combined* forward walk per shard (sharded across the same
   `validation_threads` token ranges as Phase A) does both:
   - **Reverse-iter hash** — opens a per-partition reversed
-    `UnfilteredRowIterator` (via `BigTableReader.rowIterator(key, Slices.ALL,
-    ColumnFilter.all, reversed=true, ...)`), merges across SSTables, hashes
+    `UnfilteredRowIterator` (via {@code BigTableReader.rowIterator(key, Slices.ALL,
+    ColumnFilter.all, reversed=true, ...)} or its {@code BtiTableReader}
+    counterpart, dispatched by `instanceof` since the API isn't
+    abstract on the common parent), merges across SSTables, hashes
     the reverse stream, and compares. Catches compaction bug 2's broken
     `prevUnfilteredSize` (forward bytes are correct, reverse seek lands in
     the wrong place).
   - **Indexed point-read** — for partitions whose schema has clustering
     keys, captures the partition's last clustering during the forward walk,
-    then issues a point read via `BigTableReader.rowIterator(key,
-    Slices.with(Slice.make(lastClustering)), ...)` on each side and
-    compares the slice hash. Catches compaction bug 3's off-by-one in the
-    Index.db final-block width.
+    then issues a point read via the same format-agnostic dispatch on
+    each side and compares the slice hash. Catches compaction bug 3's
+    off-by-one in the Index.db final-block width.
   Sampled at one in 100 partitions per shard (`REVERSE_SCAN_STRIDE` /
   `POINT_READ_STRIDE`). Bug 2 affects every reverse iteration uniformly so
   1% sampling still catches it essentially every run; bug 3 only fires on
@@ -647,8 +691,14 @@ new run gets a wildly different seed from the previous one.
 ## 7. Cursor-compatibility constraints
 
 `CursorCompactor.isSupported(scanners, controller)` rejects:
-- Non-`BigFormat` SSTables → `Main.bootstrapJvm` calls
-  `setSelectedSSTableFormat(BigFormat.getInstance())`
+- Non-`BigFormat` output SSTables → `Main.bootstrapJvm` calls
+  `setSelectedSSTableFormat(BigFormat.getInstance())` to set the JVM-wide
+  default to BIG. A side that pins `format: BTI` in YAML works fine when
+  paired with `pipeline: ITERATOR` (the iterator pipeline supports both
+  formats), but `pipeline: CURSOR + format: BTI` is rejected at
+  config-load time by `RunOrchestrator.resolveFormat` rather than
+  letting the run reach `CursorCompactor.isSupported` with a
+  misleading error.
 - Range scanners → `getMaximalTasks` is given the full set, no
   `getScanners(set, range)` calls in this tool's path
 - Non-current-version SSTables → the validator only writes fresh sstables
@@ -986,8 +1036,11 @@ On failure: Valid line says `FAIL  |  <description>`, plus `Preserved:` +
    "inconsistent disk state". With `false` and a fresh storagedir, CMS
    bootstraps in seconds.
 4. `Keyspace.setInitialized()`
-5. `setSelectedSSTableFormat(BigFormat.getInstance())` — cursor only
-   supports BIG.
+5. `setSelectedSSTableFormat(BigFormat.getInstance())` — the default for
+   data-gen and (when no per-side `format:` is set) for both compactions.
+   Cursor only supports BIG; iterator supports both. Per-side `format:`
+   overrides this temporarily for the side's compaction-output writer
+   only — see §5 Phase 4 for the parallel-vs-serial dispatch.
 6. `setPartitionerUnsafe(Murmur3Partitioner.instance)` — required by
    `CursorCompactor.isSupported`.
 7. `setCompactionThroughputBytesPerSec(0)` — disable the 64 MiB/s default

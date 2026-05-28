@@ -145,4 +145,14 @@ public interface ProgressTap
      * Default no-op.
      */
     default void onCompactionTaskEnd(String backend, int taskIndex, java.util.List<SstableInfo> taskOutputs) {}
+
+    /**
+     * Free-form status text for one side. Used in cross-format serial runs
+     * (BIG vs BTI) to mark the not-yet-running side as "queued" while the other
+     * side compacts — without this the second side's panel sits blank for the
+     * entire first half of the phase. The first {@link #onCompactionTaskStart}
+     * for that side naturally overwrites the queued message. Pass an empty
+     * {@code message} to clear the status line. Default no-op.
+     */
+    default void onCompactionStatus(String backend, String message) {}
 }
