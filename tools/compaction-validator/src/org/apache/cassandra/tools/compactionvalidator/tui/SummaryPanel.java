@@ -28,7 +28,7 @@ import com.googlecode.lanterna.graphics.TextGraphics;
 
 import org.apache.cassandra.tools.compactionvalidator.RunResult;
 import org.apache.cassandra.tools.compactionvalidator.compaction.CompactionStats;
-import org.apache.cassandra.tools.compactionvalidator.data.DataGenStats;
+import org.apache.cassandra.tools.compactionvalidator.datagen.DataGenStats;
 import org.apache.cassandra.tools.compactionvalidator.util.SeedUtil;
 import org.apache.cassandra.tools.compactionvalidator.validation.MismatchReport;
 import org.apache.cassandra.tools.compactionvalidator.validation.ValidationStats;

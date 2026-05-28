@@ -92,7 +92,7 @@ tools/compaction-validator/
         CompactionSpec.java             {class, options} for compaction
         CompressionSpec.java            {class, options} for compression
         ConfigParser.java               SnakeYAML-backed loader
-      data/
+      datagen/
         DataGenerator.java              parallel CQLSSTableWriter driver;
                                           multi-row partitions, TTL gen,
                                           power-law cells, wide-row clause
@@ -156,7 +156,7 @@ tools/compaction-validator/
       DirectCompactionRunnerApiTest.java
     org/apache/cassandra/tools/compactionvalidator/
       compaction/SstableSetManagerTest.java
-      data/DataGeneratorDeterminismTest.java
+      datagen/DataGeneratorDeterminismTest.java
       schema/WideSchemaTest.java
       validation/ErrataCheckerTest.java
       validation/FormatAuditorTest.java
@@ -1135,7 +1135,7 @@ program (NOT a JUnit test) that prints inline determinism-check results
 without needing the heavy test JVM setup. Run via:
 ```
 java -cp build/classes/compaction-validator:build/tools/lib/compaction-validator.jar:...
-     org.apache.cassandra.tools.compactionvalidator.data.DataGeneratorDeterminismDriver
+     org.apache.cassandra.tools.compactionvalidator.datagen.DataGeneratorDeterminismDriver
 ```
 Useful when validating seed-determinism changes since the JUnit path with
 SnakeYAML / Cassandra bootstrap has a much higher cold-start cost.

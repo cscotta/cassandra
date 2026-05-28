@@ -961,7 +961,7 @@ JUnit test) checks all this:
 CP="build/classes/compaction-validator:build/tools/lib/compaction-validator.jar:build/apache-cassandra-7.0-SNAPSHOT.jar"
 for j in build/lib/jars/*.jar; do CP="$CP:$j"; done
 java -Xmx256m -cp "$CP" \
-    org.apache.cassandra.tools.compactionvalidator.data.DataGeneratorDeterminismDriver
+    org.apache.cassandra.tools.compactionvalidator.datagen.DataGeneratorDeterminismDriver
 ```
 
 It verifies the per-thread RNG sequence, that distinct thread indices

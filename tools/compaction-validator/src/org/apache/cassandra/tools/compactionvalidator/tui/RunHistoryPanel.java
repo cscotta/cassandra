@@ -30,7 +30,7 @@ import com.googlecode.lanterna.TextColor;
 import com.googlecode.lanterna.graphics.TextGraphics;
 
 import org.apache.cassandra.tools.compactionvalidator.RunResult;
-import org.apache.cassandra.tools.compactionvalidator.data.DataGenStats;
+import org.apache.cassandra.tools.compactionvalidator.datagen.DataGenStats;
 
 /**
  * Bottom-of-screen list of the most recent completed runs, providing quick

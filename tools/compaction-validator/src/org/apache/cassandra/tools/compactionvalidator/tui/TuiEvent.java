@@ -19,7 +19,7 @@ package org.apache.cassandra.tools.compactionvalidator.tui;
 
 import org.apache.cassandra.tools.compactionvalidator.RunResult;
 import org.apache.cassandra.tools.compactionvalidator.compaction.CompactionStats;
-import org.apache.cassandra.tools.compactionvalidator.data.DataGenStats;
+import org.apache.cassandra.tools.compactionvalidator.datagen.DataGenStats;
 import org.apache.cassandra.tools.compactionvalidator.schema.GeneratedSchema;
 import org.apache.cassandra.tools.compactionvalidator.validation.MismatchReport;
 import org.apache.cassandra.tools.compactionvalidator.validation.ValidationStats;

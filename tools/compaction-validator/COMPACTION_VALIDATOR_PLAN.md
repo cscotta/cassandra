@@ -366,10 +366,10 @@ public record GeneratedSchema(
 ### 3.4 Data Generator + Parallel SSTable Writers
 
 **Files:**
-- `tools/compaction-validator/src/org/apache/cassandra/tools/compactionvalidator/data/DataGenerator.java`
-- `tools/compaction-validator/src/org/apache/cassandra/tools/compactionvalidator/data/PartitionWriter.java`
-- `tools/compaction-validator/src/org/apache/cassandra/tools/compactionvalidator/data/RowGenerator.java`
-- `tools/compaction-validator/src/org/apache/cassandra/tools/compactionvalidator/data/DataGenStats.java`
+- `tools/compaction-validator/src/org/apache/cassandra/tools/compactionvalidator/datagen/DataGenerator.java`
+- `tools/compaction-validator/src/org/apache/cassandra/tools/compactionvalidator/datagen/PartitionWriter.java`
+- `tools/compaction-validator/src/org/apache/cassandra/tools/compactionvalidator/datagen/RowGenerator.java`
+- `tools/compaction-validator/src/org/apache/cassandra/tools/compactionvalidator/datagen/DataGenStats.java`
 
 **Writer:** Use `CQLSSTableWriter` (`src/java/org/apache/cassandra/io/sstable/CQLSSTableWriter.java:137`) — the **main-source-tree** public API. Do NOT use `HarrySSTableWriter` (test source; would create a production tool jar that depends on test code — see R4). `CQLSSTableWriter.Builder` accepts the generated CQL schema string directly and handles `clientInitialization` in its static block, but since we call `daemonInitialization()` first in `bootstrapJvm()`, the static block's `clientInitialization()` call will be a no-op (DD is already initialized). Verify this at Milestone 1 test time.
 

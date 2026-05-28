@@ -20,7 +20,7 @@ package org.apache.cassandra.tools.compactionvalidator;
 import java.io.PrintStream;
 
 import org.apache.cassandra.tools.compactionvalidator.compaction.CompactionStats;
-import org.apache.cassandra.tools.compactionvalidator.data.DataGenStats;
+import org.apache.cassandra.tools.compactionvalidator.datagen.DataGenStats;
 import org.apache.cassandra.tools.compactionvalidator.schema.GeneratedSchema;
 import org.apache.cassandra.tools.compactionvalidator.util.ByteUtil;
 import org.apache.cassandra.tools.compactionvalidator.util.SeedUtil;
