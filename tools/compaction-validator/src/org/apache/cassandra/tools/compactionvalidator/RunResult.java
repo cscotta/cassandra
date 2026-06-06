@@ -17,6 +17,9 @@
  */
 package org.apache.cassandra.tools.compactionvalidator;
 
+import java.util.Collections;
+import java.util.List;
+
 import org.apache.cassandra.tools.compactionvalidator.compaction.CompactionStats;
 import org.apache.cassandra.tools.compactionvalidator.datagen.DataGenStats;
 import org.apache.cassandra.tools.compactionvalidator.validation.FormatViolation;
@@ -148,7 +151,7 @@ public final class RunResult
      * compaction-writer bug like the {@code IS_DELETED}/{@code IS_EXPIRING} flag
      * collision (compaction bug 1A). Never {@code null}.
      */
-    public final java.util.List<FormatViolation> formatViolations;
+    public final List<FormatViolation> formatViolations;
 
     /**
      * Optional structural shape tag from the schema generator. {@code "NARROW"} for
@@ -198,8 +201,8 @@ public final class RunResult
         this.preservedDir = builder.preservedDir;
         this.mismatchReport = builder.mismatchReport;
         this.formatViolations = builder.formatViolations != null
-                                ? java.util.Collections.unmodifiableList(builder.formatViolations)
-                                : java.util.Collections.emptyList();
+                                ? Collections.unmodifiableList(builder.formatViolations)
+                                : Collections.emptyList();
         this.schemaShape = builder.schemaShape != null ? builder.schemaShape : "(unknown)";
         this.gcGraceSeconds = builder.gcGraceSeconds;
     }
@@ -279,7 +282,7 @@ public final class RunResult
         private String failureDetail;
         private String preservedDir;
         private MismatchReport mismatchReport;
-        private java.util.List<FormatViolation> formatViolations;
+        private List<FormatViolation> formatViolations;
         private String schemaShape;
         private int gcGraceSeconds = -1;
 
@@ -307,7 +310,7 @@ public final class RunResult
         public Builder failureDetail(String failureDetail) { this.failureDetail = failureDetail; return this; }
         public Builder preservedDir(String preservedDir) { this.preservedDir = preservedDir; return this; }
         public Builder mismatchReport(MismatchReport mismatchReport) { this.mismatchReport = mismatchReport; return this; }
-        public Builder formatViolations(java.util.List<FormatViolation> formatViolations) { this.formatViolations = formatViolations; return this; }
+        public Builder formatViolations(List<FormatViolation> formatViolations) { this.formatViolations = formatViolations; return this; }
         public Builder schemaShape(String schemaShape) { this.schemaShape = schemaShape; return this; }
         public Builder gcGraceSeconds(int gcGraceSeconds) { this.gcGraceSeconds = gcGraceSeconds; return this; }
 

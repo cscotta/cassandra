@@ -22,9 +22,13 @@ import java.io.IOException;
 import java.io.Reader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.yaml.snakeyaml.LoaderOptions;
 import org.yaml.snakeyaml.Yaml;
@@ -116,16 +120,16 @@ public final class ConfigParser
         if (m.containsKey("ignore_errata"))
         {
             Object v = m.get("ignore_errata");
-            if (v == null) rs.ignoreErrata = new java.util.ArrayList<>();
+            if (v == null) rs.ignoreErrata = new ArrayList<>();
             else if (v instanceof List)
             {
-                rs.ignoreErrata = new java.util.ArrayList<>();
+                rs.ignoreErrata = new ArrayList<>();
                 for (Object o : (List<?>) v) rs.ignoreErrata.add(String.valueOf(o));
             }
             else if (v instanceof String)
             {
                 // Allow comma-separated string for parity with the old --ignore-errata CLI form
-                rs.ignoreErrata = new java.util.ArrayList<>();
+                rs.ignoreErrata = new ArrayList<>();
                 for (String t : ((String) v).split(","))
                     if (!t.trim().isEmpty()) rs.ignoreErrata.add(t.trim());
             }
@@ -261,12 +265,12 @@ public final class ConfigParser
     /** Fails fast on unknown keys so a typo'd field surfaces immediately. */
     private static void rejectUnknownKeys(Map<String, Object> m, String section, String... allowed)
     {
-        java.util.Set<String> ok = new java.util.HashSet<>(java.util.Arrays.asList(allowed));
+        Set<String> ok = new HashSet<>(Arrays.asList(allowed));
         for (String k : m.keySet())
         {
             if (!ok.contains(k))
                 throw new IllegalArgumentException("Unknown key '" + k + "' under " + section
-                                                   + ". Allowed: " + java.util.Arrays.toString(allowed));
+                                                   + ". Allowed: " + Arrays.toString(allowed));
         }
     }
 

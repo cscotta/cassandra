@@ -17,6 +17,8 @@
  */
 package org.apache.cassandra.tools.compactionvalidator.config;
 
+import java.util.Objects;
+
 /**
  * Top-level configuration for one validator invocation, loaded from YAML by
  * {@link ConfigParser}. Everything the validator needs to know about a run
@@ -63,7 +65,7 @@ public final class RunConfig
         // First-cut limitation: io_mode must match across sides. See SideConfig.ioMode docs.
         String controlIo = comparison.control.ioMode;
         String experimentIo = comparison.experiment.ioMode;
-        if (!java.util.Objects.equals(controlIo, experimentIo))
+        if (!Objects.equals(controlIo, experimentIo))
             throw new IllegalArgumentException(
                 "comparison.control.io_mode (" + controlIo + ") must equal "
                 + "comparison.experiment.io_mode (" + experimentIo + "). Per-side I/O modes "

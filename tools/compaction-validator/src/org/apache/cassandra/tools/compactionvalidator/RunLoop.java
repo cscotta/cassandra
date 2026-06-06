@@ -18,13 +18,18 @@
 package org.apache.cassandra.tools.compactionvalidator;
 
 import java.security.SecureRandom;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.tools.compactionvalidator.config.RunConfig;
 import org.apache.cassandra.tools.compactionvalidator.logging.RunLogger;
+import org.apache.cassandra.tools.compactionvalidator.tui.TuiManager;
+import org.apache.cassandra.tools.compactionvalidator.util.ByteUtil;
 import org.apache.cassandra.tools.compactionvalidator.util.SeedUtil;
+import org.apache.cassandra.tools.compactionvalidator.validation.ErrataRule;
 
 /**
  * Long-running outer loop that repeatedly invokes a {@link RunOrchestrator}.
@@ -102,18 +107,18 @@ public class RunLoop
         // environment-level overrides (seed/workingDir/logFile/runOnce); the YAML
         // RunConfig holds everything else. Errata and target bytes get parsed up
         // front so a malformed value crashes the run before any I/O.
-        org.apache.cassandra.tools.compactionvalidator.config.RunConfig cfg = config.config;
+        RunConfig cfg = config.config;
         long targetBytes;
         try
         {
-            targetBytes = org.apache.cassandra.tools.compactionvalidator.util.ByteUtil.parseBytes(cfg.run.targetBytes);
+            targetBytes = ByteUtil.parseBytes(cfg.run.targetBytes);
         }
         catch (Exception e)
         {
             throw new RuntimeException("Invalid run.target_bytes '" + cfg.run.targetBytes + "': " + e.getMessage(), e);
         }
-        java.util.Set<org.apache.cassandra.tools.compactionvalidator.validation.ErrataRule> activeErrata =
-            org.apache.cassandra.tools.compactionvalidator.validation.ErrataRule.parseCliList(
+        Set<ErrataRule> activeErrata =
+            ErrataRule.parseCliList(
                 cfg.run.ignoreErrata == null ? "" : String.join(",", cfg.run.ignoreErrata));
 
         try
@@ -227,7 +232,7 @@ public class RunLoop
      */
     private boolean isQuitRequested()
     {
-        return reporter instanceof org.apache.cassandra.tools.compactionvalidator.tui.TuiManager tui
+        return reporter instanceof TuiManager tui
                && tui.isQuitRequested();
     }
 }

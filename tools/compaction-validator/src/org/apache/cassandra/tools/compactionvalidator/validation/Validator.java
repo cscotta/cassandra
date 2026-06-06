@@ -22,7 +22,9 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
+import java.util.NoSuchElementException;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -57,6 +59,8 @@ import org.apache.cassandra.io.sstable.SSTableReadsListener;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.big.BigTableReader;
 import org.apache.cassandra.io.sstable.format.bti.BtiTableReader;
+import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.utils.ByteBufferUtil;
 
 /**
  * Two-phase validator that compares the SSTables produced by the legacy and cursor
@@ -116,7 +120,7 @@ public final class Validator
                      ValidationStats stats)
     {
         this(legacyCfs, cursorCfs, legacySSTables, cursorSSTables, stats, 1,
-             java.util.Collections.emptySet());
+             Collections.emptySet());
     }
 
     /**
@@ -132,7 +136,7 @@ public final class Validator
                      int validationThreads)
     {
         this(legacyCfs, cursorCfs, legacySSTables, cursorSSTables, stats, validationThreads,
-             java.util.Collections.emptySet());
+             Collections.emptySet());
     }
 
     /**
@@ -148,7 +152,7 @@ public final class Validator
                      Collection<SSTableReader> cursorSSTables,
                      ValidationStats stats,
                      int validationThreads,
-                     java.util.Set<ErrataRule> activeErrata)
+                     Set<ErrataRule> activeErrata)
     {
         if (legacyCfs == null)
             throw new IllegalArgumentException("legacyCfs must not be null");
@@ -358,7 +362,7 @@ public final class Validator
                         // validate() runs Phase B's full report and halts the run.
                         if (errataChecker.isActive())
                         {
-                            java.util.Set<ErrataRule> fired = checkErrataForPartition(key);
+                            Set<ErrataRule> fired = checkErrataForPartition(key);
                             if (!fired.isEmpty())
                             {
                                 for (ErrataRule rule : fired)
@@ -389,7 +393,7 @@ public final class Validator
      *
      * @return the rules that fired (empty if it's a real mismatch)
      */
-    private java.util.Set<ErrataRule> checkErrataForPartition(DecoratedKey key) throws Exception
+    private Set<ErrataRule> checkErrataForPartition(DecoratedKey key) throws Exception
     {
         AbstractBounds<PartitionPosition> bounds = new Bounds<>(key, key);
         List<ISSTableScanner> legacyScanners = openScanners(legacySSTables, bounds);
@@ -404,7 +408,7 @@ public final class Validator
                 // If either side is missing the partition the check can't suppress —
                 // a present-vs-absent divergence is a real mismatch every time.
                 if (legacyPart == null || cursorPart == null)
-                    return java.util.Collections.emptySet();
+                    return Collections.emptySet();
                 return errataChecker.matches(legacyPart, cursorPart);
             }
             finally
@@ -867,7 +871,7 @@ public final class Validator
         return new UnfilteredPartitionIterator()
         {
             @Override
-            public org.apache.cassandra.schema.TableMetadata metadata()
+            public TableMetadata metadata()
             {
                 return legacyCfs.metadata();
             }
@@ -876,7 +880,7 @@ public final class Validator
             public boolean hasNext() { return false; }
 
             @Override
-            public UnfilteredRowIterator next() { throw new java.util.NoSuchElementException(); }
+            public UnfilteredRowIterator next() { throw new NoSuchElementException(); }
 
             @Override
             public void close() { /* no-op */ }
@@ -887,7 +891,7 @@ public final class Validator
 
     private static String hex(DecoratedKey key)
     {
-        return org.apache.cassandra.utils.ByteBufferUtil.bytesToHex(key.getKey());
+        return ByteBufferUtil.bytesToHex(key.getKey());
     }
 
     /**

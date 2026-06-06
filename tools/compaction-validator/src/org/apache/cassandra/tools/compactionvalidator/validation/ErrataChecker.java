@@ -18,8 +18,10 @@
 package org.apache.cassandra.tools.compactionvalidator.validation;
 
 import java.nio.ByteBuffer;
+import java.util.Collections;
 import java.util.EnumSet;
 import java.util.Iterator;
+import java.util.Objects;
 import java.util.Set;
 
 import org.apache.cassandra.db.DeletionTime;
@@ -49,7 +51,7 @@ public final class ErrataChecker
 
     public ErrataChecker(Set<ErrataRule> activeRules)
     {
-        this.activeRules = activeRules == null ? java.util.Collections.emptySet() : activeRules;
+        this.activeRules = activeRules == null ? Collections.emptySet() : activeRules;
     }
 
     /** @return {@code true} if at least one errata rule is active (worth invoking the matcher) */
@@ -425,7 +427,7 @@ public final class ErrataChecker
                 if (aa[i] != bb[i]) return false;
             return true;
         }
-        return java.util.Objects.equals(a, b);
+        return Objects.equals(a, b);
     }
 
     private static boolean cellPathEqual(Cell<?> a, Cell<?> b)

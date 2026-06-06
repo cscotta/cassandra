@@ -33,6 +33,7 @@ import org.apache.cassandra.tcm.ClusterMetadataService;
 import org.apache.cassandra.tools.compactionvalidator.config.ConfigParser;
 import org.apache.cassandra.tools.compactionvalidator.config.RunConfig;
 import org.apache.cassandra.tools.compactionvalidator.logging.RunLogger;
+import org.apache.cassandra.tools.compactionvalidator.tui.TuiManager;
 import org.apache.cassandra.tools.compactionvalidator.util.SeedUtil;
 
 @Command(
@@ -162,8 +163,7 @@ public class Main implements Runnable
 
         try
         {
-            org.apache.cassandra.tools.compactionvalidator.tui.TuiManager tui =
-                new org.apache.cassandra.tools.compactionvalidator.tui.TuiManager();
+            TuiManager tui = new TuiManager();
             tui.start();
             return tui;
         }

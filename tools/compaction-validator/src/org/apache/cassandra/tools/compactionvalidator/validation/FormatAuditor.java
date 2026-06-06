@@ -22,12 +22,19 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.cassandra.db.ClusteringComparator;
 import org.apache.cassandra.db.ClusteringPrefix;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.rows.Cell;
 import org.apache.cassandra.db.rows.ColumnData;
+import org.apache.cassandra.db.rows.ComplexColumnData;
 import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.Unfiltered;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
@@ -111,7 +118,7 @@ public final class FormatAuditor
         // Synchronised so concurrent worker threads can append safely.
         // Order across SSTables doesn't matter for downstream processing —
         // the RunLogger groups violations by kind and dumps them all.
-        List<FormatViolation> violations = java.util.Collections.synchronizedList(new ArrayList<>());
+        List<FormatViolation> violations = Collections.synchronizedList(new ArrayList<>());
 
         int threads = Math.min(sstables.size(), Runtime.getRuntime().availableProcessors());
         if (threads <= 1)
@@ -121,10 +128,10 @@ public final class FormatAuditor
             return new ArrayList<>(violations);
         }
 
-        java.util.concurrent.ExecutorService pool =
-            java.util.concurrent.Executors.newFixedThreadPool(threads, new java.util.concurrent.ThreadFactory()
+        ExecutorService pool =
+            Executors.newFixedThreadPool(threads, new ThreadFactory()
             {
-                private final java.util.concurrent.atomic.AtomicInteger n = new java.util.concurrent.atomic.AtomicInteger();
+                private final AtomicInteger n = new AtomicInteger();
                 @Override public Thread newThread(Runnable r)
                 {
                     Thread t = new Thread(r, "compaction-validator-audit-" + n.incrementAndGet());
@@ -132,7 +139,7 @@ public final class FormatAuditor
                     return t;
                 }
             });
-        List<java.util.concurrent.Future<?>> futures = new ArrayList<>(sstables.size());
+        List<Future<?>> futures = new ArrayList<>(sstables.size());
         try
         {
             for (SSTableReader reader : sstables)
@@ -140,10 +147,10 @@ public final class FormatAuditor
                 final SSTableReader r = reader;
                 futures.add(pool.submit(() -> auditOneCatching(r, clusteringComparator, violations)));
             }
-            for (java.util.concurrent.Future<?> f : futures)
+            for (Future<?> f : futures)
             {
                 try { f.get(); }
-                catch (java.util.concurrent.ExecutionException ee) { /* per-SSTable failures already captured */ }
+                catch (ExecutionException ee) { /* per-SSTable failures already captured */ }
                 catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
             }
         }
@@ -282,10 +289,9 @@ public final class FormatAuditor
         {
             if (cd instanceof Cell<?>)
                 auditCell((Cell<?>) cd, sstable, pkHex, out);
-            else if (cd instanceof org.apache.cassandra.db.rows.ComplexColumnData)
+            else if (cd instanceof ComplexColumnData)
             {
-                org.apache.cassandra.db.rows.ComplexColumnData complex =
-                    (org.apache.cassandra.db.rows.ComplexColumnData) cd;
+                ComplexColumnData complex = (ComplexColumnData) cd;
                 for (Cell<?> sub : complex)
                     auditCell(sub, sstable, pkHex, out);
             }

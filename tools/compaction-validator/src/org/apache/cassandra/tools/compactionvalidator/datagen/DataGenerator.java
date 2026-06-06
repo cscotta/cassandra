@@ -19,6 +19,7 @@ package org.apache.cassandra.tools.compactionvalidator.datagen;
 
 import java.io.File;
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -36,6 +37,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 import org.apache.cassandra.io.sstable.CQLSSTableWriter;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
@@ -273,8 +275,7 @@ public final class DataGenerator
         // Per-thread byte counter and stop flag — both updated only by this thread (via its own
         // CQLSSTableWriter listener), so no inter-thread race can affect when this thread stops.
         // The global `stats` counter is still updated for UI reporting.
-        final java.util.concurrent.atomic.AtomicLong threadBytes =
-            new java.util.concurrent.atomic.AtomicLong(0L);
+        final AtomicLong threadBytes = new AtomicLong(0L);
         final AtomicBoolean threadDone = new AtomicBoolean(false);
 
         while (!threadDone.get())
@@ -732,7 +733,7 @@ public final class DataGenerator
                 return rng.nextLong();
 
             case "varint":
-                return java.math.BigInteger.valueOf(rng.nextLong());
+                return BigInteger.valueOf(rng.nextLong());
 
             case "uuid":
                 return randomUuid(rng);
@@ -763,7 +764,7 @@ public final class DataGenerator
                 return randomBytes(rng, BLOB_SMALL_MIN, BLOB_SMALL_MAX);
 
             case "decimal":
-                return new BigDecimal(java.math.BigInteger.valueOf(rng.nextInt(10000)), rng.nextInt(5));
+                return new BigDecimal(BigInteger.valueOf(rng.nextInt(10000)), rng.nextInt(5));
 
             case "set<text>":
             case "frozen<set<text>>":
@@ -789,7 +790,7 @@ public final class DataGenerator
             }
 
             case "tuple<int, text>":
-                // CQLSSTableWriter does not directly support java.util.List for tuple values
+                // CQLSSTableWriter does not directly support List for tuple values
                 // in all Cassandra versions; pass null to avoid codec resolution issues.
                 // A future milestone can wire up TupleValue once the codec layer is confirmed.
                 return null;

@@ -18,6 +18,7 @@
 package org.apache.cassandra.tools.compactionvalidator.tui;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
@@ -113,7 +114,7 @@ public class LsmTreeWidget
         // A size-tier view buckets by log2(size_in_MiB) so small flushes appear separately
         // from compacted larger sstables and the progression of compaction up the tiers is
         // visible. Tier 0 = <1 MiB, tier 1 = 1..2 MiB, tier 2 = 2..4 MiB, ..., tier 10 = 1..2 GiB.
-        Map<Integer, List<Box>> byTier = new TreeMap<>(java.util.Comparator.reverseOrder());
+        Map<Integer, List<Box>> byTier = new TreeMap<>(Comparator.reverseOrder());
         for (Box b : boxes)
             byTier.computeIfAbsent(sizeTier(b.sizeBytes), k -> new ArrayList<>()).add(b);
 

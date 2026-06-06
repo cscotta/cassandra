@@ -238,7 +238,7 @@ public final class DirectCompactionRunner
      * Same-package accessor for {@link CompactionTask#inputSSTables()}, which is {@code protected}.
      * Lets tool code in other packages observe the input set of a task without subclassing.
      */
-    public static java.util.Set<org.apache.cassandra.io.sstable.format.SSTableReader> inputSSTablesOf(CompactionTask task)
+    public static Set<SSTableReader> inputSSTablesOf(CompactionTask task)
     {
         return task.inputSSTables();
     }

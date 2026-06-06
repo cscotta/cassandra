@@ -17,6 +17,8 @@
  */
 package org.apache.cassandra.tools.compactionvalidator;
 
+import java.util.List;
+
 import org.apache.cassandra.tools.compactionvalidator.compaction.CompactionStats;
 import org.apache.cassandra.tools.compactionvalidator.datagen.DataGenStats;
 import org.apache.cassandra.tools.compactionvalidator.schema.GeneratedSchema;
@@ -123,7 +125,7 @@ public interface ProgressTap
      * Lists every SSTable the backend has on disk at start (these are the run's input set).
      * Default no-op so existing implementations don't need to override.
      */
-    default void onCompactionInputs(String backend, java.util.List<SstableInfo> inputs) {}
+    default void onCompactionInputs(String backend, List<SstableInfo> inputs) {}
 
     /**
      * Called immediately before a single compaction task starts. Lists the SSTables
@@ -133,7 +135,7 @@ public interface ProgressTap
      * cumulative count of tasks already completed for this backend across all rounds.
      * Default no-op.
      */
-    default void onCompactionTaskStart(String backend, java.util.List<SstableInfo> taskInputs,
+    default void onCompactionTaskStart(String backend, List<SstableInfo> taskInputs,
                                        int targetLevel, int taskIndex, int tasksInBatch, int totalTasksDone) {}
 
     /**
@@ -144,7 +146,7 @@ public interface ProgressTap
      * {@code Start}/{@code End} events before this task's matching {@code End} arrives).
      * Default no-op.
      */
-    default void onCompactionTaskEnd(String backend, int taskIndex, java.util.List<SstableInfo> taskOutputs) {}
+    default void onCompactionTaskEnd(String backend, int taskIndex, List<SstableInfo> taskOutputs) {}
 
     /**
      * Free-form status text for one side. Used in cross-format serial runs

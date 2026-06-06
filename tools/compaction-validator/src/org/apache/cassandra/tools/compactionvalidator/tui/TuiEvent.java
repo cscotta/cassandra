@@ -17,7 +17,10 @@
  */
 package org.apache.cassandra.tools.compactionvalidator.tui;
 
+import java.util.List;
+
 import org.apache.cassandra.tools.compactionvalidator.RunResult;
+import org.apache.cassandra.tools.compactionvalidator.SstableInfo;
 import org.apache.cassandra.tools.compactionvalidator.compaction.CompactionStats;
 import org.apache.cassandra.tools.compactionvalidator.datagen.DataGenStats;
 import org.apache.cassandra.tools.compactionvalidator.schema.GeneratedSchema;
@@ -183,10 +186,10 @@ public sealed abstract class TuiEvent
     public static final class CompactionInputs extends TuiEvent
     {
         public final String backend;
-        public final java.util.List<org.apache.cassandra.tools.compactionvalidator.SstableInfo> inputs;
+        public final List<SstableInfo> inputs;
 
         public CompactionInputs(String backend,
-                                java.util.List<org.apache.cassandra.tools.compactionvalidator.SstableInfo> inputs)
+                                List<SstableInfo> inputs)
         {
             this.backend = backend;
             this.inputs = inputs;
@@ -203,14 +206,14 @@ public sealed abstract class TuiEvent
     public static final class CompactionTaskStart extends TuiEvent
     {
         public final String backend;
-        public final java.util.List<org.apache.cassandra.tools.compactionvalidator.SstableInfo> taskInputs;
+        public final List<SstableInfo> taskInputs;
         public final int targetLevel;
         public final int taskIndex;
         public final int tasksInBatch;
         public final int totalTasksDone;
 
         public CompactionTaskStart(String backend,
-                                   java.util.List<org.apache.cassandra.tools.compactionvalidator.SstableInfo> taskInputs,
+                                   List<SstableInfo> taskInputs,
                                    int targetLevel,
                                    int taskIndex,
                                    int tasksInBatch,
@@ -230,11 +233,11 @@ public sealed abstract class TuiEvent
     {
         public final String backend;
         public final int taskIndex;
-        public final java.util.List<org.apache.cassandra.tools.compactionvalidator.SstableInfo> taskOutputs;
+        public final List<SstableInfo> taskOutputs;
 
         public CompactionTaskEnd(String backend,
                                  int taskIndex,
-                                 java.util.List<org.apache.cassandra.tools.compactionvalidator.SstableInfo> taskOutputs)
+                                 List<SstableInfo> taskOutputs)
         {
             this.backend = backend;
             this.taskIndex = taskIndex;

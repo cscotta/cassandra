@@ -18,10 +18,13 @@
 package org.apache.cassandra.tools.compactionvalidator.validation;
 
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.Set;
 
 import org.apache.cassandra.db.rows.Cell;
+import org.apache.cassandra.db.rows.ColumnData;
+import org.apache.cassandra.db.rows.Row;
 
 /**
  * Catalogue of <em>known</em> cursor-vs-legacy compaction divergences whose root cause
@@ -147,7 +150,7 @@ public enum ErrataRule
         }
 
         @Override
-        boolean explainsResurrectedRow(org.apache.cassandra.db.rows.Row cursorRow)
+        boolean explainsResurrectedRow(Row cursorRow)
         {
             // Static-row manifestation of bug 1B: when 16 same-TS writes to a
             // static column produce {tombstone, expiring} candidates, legacy's
@@ -166,7 +169,7 @@ public enum ErrataRule
             if (cursorRow == null || cursorRow.isEmpty())
                 return false;
             boolean anyExpiring = false;
-            for (org.apache.cassandra.db.rows.ColumnData cd : cursorRow)
+            for (ColumnData cd : cursorRow)
             {
                 if (!(cd instanceof Cell<?>))
                     return false;
@@ -374,7 +377,7 @@ public enum ErrataRule
      * "the entire row disappears on one side" override this and inspect the
      * non-empty side's cells for their fingerprint.
      */
-    boolean explainsResurrectedRow(org.apache.cassandra.db.rows.Row cursorRow)
+    boolean explainsResurrectedRow(Row cursorRow)
     {
         return false;
     }
@@ -410,7 +413,7 @@ public enum ErrataRule
     public static Set<ErrataRule> parseCliList(String cliList)
     {
         if (cliList == null || cliList.trim().isEmpty())
-            return java.util.Collections.emptySet();
+            return Collections.emptySet();
 
         Set<ErrataRule> result = new LinkedHashSet<>();
         for (String token : cliList.split(","))

@@ -35,6 +35,7 @@ import com.googlecode.lanterna.terminal.Terminal;
 
 import org.apache.cassandra.tools.compactionvalidator.ProgressTap;
 import org.apache.cassandra.tools.compactionvalidator.RunResult;
+import org.apache.cassandra.tools.compactionvalidator.SstableInfo;
 import org.apache.cassandra.tools.compactionvalidator.compaction.CompactionStats;
 import org.apache.cassandra.tools.compactionvalidator.datagen.DataGenStats;
 import org.apache.cassandra.tools.compactionvalidator.schema.GeneratedSchema;
@@ -249,14 +250,14 @@ public class TuiManager implements ProgressTap, AutoCloseable
 
     @Override
     public void onCompactionInputs(String backend,
-                                   java.util.List<org.apache.cassandra.tools.compactionvalidator.SstableInfo> inputs)
+                                   List<SstableInfo> inputs)
     {
         bus.push(new TuiEvent.CompactionInputs(backend, inputs));
     }
 
     @Override
     public void onCompactionTaskStart(String backend,
-                                      java.util.List<org.apache.cassandra.tools.compactionvalidator.SstableInfo> taskInputs,
+                                      List<SstableInfo> taskInputs,
                                       int targetLevel,
                                       int taskIndex,
                                       int tasksInBatch,
@@ -269,7 +270,7 @@ public class TuiManager implements ProgressTap, AutoCloseable
     @Override
     public void onCompactionTaskEnd(String backend,
                                     int taskIndex,
-                                    java.util.List<org.apache.cassandra.tools.compactionvalidator.SstableInfo> taskOutputs)
+                                    List<SstableInfo> taskOutputs)
     {
         bus.push(new TuiEvent.CompactionTaskEnd(backend, taskIndex, taskOutputs));
     }

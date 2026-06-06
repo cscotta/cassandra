@@ -17,7 +17,9 @@
  */
 package org.apache.cassandra.tools.compactionvalidator.compaction;
 
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.List;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -31,6 +33,8 @@ import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.compaction.PipelineSelector;
 import org.apache.cassandra.io.sstable.format.SSTableFormat;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.tools.compactionvalidator.ProgressTap;
+import org.apache.cassandra.tools.compactionvalidator.SstableInfo;
 import org.apache.cassandra.utils.FBUtilities;
 
 /**
@@ -69,7 +73,7 @@ public final class ParallelCompactor
     private final SSTableFormat<?, ?> legacyFormat;
     private final SSTableFormat<?, ?> cursorFormat;
     private final int taskConcurrencyPerBackend;
-    private final org.apache.cassandra.tools.compactionvalidator.ProgressTap reporter;
+    private final ProgressTap reporter;
 
     /**
      * @param legacyCfs CFS configured to read from the legacy/output-legacy directory
@@ -89,7 +93,7 @@ public final class ParallelCompactor
      */
     public ParallelCompactor(ColumnFamilyStore legacyCfs,
                              ColumnFamilyStore cursorCfs,
-                             org.apache.cassandra.tools.compactionvalidator.ProgressTap reporter)
+                             ProgressTap reporter)
     {
         this(legacyCfs, cursorCfs,
              PipelineSelector.Backend.ITERATOR, PipelineSelector.Backend.CURSOR,
@@ -103,7 +107,7 @@ public final class ParallelCompactor
     public ParallelCompactor(ColumnFamilyStore legacyCfs,
                              ColumnFamilyStore cursorCfs,
                              int taskConcurrencyPerBackend,
-                             org.apache.cassandra.tools.compactionvalidator.ProgressTap reporter)
+                             ProgressTap reporter)
     {
         this(legacyCfs, cursorCfs,
              PipelineSelector.Backend.ITERATOR, PipelineSelector.Backend.CURSOR,
@@ -120,7 +124,7 @@ public final class ParallelCompactor
                              PipelineSelector.Backend legacyBackend,
                              PipelineSelector.Backend cursorBackend,
                              int taskConcurrencyPerBackend,
-                             org.apache.cassandra.tools.compactionvalidator.ProgressTap reporter)
+                             ProgressTap reporter)
     {
         this(legacyCfs, cursorCfs, legacyBackend, cursorBackend,
              null, null, taskConcurrencyPerBackend, reporter);
@@ -144,7 +148,7 @@ public final class ParallelCompactor
                              SSTableFormat<?, ?> legacyFormat,
                              SSTableFormat<?, ?> cursorFormat,
                              int taskConcurrencyPerBackend,
-                             org.apache.cassandra.tools.compactionvalidator.ProgressTap reporter)
+                             ProgressTap reporter)
     {
         if (legacyCfs == null)
             throw new IllegalArgumentException("legacyCfs must not be null");
@@ -406,12 +410,11 @@ public final class ParallelCompactor
      * not-yet-running side's TUI panel doesn't sit blank during the other
      * side's compaction.
      */
-    private static java.util.List<org.apache.cassandra.tools.compactionvalidator.SstableInfo>
+    private static List<SstableInfo>
     liveInputsOf(ColumnFamilyStore cfs)
     {
         Collection<SSTableReader> live = cfs.getLiveSSTables();
-        java.util.List<org.apache.cassandra.tools.compactionvalidator.SstableInfo> out =
-            new java.util.ArrayList<>(live.size());
+        List<SstableInfo> out = new ArrayList<>(live.size());
         for (SSTableReader r : live)
         {
             String full = r.getFilename();
@@ -420,8 +423,7 @@ public final class ParallelCompactor
             int level = 0;
             try { level = r.getSSTableLevel(); }
             catch (Throwable ignored) {}
-            out.add(new org.apache.cassandra.tools.compactionvalidator.SstableInfo(
-                basename, r.onDiskLength(), level));
+            out.add(new SstableInfo(basename, r.onDiskLength(), level));
         }
         return out;
     }

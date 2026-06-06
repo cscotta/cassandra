@@ -18,13 +18,17 @@
 package org.apache.cassandra.tools.compactionvalidator.tui;
 
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
+import java.util.TreeSet;
 
 import com.googlecode.lanterna.SGR;
 import com.googlecode.lanterna.TerminalPosition;
 import com.googlecode.lanterna.TerminalSize;
 import com.googlecode.lanterna.TextColor;
 import com.googlecode.lanterna.graphics.TextGraphics;
+
+import org.apache.cassandra.tools.compactionvalidator.SstableInfo;
 
 /**
  * Side-by-side compaction visualisation: a {@link LsmTreeWidget} for each of
@@ -140,7 +144,7 @@ public class CompactionPanel implements TuiPanel
                                 : BACKEND_CURSOR.equals(e.backend) ? cursor : null;
             if (target != null)
             {
-                for (org.apache.cassandra.tools.compactionvalidator.SstableInfo s : e.inputs)
+                for (SstableInfo s : e.inputs)
                     target.addSstable(s.filename, s.sizeBytes, s.level);
             }
         }
@@ -561,11 +565,11 @@ public class CompactionPanel implements TuiPanel
     }
 
     /** Sums the on-disk sizes of a task's input set; used as the per-task bar denominator. */
-    private static long sumInputBytes(java.util.List<org.apache.cassandra.tools.compactionvalidator.SstableInfo> inputs)
+    private static long sumInputBytes(List<SstableInfo> inputs)
     {
         if (inputs == null) return 0L;
         long total = 0L;
-        for (org.apache.cassandra.tools.compactionvalidator.SstableInfo s : inputs)
+        for (SstableInfo s : inputs)
             total += s.sizeBytes;
         return total;
     }
@@ -573,12 +577,12 @@ public class CompactionPanel implements TuiPanel
     /** Builds the status string for the start of a task (e.g. "Compacting 4 sstables (256M, L0) → L0"). */
     private static String describeTaskStart(TuiEvent.CompactionTaskStart e)
     {
-        java.util.List<org.apache.cassandra.tools.compactionvalidator.SstableInfo> ins = e.taskInputs;
+        List<SstableInfo> ins = e.taskInputs;
         if (ins == null || ins.isEmpty())
             return "Compacting (no inputs)";
         long bytes = 0L;
-        java.util.Set<Integer> levels = new java.util.TreeSet<>();
-        for (org.apache.cassandra.tools.compactionvalidator.SstableInfo s : ins)
+        Set<Integer> levels = new TreeSet<>();
+        for (SstableInfo s : ins)
         {
             bytes += s.sizeBytes;
             levels.add(s.level);
@@ -590,7 +594,7 @@ public class CompactionPanel implements TuiPanel
             sb.append("L").append(levels.iterator().next());
         else
             sb.append("L").append(levels.iterator().next()).append("..L")
-              .append(((java.util.TreeSet<Integer>) levels).last());
+              .append(((TreeSet<Integer>) levels).last());
         sb.append(')');
         if (e.targetLevel >= 0)
             sb.append(" → L").append(e.targetLevel);
@@ -600,11 +604,11 @@ public class CompactionPanel implements TuiPanel
     /** Builds the status string for the end of a task (e.g. "Wrote 2 sstables (210M)"). */
     private static String describeTaskEnd(TuiEvent.CompactionTaskEnd e)
     {
-        java.util.List<org.apache.cassandra.tools.compactionvalidator.SstableInfo> outs = e.taskOutputs;
+        List<SstableInfo> outs = e.taskOutputs;
         if (outs == null || outs.isEmpty())
             return "Task complete (no output)";
         long bytes = 0L;
-        for (org.apache.cassandra.tools.compactionvalidator.SstableInfo s : outs)
+        for (SstableInfo s : outs)
             bytes += s.sizeBytes;
         return "Wrote " + outs.size() + " sstables (" + TuiUtil.formatBytes(bytes) + ")";
     }

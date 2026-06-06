@@ -18,12 +18,16 @@
 package org.apache.cassandra.tools.compactionvalidator;
 
 import java.io.PrintStream;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 
 import org.apache.cassandra.tools.compactionvalidator.compaction.CompactionStats;
 import org.apache.cassandra.tools.compactionvalidator.datagen.DataGenStats;
 import org.apache.cassandra.tools.compactionvalidator.schema.GeneratedSchema;
 import org.apache.cassandra.tools.compactionvalidator.util.ByteUtil;
 import org.apache.cassandra.tools.compactionvalidator.util.SeedUtil;
+import org.apache.cassandra.tools.compactionvalidator.validation.ErrataRule;
 import org.apache.cassandra.tools.compactionvalidator.validation.MismatchReport;
 import org.apache.cassandra.tools.compactionvalidator.validation.ValidationStats;
 
@@ -141,7 +145,7 @@ public class PlainTextReporter implements ProgressTap
     }
 
     @Override
-    public synchronized void onCompactionTaskStart(String backend, java.util.List<SstableInfo> taskInputs,
+    public synchronized void onCompactionTaskStart(String backend, List<SstableInfo> taskInputs,
                                                    int targetLevel, int taskIndex, int tasksInBatch, int totalTasksDone)
     {
         if ("legacy".equals(backend))
@@ -206,7 +210,7 @@ public class PlainTextReporter implements ProgressTap
             out.println("[validate] ╔══════════════════════════════════════════════════════════════════════════╗");
             out.printf ("[validate] ║ ERRATA SUPPRESSED — %d partition(s) matched a known cursor-compaction bug ║%n", totalErrata);
             out.println("[validate] ╠══════════════════════════════════════════════════════════════════════════╣");
-            for (java.util.Map.Entry<org.apache.cassandra.tools.compactionvalidator.validation.ErrataRule, java.util.concurrent.atomic.AtomicLong> e
+            for (Map.Entry<ErrataRule, AtomicLong> e
                  : stats.errataOccurrences.entrySet())
             {
                 long n = e.getValue().get();

@@ -28,9 +28,14 @@ import java.nio.file.StandardOpenOption;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.EnumMap;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 
 import org.apache.cassandra.tools.compactionvalidator.RunResult;
 import org.apache.cassandra.tools.compactionvalidator.compaction.CompactionStats;
+import org.apache.cassandra.tools.compactionvalidator.validation.ErrataRule;
+import org.apache.cassandra.tools.compactionvalidator.validation.FormatViolation;
 import org.apache.cassandra.tools.compactionvalidator.validation.ValidationStats;
 
 /**
@@ -210,7 +215,7 @@ public class RunLogger implements Closeable
                 writer.write(String.format("  Errata:  %d suppressed (run still PASS):",
                                            vs.totalErrataOccurrences()));
                 writer.newLine();
-                for (java.util.Map.Entry<org.apache.cassandra.tools.compactionvalidator.validation.ErrataRule, java.util.concurrent.atomic.AtomicLong> e
+                for (Map.Entry<ErrataRule, AtomicLong> e
                      : vs.errataOccurrences.entrySet())
                 {
                     long n = e.getValue().get();
@@ -257,15 +262,15 @@ public class RunLogger implements Closeable
         // ("which cells?") investigations from the same artifact.
         if (result.formatViolations != null && !result.formatViolations.isEmpty())
         {
-            java.util.Map<org.apache.cassandra.tools.compactionvalidator.validation.FormatViolation.Kind, Integer> kindCounts =
-                new java.util.EnumMap<>(org.apache.cassandra.tools.compactionvalidator.validation.FormatViolation.Kind.class);
-            for (org.apache.cassandra.tools.compactionvalidator.validation.FormatViolation v : result.formatViolations)
+            Map<FormatViolation.Kind, Integer> kindCounts =
+                new EnumMap<>(FormatViolation.Kind.class);
+            for (FormatViolation v : result.formatViolations)
                 kindCounts.merge(v.kind, 1, Integer::sum);
 
             writer.write(String.format("  Format:  %d violation(s) on experiment side:",
                                        result.formatViolations.size()));
             writer.newLine();
-            for (java.util.Map.Entry<org.apache.cassandra.tools.compactionvalidator.validation.FormatViolation.Kind, Integer> e
+            for (Map.Entry<FormatViolation.Kind, Integer> e
                  : kindCounts.entrySet())
             {
                 writer.write(String.format("    %-32s  %d", e.getKey().cliName(), e.getValue()));
@@ -276,7 +281,7 @@ public class RunLogger implements Closeable
             int capped = Math.min(32, result.formatViolations.size());
             for (int i = 0; i < capped; i++)
             {
-                org.apache.cassandra.tools.compactionvalidator.validation.FormatViolation v = result.formatViolations.get(i);
+                FormatViolation v = result.formatViolations.get(i);
                 writer.write("    [" + v.kind.cliName() + "] sstable=" + shortName(v.sstableFilename)
                              + " pk=" + v.partitionKeyHex + " — " + v.detail);
                 writer.newLine();

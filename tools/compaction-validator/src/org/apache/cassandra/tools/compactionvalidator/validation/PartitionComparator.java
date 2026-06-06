@@ -31,6 +31,7 @@ import org.apache.cassandra.db.rows.RangeTombstoneMarker;
 import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.Unfiltered;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
+import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
 /**
@@ -263,8 +264,8 @@ public final class PartitionComparator
      * the same column in the schema sense: name, kind, position, and the
      * (in-keyspace-agnostic) type representation.
      */
-    private static boolean columnsEquivalentAcrossKeyspaces(org.apache.cassandra.schema.ColumnMetadata a,
-                                                            org.apache.cassandra.schema.ColumnMetadata b)
+    private static boolean columnsEquivalentAcrossKeyspaces(ColumnMetadata a,
+                                                            ColumnMetadata b)
     {
         return a.name.equals(b.name)
             && a.kind == b.kind

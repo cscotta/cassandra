@@ -18,23 +18,33 @@
 package org.apache.cassandra.tools.compactionvalidator;
 
 import java.io.File;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.statements.schema.CreateTableStatement;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.db.Keyspace;
+import org.apache.cassandra.db.compaction.PipelineSelector;
 import org.apache.cassandra.io.sstable.Component;
+import org.apache.cassandra.io.sstable.CorruptSSTableException;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.format.SSTableFormat;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
@@ -44,19 +54,25 @@ import org.apache.cassandra.schema.Keyspaces;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.SchemaTransformation;
 import org.apache.cassandra.schema.SchemaTransformations;
+import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.schema.Tables;
 import org.apache.cassandra.schema.Types;
 import org.apache.cassandra.schema.UserFunctions;
 import org.apache.cassandra.schema.Views;
 import org.apache.cassandra.service.ClientState;
+import org.apache.cassandra.tcm.ClusterMetadata;
+import org.apache.cassandra.tcm.serialization.Version;
 import org.apache.cassandra.tools.compactionvalidator.compaction.ParallelCompactor;
 import org.apache.cassandra.tools.compactionvalidator.compaction.SstableSetManager;
+import org.apache.cassandra.tools.compactionvalidator.config.RunConfig;
+import org.apache.cassandra.tools.compactionvalidator.config.SideConfig;
 import org.apache.cassandra.tools.compactionvalidator.datagen.DataGenStats;
 import org.apache.cassandra.tools.compactionvalidator.datagen.DataGenerator;
 import org.apache.cassandra.tools.compactionvalidator.schema.GeneratedSchema;
 import org.apache.cassandra.tools.compactionvalidator.schema.SchemaGenerator;
 import org.apache.cassandra.tools.compactionvalidator.util.SeedUtil;
+import org.apache.cassandra.tools.compactionvalidator.validation.ErrataRule;
 import org.apache.cassandra.tools.compactionvalidator.validation.FormatAuditor;
 import org.apache.cassandra.tools.compactionvalidator.validation.FormatViolation;
 import org.apache.cassandra.tools.compactionvalidator.validation.MismatchReport;
@@ -97,10 +113,10 @@ public final class RunOrchestrator
     private final int dataGenThreads;
     private final int compactionThreads;
     private final int validationThreads;
-    private final java.util.Set<org.apache.cassandra.tools.compactionvalidator.validation.ErrataRule> activeErrata;
+    private final Set<ErrataRule> activeErrata;
     private final boolean cleanupOnSuccess;
     private final ProgressTap reporter;
-    private final org.apache.cassandra.tools.compactionvalidator.config.RunConfig config;
+    private final RunConfig config;
 
     /**
      * Creates an orchestrator for one run.
@@ -126,10 +142,10 @@ public final class RunOrchestrator
                            int dataGenThreads,
                            int compactionThreads,
                            int validationThreads,
-                           java.util.Set<org.apache.cassandra.tools.compactionvalidator.validation.ErrataRule> activeErrata,
+                           Set<ErrataRule> activeErrata,
                            boolean cleanupOnSuccess,
                            ProgressTap reporter,
-                           org.apache.cassandra.tools.compactionvalidator.config.RunConfig config)
+                           RunConfig config)
     {
         if (workingDir == null)
             throw new IllegalArgumentException("workingDir must not be null");
@@ -154,7 +170,7 @@ public final class RunOrchestrator
         this.dataGenThreads = dataGenThreads;
         this.compactionThreads = compactionThreads;
         this.validationThreads = validationThreads;
-        this.activeErrata = activeErrata == null ? java.util.Collections.emptySet() : activeErrata;
+        this.activeErrata = activeErrata == null ? Collections.emptySet() : activeErrata;
         this.cleanupOnSuccess = cleanupOnSuccess;
         this.reporter = reporter;
         this.config = config;
@@ -209,8 +225,8 @@ public final class RunOrchestrator
             // Per-side keyspace suffixes derive from the configured side names so two
             // runs with different control/experiment labels get different keyspaces.
             // Sanitize to keep the name a legal CQL identifier.
-            org.apache.cassandra.tools.compactionvalidator.config.SideConfig controlSide = config.comparison.control;
-            org.apache.cassandra.tools.compactionvalidator.config.SideConfig experimentSide = config.comparison.experiment;
+            SideConfig controlSide = config.comparison.control;
+            SideConfig experimentSide = config.comparison.experiment;
             String controlSuffix    = "_" + sanitizeKeyspacePart(config.comparison.controlName());
             String experimentSuffix = "_" + sanitizeKeyspacePart(config.comparison.experimentName());
             String legacyKs = baseKs + controlSuffix;
@@ -253,8 +269,8 @@ public final class RunOrchestrator
             // there's no race against the post-completion render.
             final DataGenStats liveStats = dataGen.getStats();
             final long dataGenTickerStartMs = dataGenStartMs;
-            java.util.concurrent.ScheduledExecutorService dataGenTicker =
-                java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
+            ScheduledExecutorService dataGenTicker =
+                Executors.newSingleThreadScheduledExecutor(r -> {
                     Thread th = new Thread(r, "compaction-validator-datagen-ticker");
                     th.setDaemon(true);
                     return th;
@@ -273,7 +289,7 @@ public final class RunOrchestrator
                 {
                     // Reporter must not break datagen.
                 }
-            }, 250L, 250L, java.util.concurrent.TimeUnit.MILLISECONDS);
+            }, 250L, 250L, TimeUnit.MILLISECONDS);
 
             DataGenStats dataGenStats;
             try
@@ -317,15 +333,15 @@ public final class RunOrchestrator
             String cursorCql = schema.buildCqlForSide(cursorKs, experimentSide);
 
             // Register schema first; deterministic table ids let us predict the data path.
-            org.apache.cassandra.schema.TableId legacyTableId = registerKeyspaceAndTable(legacyKs, legacyCql);
-            org.apache.cassandra.schema.TableId cursorTableId = registerKeyspaceAndTable(cursorKs, cursorCql);
+            TableId legacyTableId = registerKeyspaceAndTable(legacyKs, legacyCql);
+            TableId cursorTableId = registerKeyspaceAndTable(cursorKs, cursorCql);
 
             File legacyCfsDir = expectedCfsDataDir(legacyDir, legacyKs, schema.getTableName(), legacyTableId);
             File cursorCfsDir = expectedCfsDataDir(cursorDir, cursorKs, schema.getTableName(), cursorTableId);
             if (!legacyCfsDir.exists() && !legacyCfsDir.mkdirs())
-                throw new java.io.IOException("Could not create CFS data directory: " + legacyCfsDir);
+                throw new IOException("Could not create CFS data directory: " + legacyCfsDir);
             if (!cursorCfsDir.exists() && !cursorCfsDir.mkdirs())
-                throw new java.io.IOException("Could not create CFS data directory: " + cursorCfsDir);
+                throw new IOException("Could not create CFS data directory: " + cursorCfsDir);
             sstableSet.hardLinkSourceTo(legacyCfsDir);
             sstableSet.hardLinkSourceTo(cursorCfsDir);
 
@@ -350,12 +366,12 @@ public final class RunOrchestrator
             // experiment) when the config omits a value — this keeps legacy-vs-cursor
             // runs working with a minimal config and lets non-pipeline comparisons
             // (e.g. UCS-vs-LCS with both on iterator) stay symmetric on the pipeline axis.
-            org.apache.cassandra.db.compaction.PipelineSelector.Backend controlBackend  =
+            PipelineSelector.Backend controlBackend  =
                 resolvePipeline(controlSide.pipeline,
-                                org.apache.cassandra.db.compaction.PipelineSelector.Backend.ITERATOR);
-            org.apache.cassandra.db.compaction.PipelineSelector.Backend experimentBackend =
+                                PipelineSelector.Backend.ITERATOR);
+            PipelineSelector.Backend experimentBackend =
                 resolvePipeline(experimentSide.pipeline,
-                                org.apache.cassandra.db.compaction.PipelineSelector.Backend.CURSOR);
+                                PipelineSelector.Backend.CURSOR);
 
             // Per-side SSTable output format. {@code null} → use the JVM-global
             // default (set by Main.bootstrapJvm to BIG). The parallelisation
@@ -364,9 +380,9 @@ public final class RunOrchestrator
             // parallel, different → serialise (because format selection is
             // JVM-global at write time). Cursor's unsupportedSchema rejects
             // non-BIG output, so that combination is rejected at config time.
-            org.apache.cassandra.io.sstable.format.SSTableFormat<?, ?> controlFormat =
+            SSTableFormat<?, ?> controlFormat =
                 resolveFormat(controlSide.format, controlBackend, "control");
-            org.apache.cassandra.io.sstable.format.SSTableFormat<?, ?> experimentFormat =
+            SSTableFormat<?, ?> experimentFormat =
                 resolveFormat(experimentSide.format, experimentBackend, "experiment");
 
             ParallelCompactor.Result compactionResult = new ParallelCompactor(legacyCfsLocal, cursorCfsLocal,
@@ -390,7 +406,7 @@ public final class RunOrchestrator
             // Wrapped in a fresh ArrayList because the validator below may also append
             // SCANNER_FAILURE violations on a CorruptSSTableException, and
             // FormatAuditor.audit returns an empty immutable list when given no input.
-            java.util.List<FormatViolation> formatViolations = new java.util.ArrayList<>(
+            List<FormatViolation> formatViolations = new ArrayList<>(
                 FormatAuditor.audit(compactionResult.cursorSSTables,
                                     cursorCfsLocal.metadata().comparator));
 
@@ -414,8 +430,8 @@ public final class RunOrchestrator
                                            ? 0 : compactionResult.legacySSTables.size();
             final int cursorSstableCount = compactionResult.cursorSSTables == null
                                            ? 0 : compactionResult.cursorSSTables.size();
-            java.util.concurrent.ScheduledExecutorService validateTicker =
-                java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
+            ScheduledExecutorService validateTicker =
+                Executors.newSingleThreadScheduledExecutor(r -> {
                     Thread th = new Thread(r, "compaction-validator-validate-ticker");
                     th.setDaemon(true);
                     return th;
@@ -423,14 +439,14 @@ public final class RunOrchestrator
             validateTicker.scheduleAtFixedRate(() -> {
                 try { reporter.onValidationProgress(validationStatsRef.partitionsChecked.get()); }
                 catch (Throwable ignored) {}
-            }, 250L, 250L, java.util.concurrent.TimeUnit.MILLISECONDS);
+            }, 250L, 250L, TimeUnit.MILLISECONDS);
 
             Optional<MismatchReport> mismatch;
             try
             {
                 mismatch = validator.validate();
             }
-            catch (org.apache.cassandra.io.sstable.CorruptSSTableException corrupt)
+            catch (CorruptSSTableException corrupt)
             {
                 // Validator scanner hit an unreadable experiment-side SSTable. This
                 // is the documented cascading symptom of compaction bug 1A: once a
@@ -471,12 +487,10 @@ public final class RunOrchestrator
             // violations bump their rule's counter in ValidationStats so the
             // Errata: line in the run log reports them alongside Phase A mismatches;
             // unsuppressed violations are folded into the failure decision below.
-            java.util.List<FormatViolation> unsuppressedViolations = new java.util.ArrayList<>();
+            List<FormatViolation> unsuppressedViolations = new ArrayList<>();
             for (FormatViolation v : formatViolations)
             {
-                org.apache.cassandra.tools.compactionvalidator.validation.ErrataRule rule =
-                    org.apache.cassandra.tools.compactionvalidator.validation.ErrataRule
-                        .forFormatViolation(v.kind);
+                ErrataRule rule = ErrataRule.forFormatViolation(v.kind);
                 if (rule != null && activeErrata.contains(rule))
                     validationStats.recordErrata(rule);
                 else
@@ -676,9 +690,9 @@ public final class RunOrchestrator
      * Accepts the canonical {@code ITERATOR} / {@code CURSOR} spellings plus a few
      * convenience aliases ({@code legacy}/{@code iter} for ITERATOR).
      */
-    private static org.apache.cassandra.db.compaction.PipelineSelector.Backend resolvePipeline(
+    private static PipelineSelector.Backend resolvePipeline(
         String name,
-        org.apache.cassandra.db.compaction.PipelineSelector.Backend defaultBackend)
+        PipelineSelector.Backend defaultBackend)
     {
         if (name == null || name.trim().isEmpty())
             return defaultBackend;
@@ -688,9 +702,9 @@ public final class RunOrchestrator
             case "ITERATOR":
             case "LEGACY":
             case "ITER":
-                return org.apache.cassandra.db.compaction.PipelineSelector.Backend.ITERATOR;
+                return PipelineSelector.Backend.ITERATOR;
             case "CURSOR":
-                return org.apache.cassandra.db.compaction.PipelineSelector.Backend.CURSOR;
+                return PipelineSelector.Backend.CURSOR;
             default:
                 throw new IllegalArgumentException("Unknown pipeline '" + name
                                                    + "' (expected ITERATOR or CURSOR)");
@@ -709,9 +723,9 @@ public final class RunOrchestrator
      * than letting it fail mid-run with a misleading "schema unsupported"
      * message after the data has already been compacted.
      */
-    private static org.apache.cassandra.io.sstable.format.SSTableFormat<?, ?> resolveFormat(
+    private static SSTableFormat<?, ?> resolveFormat(
         String name,
-        org.apache.cassandra.db.compaction.PipelineSelector.Backend backend,
+        PipelineSelector.Backend backend,
         String sideLabel)
     {
         if (name == null || name.trim().isEmpty())
@@ -722,17 +736,16 @@ public final class RunOrchestrator
         // {@code getInstance} accessor — only {@code BigFormat} actually exposes
         // a static getter, and going through the registry keeps this lookup
         // working uniformly even if more formats are added.
-        org.apache.cassandra.io.sstable.format.SSTableFormat<?, ?> format =
-            org.apache.cassandra.config.DatabaseDescriptor.getSSTableFormats().get(normalized);
+        SSTableFormat<?, ?> format = DatabaseDescriptor.getSSTableFormats().get(normalized);
         if (format == null)
         {
             throw new IllegalArgumentException(
                 "Unknown SSTable format '" + name + "' on " + sideLabel
                 + " side (expected one of "
-                + org.apache.cassandra.config.DatabaseDescriptor.getSSTableFormats().keySet() + ")");
+                + DatabaseDescriptor.getSSTableFormats().keySet() + ")");
         }
 
-        if (backend == org.apache.cassandra.db.compaction.PipelineSelector.Backend.CURSOR
+        if (backend == PipelineSelector.Backend.CURSOR
             && !"big".equals(normalized))
         {
             throw new IllegalArgumentException(
@@ -751,16 +764,16 @@ public final class RunOrchestrator
             Schema.instance.submit(new SchemaTransformation()
             {
                 @Override
-                public Keyspaces apply(org.apache.cassandra.tcm.ClusterMetadata metadata)
+                public Keyspaces apply(ClusterMetadata metadata)
                 {
                     return metadata.schema.getKeyspaces().without(keyspaceName);
                 }
 
                 @Override
-                public boolean compatibleWith(org.apache.cassandra.tcm.ClusterMetadata metadata)
+                public boolean compatibleWith(ClusterMetadata metadata)
                 {
                     return metadata.directory.commonSerializationVersion
-                                             .isAtLeast(org.apache.cassandra.tcm.serialization.Version.V0);
+                                             .isAtLeast(Version.V0);
                 }
             });
         }
@@ -786,7 +799,7 @@ public final class RunOrchestrator
      * SSTable id generator would scan an empty directory and later collide with
      * post-construction file additions).
      */
-    private static org.apache.cassandra.schema.TableId registerKeyspaceAndTable(String keyspaceName, String cql)
+    private static TableId registerKeyspaceAndTable(String keyspaceName, String cql)
     {
         // Ensure the keyspace exists.
         KeyspaceMetadata existing = Schema.instance.getKeyspaceMetadata(keyspaceName);
@@ -814,7 +827,7 @@ public final class RunOrchestrator
         CreateTableStatement statement = rawStatement.prepare(state);
         statement.validate(state);
 
-        org.apache.cassandra.schema.TableId deterministicId = deterministicTableId(keyspaceName, tableName);
+        TableId deterministicId = deterministicTableId(keyspaceName, tableName);
         TableMetadata tableMetadata = statement.builder(Types.none(), UserFunctions.none())
                                                 .id(deterministicId)
                                                 .build();
@@ -823,10 +836,10 @@ public final class RunOrchestrator
     }
 
     /** Computes a deterministic {@link org.apache.cassandra.schema.TableId} from keyspace+table name. */
-    private static org.apache.cassandra.schema.TableId deterministicTableId(String keyspaceName, String tableName)
+    private static TableId deterministicTableId(String keyspaceName, String tableName)
     {
-        byte[] key = (keyspaceName + "." + tableName).getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        return org.apache.cassandra.schema.TableId.fromUUID(java.util.UUID.nameUUIDFromBytes(key));
+        byte[] key = (keyspaceName + "." + tableName).getBytes(StandardCharsets.UTF_8);
+        return TableId.fromUUID(UUID.nameUUIDFromBytes(key));
     }
 
     /**
@@ -836,7 +849,7 @@ public final class RunOrchestrator
      * {@link TableMetadata#getTableDirectoryName()}.
      */
     private static File expectedCfsDataDir(File dataDir, String keyspaceName, String tableName,
-                                           org.apache.cassandra.schema.TableId tableId)
+                                           TableId tableId)
     {
         return new File(new File(dataDir, keyspaceName), tableName + "-" + tableId.toHexString());
     }

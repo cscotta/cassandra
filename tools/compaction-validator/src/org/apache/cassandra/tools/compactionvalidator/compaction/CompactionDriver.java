@@ -19,6 +19,7 @@ package org.apache.cassandra.tools.compactionvalidator.compaction;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -46,6 +47,7 @@ import org.apache.cassandra.db.compaction.OperationType;
 import org.apache.cassandra.db.compaction.PipelineSelector;
 import org.apache.cassandra.db.lifecycle.LifecycleTransaction;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.tools.compactionvalidator.ProgressTap;
 import org.apache.cassandra.tools.compactionvalidator.SstableInfo;
 import org.apache.cassandra.utils.FBUtilities;
 
@@ -84,7 +86,7 @@ public final class CompactionDriver
     private final ColumnFamilyStore cfs;
     private final PipelineSelector.Backend backend;
     private final CompactionStats stats;
-    private final org.apache.cassandra.tools.compactionvalidator.ProgressTap reporter;
+    private final ProgressTap reporter;
     private final String backendLabel;
     private final int taskConcurrency;
     /**
@@ -113,7 +115,7 @@ public final class CompactionDriver
     public CompactionDriver(ColumnFamilyStore cfs,
                             PipelineSelector.Backend backend,
                             CompactionStats stats,
-                            org.apache.cassandra.tools.compactionvalidator.ProgressTap reporter)
+                            ProgressTap reporter)
     {
         this(cfs, backend, stats, 1, reporter);
     }
@@ -129,7 +131,7 @@ public final class CompactionDriver
                             PipelineSelector.Backend backend,
                             CompactionStats stats,
                             int taskConcurrency,
-                            org.apache.cassandra.tools.compactionvalidator.ProgressTap reporter)
+                            ProgressTap reporter)
     {
         this(cfs, backend, stats, taskConcurrency, reporter, null);
     }
@@ -144,7 +146,7 @@ public final class CompactionDriver
                             PipelineSelector.Backend backend,
                             CompactionStats stats,
                             int taskConcurrency,
-                            org.apache.cassandra.tools.compactionvalidator.ProgressTap reporter,
+                            ProgressTap reporter,
                             Long fixedNowInSec)
     {
         this(cfs, backend, stats, taskConcurrency, reporter, fixedNowInSec, null);
@@ -164,7 +166,7 @@ public final class CompactionDriver
                             PipelineSelector.Backend backend,
                             CompactionStats stats,
                             int taskConcurrency,
-                            org.apache.cassandra.tools.compactionvalidator.ProgressTap reporter,
+                            ProgressTap reporter,
                             Long fixedNowInSec,
                             String routingTag)
     {
@@ -340,7 +342,7 @@ public final class CompactionDriver
                                                AtomicLong totalTasksDone) throws Exception
     {
         // Use a synchronized collection — multiple concurrent tasks may addAll to it.
-        Set<SSTableReader> outputs = java.util.Collections.synchronizedSet(new LinkedHashSet<>());
+        Set<SSTableReader> outputs = Collections.synchronizedSet(new LinkedHashSet<>());
 
         // Count only tasks that actually run through DirectCompactionRunner — those are the
         // ones the TUI cares about (taskIndex/tasksInBatch). Non-CompactionTask subclasses
