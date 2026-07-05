@@ -87,7 +87,11 @@ public class Injections
         long pid = getProcessId();
         List<String> properties = new ArrayList<>();
         properties.add("org.jboss.byteman.transform.all=true");
-        Install.install(Long.toString(pid), true, true, FBUtilities.getBroadcastAddressAndPort().getAddress().getHostAddress(), port, properties.toArray(new String[0]));
+        // Byteman's Transformer.installPolicy() calls Policy.setPolicy() when setPolicy=true, which throws
+        // UnsupportedOperationException on JDK 24+ where the SecurityManager is permanently disabled (JEP 486).
+        // Without a SecurityManager the Byteman policy is unnecessary, so disable it on those JVMs.
+        boolean setPolicy = Runtime.version().feature() < 24;
+        Install.install(Long.toString(pid), true, setPolicy, FBUtilities.getBroadcastAddressAndPort().getAddress().getHostAddress(), port, properties.toArray(new String[0]));
         return port;
     }
 

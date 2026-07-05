@@ -155,15 +155,40 @@ public class AuthorizationProxy implements InvocationHandler
 
     protected JmxInvocationListener listener = AuditLogManager.instance;
 
+    /**
+     * Returns the {@link Subject} associated with the current JMX invocation.
+     * <p>
+     * On JDK 18+ this uses {@code Subject.current()} (invoked reflectively so this class still compiles on
+     * JDK 11/17, where the method does not exist). The legacy {@code Subject.getSubject(AccessControlContext)}
+     * returns null once the Security Manager is permanently disabled (JDK 24+, JEP 486); a null Subject here
+     * is treated as a local-connector call by {@link #authorize} and would bypass JMX authorization, so we
+     * must not rely on it. (AuditLogManager.JmxHandler carries an identical helper - keep them in sync.)
+     */
+    private static Subject currentSubject()
+    {
+        if (Runtime.version().feature() >= 18)
+        {
+            try
+            {
+                return (Subject) Subject.class.getMethod("current").invoke(null);
+            }
+            catch (ReflectiveOperationException e)
+            {
+                throw new RuntimeException("Failed to invoke Subject.current()", e);
+            }
+        }
+        AccessControlContext acc = AccessController.getContext();
+        return Subject.getSubject(acc);
+    }
+
     @Override
     public Object invoke(Object proxy, Method method, Object[] args)
             throws Throwable
     {
         String methodName = method.getName();
 
-        // Retrieve Subject from current AccessControlContext
-        AccessControlContext acc = AccessController.getContext();
-        Subject subject = Subject.getSubject(acc);
+        // Retrieve the Subject established for this JMX invocation.
+        Subject subject = currentSubject();
 
         try
         {

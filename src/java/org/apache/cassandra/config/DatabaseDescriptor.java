@@ -4854,6 +4854,11 @@ public class DatabaseDescriptor
         return conf.allow_insecure_udfs;
     }
 
+    public static void setAllowInsecureUDFs(boolean allowInsecureUDFs)
+    {
+        conf.allow_insecure_udfs = allowInsecureUDFs;
+    }
+
     public static boolean allowExtraInsecureUDFs()
     {
         return conf.allow_extra_insecure_udfs;

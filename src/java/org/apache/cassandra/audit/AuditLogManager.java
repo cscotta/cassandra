@@ -473,6 +473,32 @@ public class AuditLogManager implements QueryEvents.Listener, AuthEvents.Listene
         log(entry, exception);
     }
 
+    /**
+     * Returns the {@link Subject} associated with the current JMX invocation.
+     * <p>
+     * On JDK 18+ this uses {@code Subject.current()} (invoked reflectively so this class still compiles on
+     * JDK 11/17, where the method does not exist). The legacy {@code Subject.getSubject(AccessControlContext)}
+     * returns null once the Security Manager is permanently disabled (JDK 24+, JEP 486), which would silently
+     * record every authenticated JMX call with user=null. (AuthorizationProxy carries an identical helper -
+     * keep them in sync.)
+     */
+    private static Subject currentSubject()
+    {
+        if (Runtime.version().feature() >= 18)
+        {
+            try
+            {
+                return (Subject) Subject.class.getMethod("current").invoke(null);
+            }
+            catch (ReflectiveOperationException e)
+            {
+                throw new RuntimeException("Failed to invoke Subject.current()", e);
+            }
+        }
+        AccessControlContext acc = AccessController.getContext();
+        return Subject.getSubject(acc);
+    }
+
     private class JmxHandler implements InvocationHandler
     {
         private MBeanServer mbs = null;
@@ -493,8 +519,7 @@ public class AuditLogManager implements QueryEvents.Listener, AuthEvents.Listene
                 return null;
             }
 
-            AccessControlContext acc = AccessController.getContext();
-            Subject subject = Subject.getSubject(acc);
+            Subject subject = currentSubject();
 
             try
             {

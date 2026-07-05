@@ -45,6 +45,7 @@ General style conventions:
 - Match existing code style in the file you are editing.
 - All new files must include the Apache License 2.0 header.
 - Concise English documentation is required for complex classes and methods; trivial ones may not require them.
+- 🚫 Never use inline fully-qualified package names in method signatures, fields, parameters, return types, or method bodies. Always add an `import` and reference the simple name. This applies to both `org.*` and `java.*` types, including `java.util.List`, `java.util.Collections`, `java.util.concurrent.atomic.AtomicLong`, etc. Javadoc `{@link ...}` references may use FQNs. The single legitimate exception is when two classes share a simple name (e.g. `java.io.File` vs `org.apache.cassandra.io.util.File`): import the more frequently used one and use FQN only for the rare case.
 
 ## Git Workflow
 - Do NOT commit unless explicitly asked.
@@ -67,15 +68,3 @@ General style conventions:
 - 🚫 Never run the full test suite — it takes hours. Run targeted tests only.
 - 🚫 Never bypass Checkstyle violations without a suppression comment explaining why.
 - ⚠️ Ask before modifying the CQL grammar (`src/antlr/Cql.g`) — changes cascade widely.
-
-## Security
-
-Security model: [SECURITY.md](./SECURITY.md), which links to the project's
-security model at
-[doc/modules/cassandra/pages/reference/security-model.adoc](./doc/modules/cassandra/pages/reference/security-model.adoc).
-
-Automated agents (security scanners, code analyzers) that scan this
-repository should consult that security model for the project's in-scope /
-out-of-scope declarations, trust boundaries, the security properties
-Cassandra provides and disclaims, and how findings are triaged, before
-reporting issues.

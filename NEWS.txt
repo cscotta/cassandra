@@ -83,9 +83,22 @@ New features
     - CEP-49 - it is possible to implement custom compression providers, e.g.
       integrating with a specialized hardware which makes de/compression faster.
       See CASSANDRA-20975 for more information.
+    - JDK 25 is now supported, in addition to JDK 11, 17 and 21. conf/jvm25-server.options and
+      conf/jvm25-clients.options are selected automatically when running on JDK 25 or newer. See the
+      "Upgrading" section below for important notes about the Java SecurityManager and user-defined
+      functions on JDK 24+.
 
 Upgrading
 ---------
+    - Running on JDK 25 (or any JDK 24+): the Java SecurityManager is permanently disabled (JEP 486).
+      Cassandra used it to sandbox Java user-defined functions (UDFs); with it unavailable the sandbox
+      cannot be installed and a WARN is logged at startup. UDF execution is therefore refused on such JVMs
+      unless you explicitly opt in by setting allow_insecure_udfs: true in cassandra.yaml, which lets UDF
+      code run without the sandbox (arbitrary file/socket/System access). Do this only if you fully trust
+      every UDF definition. Running on JDK 11, 17 or 21 is unchanged and the sandbox remains active there.
+    - The JVM options -XX:+ZGenerational and -Djava.security.manager=allow are intentionally absent from
+      conf/jvm25-server.options: both are removed/rejected on JDK 24+. On JDK 25, ZGC (-XX:+UseZGC) is
+      generational by default.
 
 Deprecation
 -----------

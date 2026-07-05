@@ -191,6 +191,12 @@ public final class ServerTestUtils
 
         ThreadAwareSecurityManager.install();
 
+        // On JDK 24+ the SecurityManager - and therefore the UDF sandbox - cannot be installed (JEP 486), so
+        // JavaBasedUDFunction refuses to run UDFs unless allow_insecure_udfs is set. Opt in for tests so UDF
+        // coverage still executes; this only takes effect when the sandbox is genuinely unavailable.
+        if (!ThreadAwareSecurityManager.isInstalled())
+            DatabaseDescriptor.setAllowInsecureUDFs(true);
+
         CassandraRelevantProperties.GOSSIPER_SKIP_WAITING_TO_SETTLE.setInt(0);
         initCMS();
         SystemKeyspace.persistLocalMetadata();

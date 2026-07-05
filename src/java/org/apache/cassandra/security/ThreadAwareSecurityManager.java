@@ -85,6 +85,18 @@ public final class ThreadAwareSecurityManager extends SecurityManager
         if (installed)
             return;
 
+        // The SecurityManager is permanently disabled in JDK 24+ (JEP 486): System.setSecurityManager(non-null)
+        // throws UnsupportedOperationException. Skip installation loudly so the daemon still boots. The UDF sandbox
+        // that relies on this SecurityManager is therefore inactive on such JVMs; UDF execution is gated behind
+        // allow_insecure_udfs (see JavaBasedUDFunction and isInstalled()).
+        if (Runtime.version().feature() >= 24)
+        {
+            logger.warn("Java SecurityManager is permanently disabled in JDK 24+ (JEP 486). " +
+                        "The UDF sandbox (ThreadAwareSecurityManager) is NOT active on this JVM. " +
+                        "Set allow_insecure_udfs: true in cassandra.yaml to acknowledge this and permit UDF execution.");
+            return;
+        }
+
         // this line is needed - we need to make sure AccessControlException is loaded before we install this SM
         // otherwise we may get into stackoverflow when javax.security is not allowed package, and ACE is tried to be
         // loaded when it is going to be thrown from SM (class loader triggers SM to verify javax.security,
@@ -97,7 +109,27 @@ public final class ThreadAwareSecurityManager extends SecurityManager
         installed = true;
     }
 
+    /**
+     * @return true if the {@link ThreadAwareSecurityManager} was successfully installed as the process
+     * {@link SecurityManager}. Always false on JDK 24+, where the SecurityManager is permanently disabled
+     * (JEP 486) and the UDF sandbox is therefore inactive.
+     */
+    public static boolean isInstalled()
+    {
+        return installed;
+    }
+
     static
+    {
+        // JEP 486 permanently disables the SecurityManager in JDK 24+: Policy.setPolicy then throws
+        // UnsupportedOperationException at class-initialization time (which would fail every reference to this
+        // class, including install() and isInstalled()). Only install our policy on JVMs where the
+        // SecurityManager still functions; on JDK 24+ the UDF sandbox is inactive regardless (see install()).
+        if (Runtime.version().feature() < 24)
+            installPolicy();
+    }
+
+    private static void installPolicy()
     {
         //
         // Use own security policy to be easier (and faster) since the C* has no fine grained permissions.

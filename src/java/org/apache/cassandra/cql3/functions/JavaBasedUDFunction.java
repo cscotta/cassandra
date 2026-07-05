@@ -75,6 +75,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.concurrent.NamedThreadFactory;
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.exceptions.InvalidRequestException;
@@ -384,13 +385,30 @@ public final class JavaBasedUDFunction extends UDFunction
     @Override
     protected ByteBuffer executeUserDefined(Arguments arguments)
     {
+        assertUdfSandboxUsable();
         return javaUDF.executeImpl(arguments);
     }
 
     @Override
     protected Object executeAggregateUserDefined(Object state, Arguments arguments)
     {
+        assertUdfSandboxUsable();
         return javaUDF.executeAggregateImpl(state, arguments);
+    }
+
+    /**
+     * The Java UDF sandbox is enforced by {@link ThreadAwareSecurityManager}. On JDK 24+ the SecurityManager is
+     * permanently disabled (JEP 486), so the sandbox cannot be installed and UDF code would execute without any
+     * restrictions (arbitrary file/socket/System.exit access, etc.). Refuse to run unless the operator has
+     * explicitly opted in via {@code allow_insecure_udfs}.
+     */
+    private void assertUdfSandboxUsable()
+    {
+        if (!ThreadAwareSecurityManager.isInstalled() && !DatabaseDescriptor.allowInsecureUDFs())
+            throw new InvalidRequestException(String.format(
+                "Cannot execute user-defined function %s: the UDF sandbox (Java SecurityManager) is not active on " +
+                "this JVM (permanently disabled in JDK 24+, JEP 486), so UDF code would run without restrictions. " +
+                "Set allow_insecure_udfs: true in cassandra.yaml to acknowledge this and permit UDF execution.", name()));
     }
 
     private static int countNewlines(StringBuilder javaSource)
