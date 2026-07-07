@@ -381,6 +381,12 @@
         <string>--add-opens java.base/sun.nio.ch=ALL-UNNAMED</string>
         <string>--add-opens java.rmi/sun.rmi.transport.tcp=ALL-UNNAMED</string>
         <string>--add-opens jdk.management/com.sun.management=ALL-UNNAMED</string>
+
+        <!-- Enable the Foreign Function and Memory (Panama) API for the org.apache.cassandra.io.uring binding
+             (JDK 25 only). On 25 the default native-access mode is 'warn'; this flag silences the one-time warning
+             and is forward-compatible with the eventual deny-by-default mode. The server runtime already sets this
+             in conf/jvm25-server.options; adding it here covers the ant unit-test, check-test-names, and JMH JVMs. -->
+        <string>--enable-native-access=ALL-UNNAMED</string>
     </resources>
     <pathconvert property="_jvm25_args_concat" refid="_jvm25_arg_items" pathsep=" "/>
     <condition property="java-jvmargs" value="${_jvm25_args_concat}">
@@ -542,6 +548,14 @@
                 <equals arg1="${ant.java.version}" arg2="17"/>
             </or>
         </not>
+    </condition>
+
+    <!-- The org.apache.cassandra.io.uring FFM binding uses java.lang.foreign, which is a preview API on JDK 21
+         and absent on 11/17. Because build.xml compiles with source/target set (no release option), and CI compiles
+         on 11/17/21/25, these sources (and their tests/benches) must be excluded from the compile on every JDK but 25.
+         Core code reaches the binding only through a ServiceLoader SPI, so nothing else references it at compile time. -->
+    <condition property="ffm.src.excludes" value="" else="org/apache/cassandra/io/uring/**,**/microbench/*IoUring*.java,**/io/uring/**/*Test.java,**/io/uring/*Test.java">
+        <equals arg1="${ant.java.version}" arg2="25"/>
     </condition>
 
     <!--
@@ -781,7 +795,8 @@
         <echo message="Compiling for Java ${ant.java.version}..."/>
         <javac
                debug="true" debuglevel="${debuglevel}" encoding="utf-8"
-               destdir="${build.classes.main}" includeantruntime="false" source="${ant.java.version}" target="${ant.java.version}">
+               destdir="${build.classes.main}" includeantruntime="false" source="${ant.java.version}" target="${ant.java.version}"
+               excludes="${ffm.src.excludes}">
             <src path="${build.src.java}"/>
             <src path="${build.src.gen-java}"/>
             <compilerarg value="-XDignore.symbol.file"/>
@@ -1326,7 +1341,8 @@
      includeantruntime="true"
      source="${ant.java.version}"
      target="${ant.java.version}"
-     encoding="utf-8">
+     encoding="utf-8"
+     excludes="${ffm.src.excludes}">
      <classpath>
         <path refid="cassandra.classpath.test"/>
         <pathelement location="${fqltool.build.classes}"/>
