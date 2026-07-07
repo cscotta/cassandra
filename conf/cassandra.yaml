@@ -456,7 +456,21 @@ cdc_enabled: false
 #   Similar to mmap but maps only index files. Using this setting might also help if you observe high number of page
 #   faults or steals along with increased latencies. This setting is default.
 #
+# io_uring
+#   Linux-only. Issue data-file reads through the kernel io_uring interface (via the JDK Foreign Function & Memory API;
+#   requires JDK 25). Index reads stay on mmap. io_uring's advantage is device-bound reads at high concurrency (cache
+#   misses, scans); it is not faster for reads served from the page cache. If io_uring is unavailable (non-Linux,
+#   older JDK, or blocked by seccomp/policy), the node logs a warning and falls back to 'standard' unless
+#   io_uring_fallback_on_unavailable is set to false (see below).
+#
 # disk_access_mode: mmap_index_only
+
+# Tuning for disk_access_mode: io_uring (all ignored unless io_uring is the resolved data read mode).
+# io_uring_queue_depth: 256              # SQ/CQ entries per ring (in-flight ops); kernel rounds up to a power of two
+# io_uring_poller_threads: 1             # number of rings / completion-poller threads
+# io_uring_sqpoll: false                 # kernel-side submission polling (burns a core; opt-in for saturated I/O nodes)
+# io_uring_direct_io: false              # open data files O_DIRECT (bypass the page cache); a later-phase option
+# io_uring_fallback_on_unavailable: true # fall back to 'standard' if io_uring is unavailable, rather than failing startup
 
 # Policy for data disk failures:
 #
@@ -691,6 +705,8 @@ commitlog_disk_access_mode: legacy
 # Set the disk access mode for reading SSTables during compaction. The allowed values are:
 # - auto: inherit from disk_access_mode (default)
 # - direct: use direct I/O for compaction reads, bypassing the OS page cache
+# - io_uring: read via io_uring (Linux + JDK 25; see disk_access_mode). Compaction/scan reads are the clearest
+#             io_uring beneficiary; combine with io_uring_direct_io: true for the device-bound (page-cache-bypass) win.
 # compaction_read_disk_access_mode: auto
 
 # Set the disk access mode for writing compressed SSTables during background operations

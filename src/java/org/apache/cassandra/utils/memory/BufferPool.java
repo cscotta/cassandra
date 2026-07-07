@@ -311,6 +311,21 @@ public class BufferPool
     }
 
     /**
+     * Base native addresses of the currently allocated macro-chunk slabs (each {@link #macroChunkSize()} bytes,
+     * page-aligned). Used by the io_uring read path to register these slabs as fixed buffers for {@code READ_FIXED}.
+     */
+    public long[] macroChunkBaseAddresses()
+    {
+        return globalPool.macroChunkBaseAddresses();
+    }
+
+    /** Size in bytes of each macro-chunk slab returned by {@link #macroChunkBaseAddresses()}. */
+    public int macroChunkSize()
+    {
+        return globalPool.macroChunkSize();
+    }
+
+    /**
      * Forces to recycle free local chunks back to the global pool.
      * This is needed because if buffers were freed by a different thread than the one
      * that allocated them, recycling might not have happened and the local pool may still own some
@@ -484,6 +499,26 @@ public class BufferPool
                 debug.registerNormal(add);
             }
             return callerChunk;
+        }
+
+        /**
+         * Read-only snapshot of the base addresses of the macro-chunk slabs allocated so far (each
+         * {@link #macroChunkSize()} bytes, page-aligned). Used by the io_uring read path to register these slabs as
+         * fixed buffers so chunk reads can use {@code IORING_OP_READ_FIXED}. Off the hot path; safe to call concurrently.
+         */
+        public long[] macroChunkBaseAddresses()
+        {
+            java.util.ArrayList<Chunk> snapshot = new java.util.ArrayList<>(macroChunks);
+            long[] out = new long[snapshot.size()];
+            for (int i = 0; i < out.length; i++)
+                out[i] = snapshot.get(i).baseAddress;
+            return out;
+        }
+
+        /** The size in bytes of each macro-chunk slab (the granularity of io_uring fixed-buffer registration). */
+        public int macroChunkSize()
+        {
+            return MACRO_CHUNK_SIZE;
         }
 
         @Override

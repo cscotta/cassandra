@@ -686,6 +686,13 @@ public class DatabaseDescriptor
         {
             throw new ConfigurationException(String.format("DiskAccessMode '%s' is not supported", DiskAccessMode.direct));
         }
+        else if (conf.disk_access_mode == DiskAccessMode.io_uring)
+        {
+            // Accept io_uring for the data path; index reads stay on mmap. Availability is probed (and, if unavailable,
+            // reset to standard/mmap per io_uring_fallback_on_unavailable) by StartupChecks#checkIoUringAvailability,
+            // before any SSTable is opened. FileHandle also falls back defensively if the provider is not usable.
+            indexAccessMode = DiskAccessMode.mmap;
+        }
         else
         {
             indexAccessMode = conf.disk_access_mode;
@@ -700,10 +707,17 @@ public class DatabaseDescriptor
         {
             compactionReadDiskAccessMode = DiskAccessMode.direct;
         }
+        else if (DiskAccessMode.io_uring == conf.compaction_read_disk_access_mode)
+        {
+            // Compaction/scan reads are the clearest io_uring beneficiary (device-bound, cache-unfriendly). Availability
+            // is probed by StartupChecks#checkIoUringAvailability, which also resets the data disk_access_mode on
+            // fallback; the compaction path reads through the same io_uring provider.
+            compactionReadDiskAccessMode = DiskAccessMode.io_uring;
+        }
         else
         {
             throw new IllegalArgumentException("Unsupported disk access mode for compaction_read_disk_access_mode " +
-                                               "(options: direct/auto) " + conf.compaction_read_disk_access_mode);
+                                               "(options: direct/auto/io_uring) " + conf.compaction_read_disk_access_mode);
         }
         logger.info("compaction_read_disk_access_mode resolved to: {}", compactionReadDiskAccessMode);
 
@@ -4052,6 +4066,31 @@ public class DatabaseDescriptor
     public static DiskAccessMode getDiskAccessMode()
     {
         return conf.disk_access_mode;
+    }
+
+    public static int getIoUringQueueDepth()
+    {
+        return conf.io_uring_queue_depth;
+    }
+
+    public static int getIoUringPollerThreads()
+    {
+        return conf.io_uring_poller_threads;
+    }
+
+    public static boolean getIoUringSqpoll()
+    {
+        return conf.io_uring_sqpoll;
+    }
+
+    public static boolean getIoUringDirectIo()
+    {
+        return conf.io_uring_direct_io;
+    }
+
+    public static boolean getIoUringFallbackOnUnavailable()
+    {
+        return conf.io_uring_fallback_on_unavailable;
     }
 
     // Do not use outside unit tests.

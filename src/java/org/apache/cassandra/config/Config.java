@@ -252,6 +252,13 @@ public class Config
     public int concurrent_writes = 32;
     public int concurrent_counter_writes = 32;
     public int concurrent_materialized_view_writes = 32;
+
+    // io_uring read path (disk_access_mode: io_uring). Linux + JDK 25 only; ignored otherwise. See DiskAccessMode.io_uring.
+    public int io_uring_queue_depth = 256;
+    public int io_uring_poller_threads = 1;
+    public boolean io_uring_sqpoll = false;
+    public boolean io_uring_direct_io = false;
+    public boolean io_uring_fallback_on_unavailable = true;
     public OptionaldPositiveInt available_processors = new OptionaldPositiveInt(CASSANDRA_AVAILABLE_PROCESSORS.getInt(OptionaldPositiveInt.UNDEFINED_VALUE));
 
     public int memtable_flush_writers = 0;
@@ -1363,7 +1370,15 @@ public class Config
         /**
          * When adding support for Direct I/O, update {@link org.apache.cassandra.service.StartupChecks#checkKernelBug1057843}
          */
-        direct
+        direct,
+
+        /**
+         * Linux-only read mode backed by the FFM io_uring binding ({@code org.apache.cassandra.io.uring}). Reached only
+         * through the {@link org.apache.cassandra.io.util.AsyncReadProvider} ServiceLoader boundary; when io_uring is
+         * unavailable (non-Linux, JDK &lt; 25, or blocked by policy) it falls back to {@code standard} per
+         * {@code io_uring_fallback_on_unavailable}. See {@code StartupChecks#checkIoUringAvailability}.
+         */
+        io_uring
     }
 
     public enum MemtableAllocationType

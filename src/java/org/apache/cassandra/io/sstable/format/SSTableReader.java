@@ -88,6 +88,7 @@ import org.apache.cassandra.io.sstable.SSTableReadsListener;
 import org.apache.cassandra.io.sstable.format.SSTableFormat.Components;
 import org.apache.cassandra.io.sstable.metadata.CompactionMetadata;
 import org.apache.cassandra.io.sstable.metadata.StatsMetadata;
+import org.apache.cassandra.io.util.AsyncReadProviders;
 import org.apache.cassandra.io.util.ChannelProxy;
 import org.apache.cassandra.io.util.CheckedFunction;
 import org.apache.cassandra.io.util.DataIntegrityMetadata;
@@ -1470,7 +1471,8 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
     {
         return diskAccessMode == null
                || diskAccessMode == dfile.diskAccessMode()
-               || (diskAccessMode == DiskAccessMode.direct && !dfile.supportsDirectIO());
+               || (diskAccessMode == DiskAccessMode.direct && !dfile.supportsDirectIO())
+               || (diskAccessMode == DiskAccessMode.io_uring && !AsyncReadProviders.get().isAvailable());
     }
 
     public void trySkipFileCacheBefore(DecoratedKey key)

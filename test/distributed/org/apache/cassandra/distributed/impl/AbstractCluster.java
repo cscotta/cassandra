@@ -1167,8 +1167,11 @@ public abstract class AbstractCluster<I extends IInstance> implements ICluster<I
     @Override
     public void close()
     {
-        // Make sure that a nodetool call is not preventing us from stopping the instance
-        System.setSecurityManager(null);
+        // Make sure that a nodetool call is not preventing us from stopping the instance. System.setSecurityManager is
+        // unsupported on JDK 24+ (JEP 486) and throws UnsupportedOperationException; there is no SecurityManager to
+        // clear there, so only attempt it on JDKs that still support one.
+        if (Runtime.version().feature() < 24)
+            System.setSecurityManager(null);
 
         logger.info("Closing cluster {}", this.clusterId);
         FBUtilities.closeQuietly(instanceInitializer);

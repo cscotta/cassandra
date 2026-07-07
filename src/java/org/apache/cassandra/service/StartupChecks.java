@@ -75,6 +75,8 @@ import org.apache.cassandra.io.compress.CompressorRegistry;
 import org.apache.cassandra.io.compress.ICompressor;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.UUIDBasedSSTableId;
+import org.apache.cassandra.io.util.AsyncReadProvider;
+import org.apache.cassandra.io.util.AsyncReadProviders;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.io.util.PathUtils;
@@ -133,6 +135,7 @@ public class StartupChecks
                                                                       checkReadAheadKbSetting,
                                                                       checkDataDirs,
                                                                       checkDirectIOSupport,
+                                                                      checkIoUringAvailability,
                                                                       checkSSTablesFormat,
                                                                       checkSystemKeyspaceState,
                                                                       checkLegacyAuthTables,
@@ -258,17 +261,26 @@ public class StartupChecks
             if (!FBUtilities.isLinux)
                 return;
 
-            Set<Path> directIOWritePaths = DatabaseDescriptor.getDirectIOWritePaths();
-
-            if (!directIOWritePaths.isEmpty() && IGNORE_KERNEL_BUG_1057843_CHECK.getBoolean())
+            Set<Path> directIOPaths = new HashSet<>(DatabaseDescriptor.getDirectIOWritePaths());
+            // io_uring O_DIRECT reads go through the same ext4 iomap/direct-IO path as writes, so guard the data
+            // directories too when O_DIRECT reads are enabled (io_uring_direct_io with an io_uring data/compaction mode).
+            if (DatabaseDescriptor.getIoUringDirectIo()
+                && (DatabaseDescriptor.getDiskAccessMode() == Config.DiskAccessMode.io_uring
+                    || DatabaseDescriptor.getCompactionReadDiskAccessMode() == Config.DiskAccessMode.io_uring))
             {
-                logger.info("Ignoring check for the kernel bug 1057843 against the following paths configured to be accessed with Direct IO: {}", directIOWritePaths);
+                for (String dataDir : DatabaseDescriptor.getAllDataFileLocations())
+                    directIOPaths.add(Path.of(dataDir));
+            }
+
+            if (!directIOPaths.isEmpty() && IGNORE_KERNEL_BUG_1057843_CHECK.getBoolean())
+            {
+                logger.info("Ignoring check for the kernel bug 1057843 against the following paths configured to be accessed with Direct IO: {}", directIOPaths);
                 return;
             }
 
             Set<String> affectedFileSystemTypes = Set.of("ext4");
             Set<Path> affectedPaths = new HashSet<>();
-            for (Path path : directIOWritePaths)
+            for (Path path : directIOPaths)
             {
                 try
                 {
@@ -907,6 +919,91 @@ public class StartupChecks
             }
         }
     };
+
+    public static final StartupCheck checkIoUringAvailability = new StartupCheck()
+    {
+        @Override
+        public String name()
+        {
+            return "io_uring_availability";
+        }
+
+        @Override
+        public void execute(StartupChecksConfiguration configuration) throws StartupException
+        {
+            if (configuration.isDisabled(name()))
+                return;
+
+            // Only relevant when a resolved access mode actually requested io_uring (data, index, or compaction reads).
+            if (DatabaseDescriptor.getDiskAccessMode() != Config.DiskAccessMode.io_uring
+                && DatabaseDescriptor.getIndexAccessMode() != Config.DiskAccessMode.io_uring
+                && DatabaseDescriptor.getCompactionReadDiskAccessMode() != Config.DiskAccessMode.io_uring)
+                return;
+
+            // Kernel-level global disable (hardened images): kernel.io_uring_disabled is 0 (all), 1 (restricted to
+            // CAP_SYS_ADMIN / the io_uring group -- a normal daemon gets EPERM on setup), or 2 (off entirely). When it
+            // reads 1 or 2, report that precise reason and skip the setup syscall rather than letting it fail opaquely.
+            String sysctlReason = ioUringDisabledReason();
+
+            AsyncReadProvider provider = AsyncReadProviders.get();
+            if (FBUtilities.isLinux && sysctlReason == null && provider.isAvailable())
+            {
+                logger.info("disk_access_mode=io_uring is available and will be used for the data read path.");
+                return;
+            }
+
+            String reason = !FBUtilities.isLinux ? "io_uring requires Linux"
+                                                 : sysctlReason != null ? sysctlReason : provider.unavailableReason();
+            if (DatabaseDescriptor.getIoUringFallbackOnUnavailable())
+            {
+                logger.warn("disk_access_mode=io_uring was requested but io_uring is unavailable ({}); " +
+                            "falling back to standard (data/compaction reads) and mmap (index).", reason);
+                if (DatabaseDescriptor.getDiskAccessMode() == Config.DiskAccessMode.io_uring)
+                    DatabaseDescriptor.setDiskAccessMode(Config.DiskAccessMode.standard);
+                if (DatabaseDescriptor.getIndexAccessMode() == Config.DiskAccessMode.io_uring)
+                    DatabaseDescriptor.setIndexAccessMode(Config.DiskAccessMode.mmap);
+                if (DatabaseDescriptor.getCompactionReadDiskAccessMode() == Config.DiskAccessMode.io_uring)
+                    DatabaseDescriptor.setCompactionReadDiskAccessMode(Config.DiskAccessMode.standard);
+            }
+            else
+            {
+                throw new StartupException(StartupException.ERR_WRONG_MACHINE_STATE,
+                                           String.format("disk_access_mode=io_uring requires io_uring, but it is unavailable: %s. " +
+                                                         "Set io_uring_fallback_on_unavailable=true to fall back to standard, " +
+                                                         "or change disk_access_mode.", reason));
+            }
+        }
+    };
+
+    /**
+     * Reads {@code /proc/sys/kernel/io_uring_disabled} and returns an operator-facing reason string only when io_uring
+     * is disabled system-wide ({@code 2}), or {@code null} otherwise. Value {@code 1} (restricted to CAP_SYS_ADMIN or
+     * the {@code kernel.io_uring_group}) is deliberately NOT treated as unavailable here: a sufficiently privileged
+     * process can still create rings, so that case defers to the authoritative setup-syscall probe rather than being
+     * pre-emptively downgraded. A best-effort check: absent sysctl (older kernels) or a read error returns {@code null}
+     * and lets the setup syscall be the authority; it only turns a would-be opaque {@code 2} failure into a precise
+     * message and skips the doomed syscall.
+     */
+    private static String ioUringDisabledReason()
+    {
+        if (!FBUtilities.isLinux)
+            return null;
+
+        Path sysctl = Path.of("/proc/sys/kernel/io_uring_disabled");
+        try
+        {
+            if (!Files.exists(sysctl))
+                return null;
+            String value = Files.readString(sysctl).trim();
+            if ("2".equals(value))
+                return "kernel.io_uring_disabled=2 (io_uring is disabled system-wide)";
+            return null;   // 0 = enabled; 1 = restricted -> let the setup-syscall probe decide (privileged procs work)
+        }
+        catch (IOException | RuntimeException e)
+        {
+            return null;   // cannot read the knob; let the setup syscall be the authority
+        }
+    }
 
     @VisibleForTesting
     static List<String> findDirectIOUnsupportedLocations(String[] dataFileLocations)

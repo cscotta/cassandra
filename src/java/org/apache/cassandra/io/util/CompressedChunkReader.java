@@ -127,12 +127,14 @@ public abstract class CompressedChunkReader extends AbstractReaderFileProxy impl
         private final ChannelProxy channel;
         private final int blockSize;
         private final DirectThreadLocalByteBufferHolder bufferHolder;
+        private final AsyncFrameReader frameReader;   // null => read via the FileChannel; non-null => via io_uring
 
-        DirectRandomAccessReader(ChannelProxy ch, int blockSize)
+        DirectRandomAccessReader(ChannelProxy ch, int blockSize, AsyncFrameReader frameReader)
         {
             this.channel = ch;
             this.blockSize = blockSize;
             this.bufferHolder = new DirectThreadLocalByteBufferHolder(blockSize);
+            this.frameReader = frameReader;
         }
 
         @Override
@@ -145,7 +147,10 @@ public abstract class CompressedChunkReader extends AbstractReaderFileProxy impl
             int delta = (int) (chunk.offset - alignedPos);
 
             ByteBuffer buffer = bufferHolder.getBuffer(length + delta);
-            if (channel.read(buffer, alignedPos) < length + delta)
+            // Only the device read differs between the FileChannel and io_uring paths; the block-aligned offset/length,
+            // over-read-by-delta, slice, and CRC verification below are shared verbatim so they cannot drift.
+            int read = frameReader != null ? frameReader.read(buffer, alignedPos) : channel.read(buffer, alignedPos);
+            if (read < length + delta)
                 throw new CorruptBlockException(channel.filePath(), chunk);
 
             buffer.position(delta);
@@ -164,6 +169,13 @@ public abstract class CompressedChunkReader extends AbstractReaderFileProxy impl
                 slice.position(0).limit(chunk.length);
             }
             return slice;
+        }
+
+        @Override
+        public void close()
+        {
+            if (frameReader != null)
+                frameReader.close();
         }
     }
 
@@ -281,12 +293,17 @@ public abstract class CompressedChunkReader extends AbstractReaderFileProxy impl
 
         public Direct(ChannelProxy channel, CompressionMetadata metadata, DoubleSupplier crcCheckChanceSupplier)
         {
+            this(channel, metadata, crcCheckChanceSupplier, FileUtils.getFileBlockSize(channel.file()), null, true);
+        }
+
+        protected Direct(ChannelProxy channel, CompressionMetadata metadata, DoubleSupplier crcCheckChanceSupplier,
+                         int blockSize, AsyncFrameReader frameReader, boolean buildScanReader)
+        {
             super(channel, metadata, crcCheckChanceSupplier);
-            int blockSize = FileUtils.getFileBlockSize(channel.file());
-            this.reader = new DirectRandomAccessReader(channel, blockSize);
+            this.reader = new DirectRandomAccessReader(channel, blockSize, frameReader);
 
             int readAheadBufferSize = DatabaseDescriptor.getCompressedReadAheadBufferSize();
-            this.scanReader = (readAheadBufferSize > 0 && readAheadBufferSize > metadata.chunkLength())
+            this.scanReader = (buildScanReader && readAheadBufferSize > 0 && readAheadBufferSize > metadata.chunkLength())
                               ? new ScanCompressedReader(channel,
                                                          new DirectThreadLocalByteBufferHolder(blockSize),
                                                          new DirectThreadLocalReadAheadBuffer(channel, readAheadBufferSize, blockSize))
@@ -358,6 +375,25 @@ public abstract class CompressedChunkReader extends AbstractReaderFileProxy impl
                 scanReader.close();
 
             super.close();
+        }
+    }
+
+    /**
+     * A {@link Direct}-shaped compressed reader whose single compressed-frame read is served by io_uring rather than the
+     * FileChannel. It reuses Direct's {@code chunkFor} / block alignment / CRC verification / decompress logic verbatim
+     * (only the device read at the {@link CompressedReader} seam differs); with {@code io_uring_direct_io} off it uses
+     * {@code blockSize == 1} so the same aligned reader performs an exact-length buffered read. Read-ahead scans fall
+     * back to per-chunk reads ({@code scanReader == null}). Built only when the provider {@link AsyncReadProvider#isAvailable}.
+     */
+    public static class IoUring extends Direct
+    {
+        public IoUring(ChannelProxy channel, CompressionMetadata metadata, DoubleSupplier crcCheckChanceSupplier,
+                       AsyncReadProvider provider)
+        {
+            super(channel, metadata, crcCheckChanceSupplier,
+                  DatabaseDescriptor.getIoUringDirectIo() ? FileUtils.getFileBlockSize(channel.file()) : 1,
+                  provider.newFrameReader(channel, DatabaseDescriptor.getIoUringDirectIo()),
+                  false);
         }
     }
 

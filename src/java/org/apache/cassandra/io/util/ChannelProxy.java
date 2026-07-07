@@ -47,7 +47,9 @@ public final class ChannelProxy extends SharedCloseableImpl
     public enum IOMode
     {
         BUFFERED,
-        DIRECT
+        DIRECT,
+        IO_URING,
+        IO_URING_DIRECT
     }
 
     private final File file;
@@ -74,6 +76,15 @@ public final class ChannelProxy extends SharedCloseableImpl
                 return new OpenOption[]{ StandardOpenOption.READ, ExtendedOpenOption.DIRECT };
             case BUFFERED:
                 return new OpenOption[]{ StandardOpenOption.READ };
+            case IO_URING:
+                // io_uring issues the reads on the raw fd; the FileChannel is opened buffered only to obtain the fd
+                // (and size()). O_DIRECT-backed io_uring is a later phase (io_uring_direct_io).
+                return new OpenOption[]{ StandardOpenOption.READ };
+            case IO_URING_DIRECT:
+                // io_uring with O_DIRECT: the fd carries O_DIRECT so ring reads bypass the page cache (device-bound).
+                // Reads must be block-aligned; the chunk read path (power-of-two chunk sizes, page-aligned pooled
+                // buffers) satisfies this. The FileChannel itself is never read from directly.
+                return new OpenOption[]{ StandardOpenOption.READ, ExtendedOpenOption.DIRECT };
             default:
                 throw new IllegalArgumentException("Unknown IOMode " + ioMode);
         }

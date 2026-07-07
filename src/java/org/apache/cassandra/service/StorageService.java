@@ -140,6 +140,7 @@ import org.apache.cassandra.io.sstable.IVerifier;
 import org.apache.cassandra.io.sstable.SSTableLoader;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.Version;
+import org.apache.cassandra.io.util.AsyncReadProviders;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.io.util.PathUtils;
@@ -4066,6 +4067,18 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
         }
         finally
         {
+            // Drain and close any io_uring rings (poller threads, eventfds, registered buffers). No-op unless the
+            // io_uring read path was actually used; safe to call on every node and on a partial/abnormal drain, and
+            // reached after the read-serving, compaction and commitlog executors have stopped issuing reads.
+            try
+            {
+                AsyncReadProviders.get().shutdown();
+            }
+            catch (Throwable t)
+            {
+                logger.warn("Failed to shut down the io_uring read provider", t);
+            }
+
             Throwable postShutdownHookThrowable = Throwables.perform(null, postShutdownHooks.stream().map(h -> h::run));
             if (postShutdownHookThrowable != null)
                 logger.error("Post-shutdown hooks returned exception", postShutdownHookThrowable);

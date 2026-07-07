@@ -25,6 +25,7 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.util.concurrent.RateLimiter;
 
 import org.apache.cassandra.cache.ChunkCache;
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.io.compress.BufferType;
 import org.apache.cassandra.io.compress.CompressionMetadata;
 import org.apache.cassandra.utils.NativeLibrary;
@@ -463,6 +464,13 @@ public class FileHandle extends SharedCloseableImpl
                     return ChannelProxy.IOMode.BUFFERED;
                 case direct:
                     return ChannelProxy.IOMode.DIRECT;
+                case io_uring:
+                    // Open O_DIRECT only when io_uring will actually service the reads (io_uring_direct_io + an
+                    // available provider); otherwise open buffered so the SimpleChunkReader fallback in complete()
+                    // remains valid (it cannot read an O_DIRECT channel). The channel is opened only to obtain the fd.
+                    if (DatabaseDescriptor.getIoUringDirectIo() && AsyncReadProviders.get().isAvailable())
+                        return ChannelProxy.IOMode.IO_URING_DIRECT;
+                    return ChannelProxy.IOMode.IO_URING;
                 default:
                     throw new AssertionError("Unhandled diskAccessMode: " + diskAccessMode);
             }
@@ -507,9 +515,16 @@ public class FileHandle extends SharedCloseableImpl
                     if (compressionMetadata != null)
                     {
                         final CompressedChunkReader compressedChunkReader;
+                        AsyncReadProvider asyncReads = AsyncReadProviders.get();
                         if (DiskAccessMode.direct == diskAccessMode)
                         {
                             compressedChunkReader = new CompressedChunkReader.Direct(channel, compressionMetadata, crcCheckChanceSupplier);
+                        }
+                        else if (DiskAccessMode.io_uring == diskAccessMode && asyncReads.isAvailable())
+                        {
+                            // Compressed frame reads route through io_uring; the reader reuses the Direct alignment/CRC/
+                            // decompress path and falls back to Standard below if io_uring is unavailable at runtime.
+                            compressedChunkReader = new CompressedChunkReader.IoUring(channel, compressionMetadata, crcCheckChanceSupplier, asyncReads);
                         }
                         else
                         {
@@ -520,7 +535,14 @@ public class FileHandle extends SharedCloseableImpl
                     else
                     {
                         int chunkSize = DiskOptimizationStrategy.roundForCaching(bufferSize, ChunkCache.roundUp);
-                        rebuffererFactory = maybeCached(new SimpleChunkReader(channel, length, bufferType, chunkSize));
+                        // For io_uring mode, read through the io_uring provider when it is actually available;
+                        // otherwise fall back to the standard buffered reader (the channel is buffered either way, so
+                        // this is safe even if the availability startup check was skipped, e.g. in tools).
+                        AsyncReadProvider asyncReads = AsyncReadProviders.get();
+                        ChunkReader chunkReader = (DiskAccessMode.io_uring == diskAccessMode && asyncReads.isAvailable())
+                                                  ? asyncReads.newChunkReader(channel, length, bufferType, chunkSize)
+                                                  : new SimpleChunkReader(channel, length, bufferType, chunkSize);
+                        rebuffererFactory = maybeCached(chunkReader);
                     }
                 }
 

@@ -139,6 +139,10 @@ public class CassandraMetricsRegistry extends MetricRegistry
                                    .add(org.apache.cassandra.index.accord.IndexMetrics.TYPE)
                                    .add(InternodeInboundMetrics.TYPE_NAME)
                                    .add(InternodeOutboundMetrics.TYPE_NAME)
+                                   // io_uring metrics group; a string literal (not a constant reference) because
+                                   // CassandraUringMetrics lives in the JDK-25-only io.uring.cassandra package that is
+                                   // compile-excluded on other JDKs, while this registry compiles on every supported JDK.
+                                   .add("IoUring")
                                    .add(org.apache.cassandra.journal.Metrics.TYPE_NAME)
                                    .add(KeyspaceMetrics.TYPE_NAME)
                                    .add(MemtablePool.TYPE_NAME)
