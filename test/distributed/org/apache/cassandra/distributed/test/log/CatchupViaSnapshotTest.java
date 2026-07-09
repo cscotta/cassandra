@@ -25,11 +25,11 @@ import org.apache.cassandra.distributed.api.ConsistencyLevel;
 import org.apache.cassandra.distributed.api.IInvokableInstance;
 import org.apache.cassandra.distributed.test.TestBaseImpl;
 import org.apache.cassandra.locator.InetAddressAndPort;
-import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.tcm.ClusterMetadataService;
 import org.apache.cassandra.tcm.Epoch;
 
-import static org.junit.Assert.assertEquals;
+import static org.apache.cassandra.distributed.shared.ClusterUtils.getClusterMetadataVersion;
+import static org.apache.cassandra.distributed.shared.ClusterUtils.waitForCMSToQuiesce;
 
 public class CatchupViaSnapshotTest extends TestBaseImpl
 {
@@ -65,9 +65,13 @@ public class CatchupViaSnapshotTest extends TestBaseImpl
             // this means the log is continuous, but its current epoch is beyond the last entry in the log
             fetchLogFromPeerAsync(cluster.get(3), node2Address);
 
-            long expectedEpoch = cluster.get(1).callOnInstance(() -> ClusterMetadata.current().epoch.getEpoch());
-            for (IInvokableInstance i : cluster)
-                assertEquals(expectedEpoch, (long)i.callOnInstance(() -> ClusterMetadata.current().epoch.getEpoch()));
+            // node2/node3 catch up asynchronously, so their metadata epoch converges on node1's a
+            // short time after fetchLogFromPeerAsync returns rather than instantly. Poll for
+            // convergence (with a timeout) instead of asserting equality immediately, which races
+            // and can observe a peer momentarily one epoch behind. waitForCMSToQuiesce still fails
+            // with a clear error if a node stays behind, so a genuine catch-up failure is not masked.
+            Epoch expectedEpoch = getClusterMetadataVersion(cluster.get(1));
+            waitForCMSToQuiesce(cluster, expectedEpoch);
         }
     }
 
