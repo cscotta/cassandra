@@ -75,7 +75,10 @@ public class PlacementsChangeListenerTest
         DataPlacements.Builder builder = before.unbuild();
         before.forEach((params, placement) -> {
             Replica remove = placement.writes.byEndpoint().flattenValues().iterator().next();
-            Replica add = Replica.fullReplica(MembershipUtils.endpoint(99), remove.range());
+            // Use an endpoint outside randomPlacements' domain (randomEndpoint draws 127.0.0.[1..254]),
+            // so the added replica cannot already be present in this range's write group. Endpoint 99
+            // is within that domain and could collide, failing "expected unique endpoints".
+            Replica add = Replica.fullReplica(MembershipUtils.endpoint(255), remove.range());
             DataPlacement newPlacement = placement.unbuild()
                                                   .withoutWriteReplica(e.nextEpoch(), remove)
                                                   .withWriteReplica(e.nextEpoch(), add).build();
