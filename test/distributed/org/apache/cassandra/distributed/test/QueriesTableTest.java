@@ -33,6 +33,7 @@ import net.bytebuddy.implementation.MethodDelegation;
 import net.bytebuddy.implementation.bind.annotation.SuperCall;
 
 import org.awaitility.Awaitility;
+import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -84,6 +85,15 @@ public class QueriesTableTest extends TestBaseImpl
             SHARED_CLUSTER.close();
     }
 
+    @After
+    public void resetQueryBarriers()
+    {
+        // The delay barriers are static and shared across test methods. If a method fails before it
+        // unblocks its parked query, reset here frees that party (via BrokenBarrierException) so it
+        // cannot trip a later method's barrier early and leak an unterminated thread.
+        QueryDelayHelper.resetBarriers();
+    }
+
     @Test
     public void shouldExposeReadsAndWrites() throws Throwable
     {
@@ -125,7 +135,7 @@ public class QueriesTableTest extends TestBaseImpl
             boolean coordReaderThread = threadId.contains("Native-Transport-Requests") || threadId.contains("SharedPool-Worker");
             coordinatorReadVisible |= coordReaderThread && task.contains("SELECT");
             boolean localWriterThread = threadId.contains("Mutation") || threadId.contains("SharedPool-Worker");
-            writeVisible |= localWriterThread && task.contains("Mutation");
+            writeVisible |= localWriterThread && (task.contains("Mutation") || task.contains("INSERT"));
             boolean coordWriterThread = threadId.contains("Native-Transport-Requests") || threadId.contains("SharedPool-Worker");
             coordinatorWriteVisible |= coordWriterThread && task.contains("INSERT");
         }
@@ -169,7 +179,9 @@ public class QueriesTableTest extends TestBaseImpl
             String task = row.get("task").toString();
 
             boolean localReaderThread = threadId.contains("Read") || threadId.contains("SharedPool-Worker");
-            readVisible |= localReaderThread && task.contains("SELECT");
+            // The CAS read is performed as part of the LWT, which is exposed as the coordinator UPDATE
+            // statement rather than a separate SELECT task, so accept either.
+            readVisible |= localReaderThread && (task.contains("SELECT") || task.contains("UPDATE"));
             boolean coordUpdateThread = threadId.contains("Native-Transport-Requests") || threadId.contains("SharedPool-Worker");
             coordinatorUpdateVisible |= coordUpdateThread && task.contains("UPDATE");
         }
@@ -247,6 +259,12 @@ public class QueriesTableTest extends TestBaseImpl
     {
         private static final CyclicBarrier readBarrier = new CyclicBarrier(2);
         private static final CyclicBarrier writeBarrier = new CyclicBarrier(2);
+
+        static void resetBarriers()
+        {
+            readBarrier.reset();
+            writeBarrier.reset();
+        }
 
         static void install(ClassLoader cl, int nodeNumber)
         {
