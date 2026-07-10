@@ -49,8 +49,12 @@ public class CMSShutdownTest extends TestBaseImpl
     {
         // This test simulates a CMS node attempting to commit an entry to the log but being unable
         // to obtain consensus from other CMS members while it is also shutting down itself.
+        // Only gossip + internode messaging are needed for the CMS scenario; enabling every feature
+        // (notably JMX) adds shutdown cost — IsolatedJmx.stopJmx does a fixed uninterruptible sleep —
+        // that, under CI load, can push node shutdown past the cluster close()'s 60s wait and trip
+        // the "Unterminated threads" leak check.
         try (Cluster cluster = Cluster.build(2)
-                                      .withConfig(c -> c.with(Feature.values()))
+                                      .withConfig(c -> c.with(Feature.GOSSIP, Feature.NETWORK))
                                       .withInstanceInitializer(BBHelper::install)
                                       .start())
         {
@@ -65,10 +69,25 @@ public class CMSShutdownTest extends TestBaseImpl
         {
             // Continuously attempt to commit a log entry, meanwhile counting down the
             // latch ensures that every commit will fail as if unable to obtain consensus
-            // from other CMS members
+            // from other CMS members.
             State.latch.countDown();
-            for (; ;)
-                ClusterMetadataService.instance().commit(TriggerSnapshot.instance);
+            // Stop when this thread is interrupted so the node can shut down promptly. Stage
+            // shutdown interrupts running tasks (Stage.shutdownAndWait -> shutdownNow); honouring
+            // the interrupt lets node1.shutdown() complete well within the cluster close()'s 60s
+            // wait. A plain for(;;) ignores the interrupt, forcing shutdown to wait for commit() to
+            // throw on its own, which under load can exceed 60s and trip the "Unterminated threads"
+            // leak check (flaky). The catch is OUTSIDE the loop so an interrupt-induced throw from
+            // commit() ends the loop rather than being swallowed (which would clear the interrupt
+            // flag and let the loop spin on).
+            try
+            {
+                while (!Thread.currentThread().isInterrupted())
+                    ClusterMetadataService.instance().commit(TriggerSnapshot.instance);
+            }
+            catch (Throwable t)
+            {
+                // Commits fail by design; an interrupt or a stopped processor on shutdown ends them.
+            }
         }
 
         public static void scheduleCommits()
