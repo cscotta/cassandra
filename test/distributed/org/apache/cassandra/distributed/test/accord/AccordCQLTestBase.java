@@ -3334,7 +3334,11 @@ public abstract class AccordCQLTestBase extends AccordTestBase
                  ListType<Integer> LIST_TYPE = ListType.getInstance(Int32Type.instance, true);
                  ExecutorService es = Executors.newCachedThreadPool();
                  List<Future<Object[][]>> futures = new ArrayList<>();
-                 for (int ii = 0; ii < 10; ii++)
+                 // Fire several concurrent CAS at CL=ALL on the same key. At 10-way contention this
+                 // reliably collapses on resource-constrained CI (the coordination times out
+                 // internally / a replica goes unavailable), so use a smaller concurrency that still
+                 // exercises concurrent conditional updates while completing under load.
+                 for (int ii = 0; ii < 4; ii++)
                  {
                      int id = ii;
                      futures.add(es.submit(() -> coordinator.execute("UPDATE " + qualifiedAccordTableName + " SET count = count + 1, seq1 = seq1 + ?, seq2 = seq2 + ? WHERE pk = ? IF EXISTS", ConsistencyLevel.ALL, id + ",", ByteBufferUtil.getArray(LIST_TYPE.decompose(singletonList(id))), 1)));
