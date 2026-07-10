@@ -582,10 +582,17 @@ public class CommandsForKeySerializerTest
     {
         var tableGen = AccordGenerators.fromQT(CassandraGenerators.TABLE_ID_GEN);
         var txnIdGen = AccordGens.txnIds((Gen.LongGen) rs -> rs.nextLong(0, 100), rs -> rs.nextLong(100), rs -> rs.nextInt(10));
+        // redudentBefore is drawn from a strictly lower epoch range (< 99) than the txns generated below
+        // (epoch < 100), guaranteeing there is always at least one full epoch of candidate TxnIds strictly
+        // greater than it -- i.e. far more than the maximum requested count (10) of unique later txns.
+        // Without this, txnIdGen and redudentBefore share the same narrow domain, so a redudentBefore near
+        // the top of that domain can leave fewer than 10 unique greater values; Gens.arrays(...).unique()
+        // then exhausts its 10k attempts and the property test fails for unlucky seeds (e.g. -3655457197255724357).
+        var redudentBeforeGen = AccordGens.txnIds((Gen.LongGen) rs -> rs.nextLong(0, 99), rs -> rs.nextLong(100), rs -> rs.nextInt(10));
         qt().check(rs -> {
             TableId table = tableGen.next(rs);
             TokenKey pk = new TokenKey(table, new Murmur3Partitioner.LongToken(rs.nextLong()));
-            var redudentBefore = txnIdGen.next(rs);
+            var redudentBefore = redudentBeforeGen.next(rs);
             TxnId[] ids = Gens.arrays(TxnId.class, rs0 -> {
                 TxnId next = txnIdGen.next(rs0);
                 while (next.compareTo(redudentBefore) <= 0)
