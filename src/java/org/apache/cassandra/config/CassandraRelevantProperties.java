@@ -320,6 +320,8 @@ public enum CassandraRelevantProperties
     IO_NETTY_EVENTLOOP_THREADS("io.netty.eventLoopThreads"),
     IO_NETTY_TRANSPORT_ESTIMATE_SIZE_ON_SUBMIT("io.netty.transport.estimateSizeOnSubmit"),
     IO_NETTY_TRANSPORT_NONATIVE("io.netty.transport.noNative"),
+    /** Enables per-request read IO attribution (bytes/ops/files) into the per-table IO histograms. */
+    IO_TRACKING_ENABLED("cassandra.io_tracking.enabled", "false"),
     IO_URING_FIXED_SLAB_SLOTS("cassandra.io_uring.fixed_slab_slots", "1024"),
     IO_URING_READ_FIXED("cassandra.io_uring.read_fixed", "false"),
     JAVAX_NET_SSL_KEYSTORE("javax.net.ssl.keyStore"),

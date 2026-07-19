@@ -28,6 +28,7 @@ import java.nio.file.StandardOpenOption;
 import com.sun.nio.file.ExtendedOpenOption;
 
 import org.apache.cassandra.io.FSReadError;
+import org.apache.cassandra.metrics.ReadIOTracker;
 import org.apache.cassandra.utils.NativeLibrary;
 import org.apache.cassandra.utils.concurrent.RefCounted;
 import org.apache.cassandra.utils.concurrent.SharedCloseableImpl;
@@ -182,7 +183,12 @@ public final class ChannelProxy extends SharedCloseableImpl
         try
         {
             // FIXME: consider wrapping in a while loop
-            return channel.read(buffer, position);
+            int read = channel.read(buffer, position);
+            if (ReadIOTracker.isEnabled())
+                ReadIOTracker.recordPhysicalRead(read, filePath);
+            if (IoOperationsLog.isEnabled())
+                IoOperationsLog.logRead(filePath, position, read);
+            return read;
         }
         catch (IOException e)
         {

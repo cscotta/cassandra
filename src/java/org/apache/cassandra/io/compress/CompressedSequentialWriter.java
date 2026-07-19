@@ -37,6 +37,7 @@ import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.io.util.ChecksumWriter;
 import org.apache.cassandra.io.util.DataPosition;
 import org.apache.cassandra.io.util.File;
+import org.apache.cassandra.io.util.IoOperationsLog;
 import org.apache.cassandra.io.util.SequentialWriter;
 import org.apache.cassandra.io.util.SequentialWriterOption;
 import org.apache.cassandra.schema.CompressionParams;
@@ -260,6 +261,8 @@ public class CompressedSequentialWriter extends SequentialWriter
     {
         try
         {
+            if (IoOperationsLog.isEnabled())
+                IoOperationsLog.logWrite(getPath(), chunkOffset, toWrite.remaining());
             channel.write(toWrite);
             toWrite.rewind();
             crcMetadata.appendDirect(toWrite, true);

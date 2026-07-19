@@ -82,6 +82,8 @@ import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.locator.Replica;
+import org.apache.cassandra.metrics.ReadIOContext;
+import org.apache.cassandra.metrics.ReadIOTracker;
 import org.apache.cassandra.metrics.TCMMetrics;
 import org.apache.cassandra.metrics.TableMetrics;
 import org.apache.cassandra.net.Message;
@@ -507,6 +509,11 @@ public abstract class ReadCommand extends AbstractReadQuery
     {
         long startTimeNanos = nanoTime();
 
+        // Snapshot per-request IO accounting at command entry so this command's contribution can be isolated as a
+        // delta at iterator close. Null (and cheap) unless cassandra.io_tracking.enabled and a context is bound.
+        ReadIOContext ioContext = ReadIOTracker.currentOrNull();
+        ReadIOContext.Snapshot ioStart = ioContext == null ? null : ioContext.snapshot();
+
         COMMAND.set(this);
         try
         {
@@ -541,7 +548,7 @@ public abstract class ReadCommand extends AbstractReadQuery
                 iterator = withQueryCancellation(iterator);
                 iterator = maybeRecordPurgeableTombstones(iterator, cfs);
                 iterator = RTBoundValidator.validate(withoutPurgeableTombstones(iterator, cfs, executionController), Stage.PURGED, false);
-                iterator = withMetricsRecording(iterator, cfs.metric, startTimeNanos);
+                iterator = withMetricsRecording(iterator, cfs.metric, startTimeNanos, ioContext, ioStart);
 
                 // If we've used a 2ndary index, we know the result already satisfy the primary expression used, so
                 // no point in checking it again.
@@ -610,7 +617,7 @@ public abstract class ReadCommand extends AbstractReadQuery
      * Wraps the provided iterator so that metrics on what is scanned by the command are recorded.
      * This also log warning/trow TombstoneOverwhelmingException if appropriate.
      */
-    private UnfilteredPartitionIterator withMetricsRecording(UnfilteredPartitionIterator iter, final TableMetrics metric, final long startTimeNanos)
+    private UnfilteredPartitionIterator withMetricsRecording(UnfilteredPartitionIterator iter, final TableMetrics metric, final long startTimeNanos, final ReadIOContext ioContext, final ReadIOContext.Snapshot ioStart)
     {
         class MetricRecording extends Transformation<UnfilteredRowIterator>
         {
@@ -741,6 +748,14 @@ public abstract class ReadCommand extends AbstractReadQuery
                 Tracing.trace("Read {} live rows and {} tombstone cells{}",
                         liveRows, tombstones,
                         (warnTombstones ? " (see tombstone_warn_threshold)" : ""));
+
+                if (ioContext != null)
+                {
+                    ReadIOContext.Snapshot ioDelta = ioContext.snapshot().minus(ioStart);
+                    metric.updateReadIO(ioDelta);
+                    Tracing.trace("Read IO: {} read ops, {} bytes from disk across {} files, {} bytes decompressed",
+                            ioDelta.physicalReadOps, ioDelta.physicalBytesRead, ioDelta.filesTouched, ioDelta.bytesDecompressed);
+                }
             }
         }
 

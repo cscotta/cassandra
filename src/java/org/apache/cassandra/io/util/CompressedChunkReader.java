@@ -31,6 +31,7 @@ import org.apache.cassandra.io.compress.BufferType;
 import org.apache.cassandra.io.compress.CompressionMetadata;
 import org.apache.cassandra.io.compress.CorruptBlockException;
 import org.apache.cassandra.io.sstable.CorruptSSTableException;
+import org.apache.cassandra.metrics.ReadIOTracker;
 import org.apache.cassandra.utils.ChecksumType;
 import org.apache.cassandra.utils.Closeable;
 
@@ -342,6 +343,8 @@ public abstract class CompressedChunkReader extends AbstractReaderFileProxy impl
                 }
 
                 uncompressed.flip();
+                if (ReadIOTracker.isEnabled())
+                    ReadIOTracker.recordDecompressed(uncompressed.remaining());
             }
             catch (CorruptBlockException e)
             {
@@ -477,6 +480,8 @@ public abstract class CompressedChunkReader extends AbstractReaderFileProxy impl
                     }
                 }
                 uncompressed.flip();
+                if (ReadIOTracker.isEnabled())
+                    ReadIOTracker.recordDecompressed(uncompressed.remaining());
             }
             catch (CorruptBlockException e)
             {
@@ -550,6 +555,8 @@ public abstract class CompressedChunkReader extends AbstractReaderFileProxy impl
                     throw new CorruptBlockException(channel.filePath(), chunk, e);
                 }
                 uncompressed.flip();
+                if (ReadIOTracker.isEnabled())
+                    ReadIOTracker.recordDecompressed(uncompressed.remaining());
             }
             catch (CorruptBlockException e)
             {

@@ -71,6 +71,33 @@ appender reference in the root level section below.
     <appender-ref ref="DEBUGLOG" />
   </appender>
 
+  <!-- IOOPERATIONSLOG rolling file appender to io_operations.log: one line per IO operation the database issues,
+       categorized by source (READ/FLUSH/COMPACTION/STREAMING/COMMITLOG). Routed here by the io_operations logger,
+       which is at level OFF by default; raise it to TRACE only for a controlled measurement run. -->
+  <appender name="IOOPERATIONSLOG" class="ch.qos.logback.core.rolling.RollingFileAppender">
+    <file>${cassandra.logdir}/io_operations.log</file>
+    <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+      <!-- rollover daily -->
+      <fileNamePattern>${cassandra.logdir}/io_operations.log.%d{yyyy-MM-dd}.%i.zip</fileNamePattern>
+      <!-- each file should be at most 50MB, keep 7 days worth of history, but at most 5GB -->
+      <maxFileSize>50MB</maxFileSize>
+      <maxHistory>7</maxHistory>
+      <totalSizeCap>5GB</totalSizeCap>
+    </rollingPolicy>
+    <encoder>
+      <pattern>%date{"yyyy-MM-dd'T'HH:mm:ss,SSS", UTC} [%thread] %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <!-- Wrap IOOPERATIONSLOG in an async appender if enabling at high throughput; sync is preferred for
+       low-volume, tightly-correlated cold measurement runs.
+  <appender name="ASYNCIOOPERATIONSLOG" class="ch.qos.logback.classic.AsyncAppender">
+    <queueSize>16384</queueSize>
+    <discardingThreshold>0</discardingThreshold>
+    <appender-ref ref="IOOPERATIONSLOG" />
+  </appender>
+  -->
+
   <!-- STDOUT console appender to stdout (INFO level) -->
 
   <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
@@ -127,6 +154,12 @@ appender reference in the root level section below.
     <!-- uncomment this appender reference together with appender definition above
          to start to put slow queries into system_views.slow_queries virtual table -->
     <!-- <appender-ref ref="SLOW_QUERIES_APPENDER"/> -->
+  </logger>
+
+  <!-- Log every IO operation the database issues to io_operations.log. OFF by default; raise to TRACE (edit here,
+       or at runtime: nodetool setlogginglevel io_operations TRACE) only for a controlled measurement run. -->
+  <logger name="io_operations" additivity="false" level="OFF">
+    <appender-ref ref="IOOPERATIONSLOG"/>
   </logger>
 
   <root level="INFO">

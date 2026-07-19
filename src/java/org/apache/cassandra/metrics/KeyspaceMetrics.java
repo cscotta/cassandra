@@ -187,6 +187,14 @@ public class KeyspaceMetrics
     public final Meter localReadSizeAborts;
     public final Histogram localReadSize;
 
+    /** Per-request read IO attribution; populated only when {@code cassandra.io_tracking.enabled} is set. */
+    public final Histogram readIopsPerRead;
+    public final Histogram bytesReadPerRead;
+    public final Histogram filesTouchedPerRead;
+    public final Histogram bytesDecompressedPerRead;
+    public final Histogram chunkCacheHitsPerRead;
+    public final Histogram chunkCacheMissesPerRead;
+
     public final Meter rowIndexSizeWarnings;
     public final Meter rowIndexSizeAborts;
     public final Histogram rowIndexSize;
@@ -308,6 +316,13 @@ public class KeyspaceMetrics
         localReadSizeWarnings = createKeyspaceMeter("LocalReadSizeWarnings");
         localReadSizeAborts = createKeyspaceMeter("LocalReadSizeAborts");
         localReadSize = createKeyspaceHistogram("LocalReadSize", false);
+
+        readIopsPerRead = createKeyspaceHistogram("ReadIopsPerRead", true);
+        bytesReadPerRead = createKeyspaceHistogram("BytesReadPerRead", true);
+        filesTouchedPerRead = createKeyspaceHistogram("FilesTouchedPerRead", true);
+        bytesDecompressedPerRead = createKeyspaceHistogram("BytesDecompressedPerRead", true);
+        chunkCacheHitsPerRead = createKeyspaceHistogram("ChunkCacheHitsPerRead", true);
+        chunkCacheMissesPerRead = createKeyspaceHistogram("ChunkCacheMissesPerRead", true);
 
         rowIndexSizeWarnings = createKeyspaceMeter("RowIndexSizeWarnings");
         rowIndexSizeAborts = createKeyspaceMeter("RowIndexSizeAborts");

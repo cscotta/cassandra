@@ -32,6 +32,7 @@ import org.apache.cassandra.exceptions.InvalidRoutingException;
 import org.apache.cassandra.exceptions.QueryCancelledException;
 import org.apache.cassandra.exceptions.RetryOnDifferentSystemException;
 import org.apache.cassandra.locator.Replica;
+import org.apache.cassandra.metrics.ReadIOTracker;
 import org.apache.cassandra.metrics.TCMMetrics;
 import org.apache.cassandra.net.IVerbHandler;
 import org.apache.cassandra.net.Message;
@@ -56,10 +57,15 @@ public class ReadCommandVerbHandler implements IVerbHandler<ReadCommand>
     public ReadResponse doRead(ReadCommand command, boolean trackRepairedData)
     {
         ReadResponse response;
+        ReadIOTracker.begin();
         try (ReadExecutionController controller = command.executionController(trackRepairedData);
              UnfilteredPartitionIterator iterator = command.executeLocally(controller))
         {
             response = command.createResponse(iterator, controller.getRepairedDataInfo());
+        }
+        finally
+        {
+            ReadIOTracker.endAndClear();
         }
 
         return response;

@@ -306,6 +306,14 @@ public class TableMetrics
     public final TableMeter localReadSizeAborts;
     public final TableHistogram localReadSize;
 
+    /** Per-request read IO attribution; populated only when {@code cassandra.io_tracking.enabled} is set. */
+    public final TableHistogram readIopsPerRead;
+    public final TableHistogram bytesReadPerRead;
+    public final TableHistogram filesTouchedPerRead;
+    public final TableHistogram bytesDecompressedPerRead;
+    public final TableHistogram chunkCacheHitsPerRead;
+    public final TableHistogram chunkCacheMissesPerRead;
+
     public final TableMeter rowIndexSizeWarnings;
     public final TableMeter rowIndexSizeAborts;
     public final TableHistogram rowIndexSize;
@@ -912,6 +920,13 @@ public class TableMetrics
         localReadSizeAborts = createTableMeter("LocalReadSizeAborts", cfs.keyspace.metric.localReadSizeAborts);
         localReadSize = createTableHistogram("LocalReadSize", cfs.keyspace.metric.localReadSize, false);
 
+        readIopsPerRead = createTableHistogram("ReadIopsPerRead", cfs.keyspace.metric.readIopsPerRead, true);
+        bytesReadPerRead = createTableHistogram("BytesReadPerRead", cfs.keyspace.metric.bytesReadPerRead, true);
+        filesTouchedPerRead = createTableHistogram("FilesTouchedPerRead", cfs.keyspace.metric.filesTouchedPerRead, true);
+        bytesDecompressedPerRead = createTableHistogram("BytesDecompressedPerRead", cfs.keyspace.metric.bytesDecompressedPerRead, true);
+        chunkCacheHitsPerRead = createTableHistogram("ChunkCacheHitsPerRead", cfs.keyspace.metric.chunkCacheHitsPerRead, true);
+        chunkCacheMissesPerRead = createTableHistogram("ChunkCacheMissesPerRead", cfs.keyspace.metric.chunkCacheMissesPerRead, true);
+
         rowIndexSizeWarnings = createTableMeter("RowIndexSizeWarnings", cfs.keyspace.metric.rowIndexSizeWarnings);
         rowIndexSizeAborts = createTableMeter("RowIndexSizeAborts", cfs.keyspace.metric.rowIndexSizeAborts);
         rowIndexSize = createTableHistogram("RowIndexSize", cfs.keyspace.metric.rowIndexSize, false);
@@ -944,6 +959,20 @@ public class TableMetrics
     public void updateSSTableIteratedInRangeRead(int count)
     {
         sstablesPerRangeReadHistogram.update(count);
+    }
+
+    /**
+     * Roll a single request's IO (the delta between two {@link ReadIOContext} snapshots) into the per-table
+     * histograms. Called from {@code ReadCommand}'s metric-recording transformation at iterator close.
+     */
+    public void updateReadIO(ReadIOContext.Snapshot delta)
+    {
+        readIopsPerRead.update(delta.physicalReadOps);
+        bytesReadPerRead.update(delta.physicalBytesRead);
+        filesTouchedPerRead.update(delta.filesTouched);
+        bytesDecompressedPerRead.update(delta.bytesDecompressed);
+        chunkCacheHitsPerRead.update(delta.chunkCacheHits());
+        chunkCacheMissesPerRead.update(delta.chunkCacheMisses);
     }
 
     /**

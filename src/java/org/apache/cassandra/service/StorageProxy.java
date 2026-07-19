@@ -126,6 +126,7 @@ import org.apache.cassandra.locator.Replicas;
 import org.apache.cassandra.metrics.CASClientRequestMetrics;
 import org.apache.cassandra.metrics.ClientRequestSizeMetrics;
 import org.apache.cassandra.metrics.DenylistMetrics;
+import org.apache.cassandra.metrics.ReadIOTracker;
 import org.apache.cassandra.metrics.ReadRepairMetrics;
 import org.apache.cassandra.metrics.StorageMetrics;
 import org.apache.cassandra.net.ArtificialLatency;
@@ -2749,6 +2750,7 @@ public class StorageProxy implements StorageProxyMBean
                 command.setMonitoringTime(requestTime.startedAtNanos(), false, deadline - requestTime.startedAtNanos(), DatabaseDescriptor.getSlowQueryTimeout(NANOSECONDS));
 
                 ReadResponse response;
+                ReadIOTracker.begin();
                 try (ReadExecutionController controller = command.executionController(trackRepairedStatus);
                      UnfilteredPartitionIterator iterator = command.executeLocally(controller))
                 {
@@ -2768,6 +2770,10 @@ public class StorageProxy implements StorageProxyMBean
                     response = null;
                     cancelled = true;
                     Preconditions.checkState(!command.isCompleted(), "Local read marked as completed despite being aborted by timeout to table %s", command.metadata());
+                }
+                finally
+                {
+                    ReadIOTracker.endAndClear();
                 }
 
                 if (command.complete())
