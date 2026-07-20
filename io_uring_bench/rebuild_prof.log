@@ -1,0 +1,22 @@
+=== 22:49:17 1. regen 16M rows (16 GB/node) ===
+Done: 16,000,000 rows across 10 shards in 25s -> /home/cscotta/projects/cassandra/io_uring_bench/staging_prof
+=== 22:49:43 2. create + start cluster (io_uring O_DIRECT) ===
+Current cluster is now: iouringbench
+=== 22:50:37 3. create schema (RF=3, Zstd@8, LCS) ===
+Stress complete, 1.
+=== 22:50:45 4. import ===
+
+
+
+
+
+
+=== 22:50:48 5. relevel + restart + disable autocompaction ===
+L0=0
+L1=110
+L0=0
+L1=110
+L0=0
+L1=110
+io_uring available (node1): 2
+REBUILD DONE 22:51:35

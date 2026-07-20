@@ -1,0 +1,28 @@
+======== 22:01:59 PREP read-direct ========
+nodes running binary: 0
+PREP read-direct READY
+caches dropped for read-direct
+======== 22:08:09 MEASURE read-direct ========
+MEASURE read-direct DONE 22:08:14
+======== 22:08:14 PREP read-iouring-odirect ========
+nodes running binary: 3
+io_uring available (node1 log): 2
+PREP read-iouring-odirect READY
+caches dropped for read-iouring-odirect
+======== 22:08:34 MEASURE read-iouring-odirect ========
+MEASURE read-iouring-odirect DONE 22:13:42
+======== 22:13:42 PREP mixed-standard ========
+nodes running binary: 3
+PREP mixed-standard READY
+caches dropped for mixed-standard
+======== 22:14:29 MEASURE mixed-standard ========
+MEASURE mixed-standard DONE 22:19:37
+======== 22:19:37 PREP mixed-iouring-odirect ========
+restoring golden snapshot...
+nodes running binary: 3
+io_uring available (node1 log): 3
+PREP mixed-iouring-odirect READY
+caches dropped for mixed-iouring-odirect
+======== 22:20:38 MEASURE mixed-iouring-odirect ========
+MEASURE mixed-iouring-odirect DONE 22:25:46
+ARMS 2-5 DONE 22:25:46

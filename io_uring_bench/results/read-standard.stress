@@ -1,0 +1,193 @@
+Skipping keyspace creation
+Executing 0 operations with consistency level LOCAL_ONE and serial consistency level LOCAL_SERIAL
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by com.datastax.oss.driver.shaded.guava.common.util.concurrent.AbstractFuture$UnsafeAtomicHelper (file:/home/cscotta/projects/cassandra/cassandra-easy-stress/build/libs/cassandra-easy-stress-10-all.jar)
+WARNING: Please consider reporting this to the maintainers of class com.datastax.oss.driver.shaded.guava.common.util.concurrent.AbstractFuture$UnsafeAtomicHelper
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::load has been called by com.kenai.jffi.internal.StubLoader in an unnamed module (file:/home/cscotta/projects/cassandra/cassandra-easy-stress/build/libs/cassandra-easy-stress-10-all.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+Connected to Cassandra cluster.
+Creating Tables
+Preparing queries
+Initializing metrics
+Stepping rate limiter by 2999.9999999999995 to 29999.999999999996
+Connecting to Cassandra cluster ...
+Creating generator random
+Connecting to Cassandra cluster ...
+Creating generator random
+Connecting to Cassandra cluster ...
+Creating generator random
+Connecting to Cassandra cluster ...
+Creating generator random
+Connecting to Cassandra cluster ...
+Creating generator random
+Connecting to Cassandra cluster ...
+Creating generator random
+Connecting to Cassandra cluster ...
+Creating generator random
+Connecting to Cassandra cluster ...
+Creating generator random
+Connecting to Cassandra cluster ...
+Creating generator random
+Connecting to Cassandra cluster ...
+Creating generator random
+Connecting to Cassandra cluster ...
+Creating generator random
+Connecting to Cassandra cluster ...
+Creating generator random
+Connecting to Cassandra cluster ...
+Creating generator random
+Connecting to Cassandra cluster ...
+Creating generator random
+Connecting to Cassandra cluster ...
+Creating generator random
+Connecting to Cassandra cluster ...
+Creating generator random
+16 threads prepared.
+Prepopulating data with 0 records per thread (16)
+Prometheus metrics are available at http://localhost:9500/
+Starting main runner
+[Thread 8]: Running the profile for 5m 0s (start: 9:56 PM end: 10:01 PM)
+[Thread 15]: Running the profile for 5m 0s (start: 9:56 PM end: 10:01 PM)
+[Thread 10]: Running the profile for 5m 0s (start: 9:56 PM end: 10:01 PM)
+[Thread 11]: Running the profile for 5m 0s (start: 9:56 PM end: 10:01 PM)
+[Thread 13]: Running the profile for 5m 0s (start: 9:56 PM end: 10:01 PM)
+[Thread 2]: Running the profile for 5m 0s (start: 9:56 PM end: 10:01 PM)
+[Thread 4]: Running the profile for 5m 0s (start: 9:56 PM end: 10:01 PM)
+[Thread 3]: Running the profile for 5m 0s (start: 9:56 PM end: 10:01 PM)
+[Thread 6]: Running the profile for 5m 0s (start: 9:56 PM end: 10:01 PM)
+[Thread 7]: Running the profile for 5m 0s (start: 9:56 PM end: 10:01 PM)
+[Thread 1]: Running the profile for 5m 0s (start: 9:56 PM end: 10:01 PM)
+[Thread 12]: Running the profile for 5m 0s (start: 9:56 PM end: 10:01 PM)
+[Thread 0]: Running the profile for 5m 0s (start: 9:56 PM end: 10:01 PM)
+[Thread 14]: Running the profile for 5m 0s (start: 9:56 PM end: 10:01 PM)
+[Thread 9]: Running the profile for 5m 0s (start: 9:56 PM end: 10:01 PM)
+[Thread 5]: Running the profile for 5m 0s (start: 9:56 PM end: 10:01 PM)
+                 Writes                                  Reads                                  Deletes                       Errors
+  Count  Latency (p99)  1min (req/s) |   Count  Latency (p99)  1min (req/s) |   Count  Latency (p99)  1min (req/s) |   Count  1min (errors/s)
+      0              0             0 |    6227           7.55             0 |       0              0             0 |       0                0
+      0              0             0 |   15224            4.6        2438.2 |       0              0             0 |       0                0
+      0              0             0 |   24234           2.55        2438.2 |       0              0             0 |       0                0
+      0              0             0 |   39279            1.7       2483.34 |       0              0             0 |       0                0
+      0              0             0 |   57355            1.1       2765.83 |       0              0             0 |       0                0
+      0              0             0 |   84382           1.38       2765.83 |       0              0             0 |       0                0
+      0              0             0 |  114455           0.99       3264.56 |       0              0             0 |       0                0
+      0              0             0 |  150600           1.09       3264.56 |       0              0             0 |       0                0
+      0              0             0 |  192958           0.99       3966.46 |       0              0             0 |       0                0
+      0              0             0 |  238420           0.99       4860.36 |       0              0             0 |       0                0
+                 Writes                                  Reads                                  Deletes                       Errors
+  Count  Latency (p99)  1min (req/s) |   Count  Latency (p99)  1min (req/s) |   Count  Latency (p99)  1min (req/s) |   Count  1min (errors/s)
+      0              0             0 |  292986           0.94       4860.36 |       0              0             0 |       0                0
+      0              0             0 |  350618           0.88       5925.15 |       0              0             0 |       0                0
+      0              0             0 |  414449           0.79       5925.15 |       0              0             0 |       0                0
+      0              0             0 |  484516           0.69       7152.23 |       0              0             0 |       0                0
+      0              0             0 |  557695           0.69       8530.09 |       0              0             0 |       0                0
+      0              0             0 |  638776           0.98       8530.09 |       0              0             0 |       0                0
+      0              0             0 |  723134           0.99      10008.73 |       0              0             0 |       0                0
+      0              0             0 |  814041           1.07      10008.73 |       0              0             0 |       0                0
+      0              0             0 |  904960           1.01      11630.92 |       0              0             0 |       0                0
+      0              0             0 |  995865           1.06      13123.78 |       0              0             0 |       0                0
+                 Writes                                  Reads                                  Deletes                       Errors
+  Count  Latency (p99)  1min (req/s) |   Count  Latency (p99)  1min (req/s) |   Count  Latency (p99)  1min (req/s) |   Count  1min (errors/s)
+      0              0             0 | 1086787           1.13      13123.78 |       0              0             0 |       0                0
+      0              0             0 | 1177676           1.04      14497.35 |       0              0             0 |       0                0
+      0              0             0 | 1268583           0.97      14497.35 |       0              0             0 |       0                0
+      0              0             0 | 1359490           0.97      15761.07 |       0              0             0 |       0                0
+      0              0             0 | 1450396              1      16923.67 |       0              0             0 |       0                0
+      0              0             0 | 1541307           1.13      16923.67 |       0              0             0 |       0                0
+      0              0             0 | 1632221            1.2      17993.37 |       0              0             0 |       0                0
+      0              0             0 | 1723120           1.22      17993.37 |       0              0             0 |       0                0
+      0              0             0 | 1814028           1.42       18977.6 |       0              0             0 |       0                0
+      0              0             0 | 1904934           1.35      19882.95 |       0              0             0 |       0                0
+                 Writes                                  Reads                                  Deletes                       Errors
+  Count  Latency (p99)  1min (req/s) |   Count  Latency (p99)  1min (req/s) |   Count  Latency (p99)  1min (req/s) |   Count  1min (errors/s)
+      0              0             0 | 1995922           2.11      19882.95 |       0              0             0 |       1                0
+      0              0             0 | 2086750           2.11      20716.09 |       0              0             0 |       1             0.02
+      0              0             0 | 2177658           2.11      20716.09 |       0              0             0 |       1             0.02
+      0              0             0 | 2268543           1.81      21482.59 |       0              0             0 |       1             0.01
+      0              0             0 | 2359490           1.81      22187.63 |       0              0             0 |       1             0.01
+      0              0             0 | 2450395           1.81      22187.63 |       0              0             0 |       1             0.01
+      0              0             0 | 2541281           1.81      22836.57 |       0              0             0 |       1             0.01
+      0              0             0 | 2632186           2.11      22836.57 |       0              0             0 |       1             0.01
+      0              0             0 | 2723103           1.81      23433.47 |       0              0             0 |       1             0.01
+      0              0             0 | 2814005           1.54      23982.73 |       0              0             0 |       1             0.01
+                 Writes                                  Reads                                  Deletes                       Errors
+  Count  Latency (p99)  1min (req/s) |   Count  Latency (p99)  1min (req/s) |   Count  Latency (p99)  1min (req/s) |   Count  1min (errors/s)
+      0              0             0 | 2904915           1.54      23982.73 |       0              0             0 |       1             0.01
+      0              0             0 | 2995824           2.03      24487.97 |       0              0             0 |       1             0.01
+      0              0             0 | 3086726           1.54      24487.97 |       0              0             0 |       1             0.01
+      0              0             0 | 3177628           2.03       24952.9 |       0              0             0 |       1             0.01
+      0              0             0 | 3268539            1.2      25380.58 |       0              0             0 |       1             0.01
+      0              0             0 | 3359447            1.2      25380.58 |       0              0             0 |       1             0.01
+      0              0             0 | 3450348            1.2      25774.09 |       0              0             0 |       3             0.04
+      0              0             0 | 3541256           1.12      25774.09 |       0              0             0 |       3             0.04
+      0              0             0 | 3632154           1.15      26136.17 |       0              0             0 |       3             0.04
+      0              0             0 | 3723073           1.12      26469.31 |       0              0             0 |       3             0.03
+                 Writes                                  Reads                                  Deletes                       Errors
+  Count  Latency (p99)  1min (req/s) |   Count  Latency (p99)  1min (req/s) |   Count  Latency (p99)  1min (req/s) |   Count  1min (errors/s)
+      0              0             0 | 3813984           1.41      26469.31 |       0              0             0 |       3             0.03
+      0              0             0 | 3904886           1.29      26775.73 |       0              0             0 |       3             0.03
+      0              0             0 | 3995560            1.5      26775.73 |       0              0             0 |     233             0.03
+      0              0             0 | 4086470            1.5      27054.02 |       0              0             0 |     233             3.71
+      0              0             0 | 4177371            1.7      27313.77 |       0              0             0 |     233             3.41
+      0              0             0 | 4268285           1.54      27313.77 |       0              0             0 |     233             3.41
+      0              0             0 | 4359179            1.9      27552.47 |       0              0             0 |     244             3.31
+      0              0             0 | 4450079            1.7      27552.47 |       0              0             0 |     244             3.31
+      0              0             0 | 4540992           1.95      27772.39 |       0              0             0 |     244             3.05
+      0              0             0 | 4631897           1.95      27974.74 |       0              0             0 |     244              2.8
+                 Writes                                  Reads                                  Deletes                       Errors
+  Count  Latency (p99)  1min (req/s) |   Count  Latency (p99)  1min (req/s) |   Count  Latency (p99)  1min (req/s) |   Count  1min (errors/s)
+      0              0             0 | 4722814            1.7      27974.74 |       0              0             0 |     244              2.8
+      0              0             0 | 4813710           1.95      28160.74 |       0              0             0 |     244             2.58
+      0              0             0 | 4904619           1.95      28160.74 |       0              0             0 |     244             2.58
+      0              0             0 | 4995517           1.95      28332.04 |       0              0             0 |     244             2.37
+      0              0             0 | 5086436           1.62      28489.58 |       0              0             0 |     244             2.18
+      0              0             0 | 5177342           1.62      28489.58 |       0              0             0 |     244             2.18
+      0              0             0 | 5268247           1.52      28634.48 |       0              0             0 |     244             2.01
+      0              0             0 | 5359161           1.52      28634.48 |       0              0             0 |     244             2.01
+      0              0             0 | 5450061           1.42      28767.79 |       0              0             0 |     244             1.85
+      0              0             0 | 5540972           1.42      28890.62 |       0              0             0 |     244              1.7
+                 Writes                                  Reads                                  Deletes                       Errors
+  Count  Latency (p99)  1min (req/s) |   Count  Latency (p99)  1min (req/s) |   Count  Latency (p99)  1min (req/s) |   Count  1min (errors/s)
+      0              0             0 | 5631887           1.43      28890.62 |       0              0             0 |     244              1.7
+      0              0             0 | 5722787           1.42      29003.53 |       0              0             0 |     244             1.57
+      0              0             0 | 5813691           1.43      29003.53 |       0              0             0 |     244             1.57
+      0              0             0 | 5904605           1.52      29107.35 |       0              0             0 |     244             1.44
+      0              0             0 | 5995508           1.42      29202.97 |       0              0             0 |     244             1.32
+      0              0             0 | 6086417           1.36      29202.97 |       0              0             0 |     244             1.32
+      0              0             0 | 6177322           1.34      29290.84 |       0              0             0 |     244             1.22
+      0              0             0 | 6268231           1.42      29290.84 |       0              0             0 |     244             1.22
+      0              0             0 | 6359135           1.42      29371.72 |       0              0             0 |     244             1.12
+      0              0             0 | 6450045           1.36      29446.08 |       0              0             0 |     244             1.03
+                 Writes                                  Reads                                  Deletes                       Errors
+  Count  Latency (p99)  1min (req/s) |   Count  Latency (p99)  1min (req/s) |   Count  Latency (p99)  1min (req/s) |   Count  1min (errors/s)
+      0              0             0 | 6540952           1.42      29446.08 |       0              0             0 |     244             1.03
+      0              0             0 | 6631861           1.21       29514.6 |       0              0             0 |     244             0.95
+      0              0             0 | 6722764           1.22       29514.6 |       0              0             0 |     244             0.95
+      0              0             0 | 6813681           1.22       29577.6 |       0              0             0 |     244             0.87
+      0              0             0 | 6904617           1.21      29635.59 |       0              0             0 |     244              0.8
+      0              0             0 | 6995487           1.18      29635.59 |       0              0             0 |     244              0.8
+      0              0             0 | 7086393           1.18      29688.86 |       0              0             0 |     244             0.74
+      0              0             0 | 7177306           1.21      29688.86 |       0              0             0 |     244             0.74
+      0              0             0 | 7268218           1.21      29737.96 |       0              0             0 |     244             0.68
+      0              0             0 | 7359120           1.21      29783.06 |       0              0             0 |     244             0.63
+                 Writes                                  Reads                                  Deletes                       Errors
+  Count  Latency (p99)  1min (req/s) |   Count  Latency (p99)  1min (req/s) |   Count  Latency (p99)  1min (req/s) |   Count  1min (errors/s)
+      0              0             0 | 7450034           1.19      29783.06 |       0              0             0 |     244             0.63
+      0              0             0 | 7540936              1       29824.6 |       0              0             0 |     244             0.58
+      0              0             0 | 7631838           1.21       29824.6 |       0              0             0 |     244             0.58
+      0              0             0 | 7722750           1.21      29862.77 |       0              0             0 |     244             0.53
+      0              0             0 | 7813656           1.38      29897.97 |       0              0             0 |     244             0.49
+      0              0             0 | 7904569           1.27      29897.97 |       0              0             0 |     244             0.49
+      0              0             0 | 7995472           1.27      29930.35 |       0              0             0 |     244             0.45
+      0              0             0 | 8086380           1.27      29930.35 |       0              0             0 |     244             0.45
+      0              0             0 | 8177288           1.24      29960.07 |       0              0             0 |     244             0.41
+      0              0             0 | 8268191           1.24      29987.42 |       0              0             0 |     244             0.38
+                 Writes                                  Reads                                  Deletes                       Errors
+  Count  Latency (p99)  1min (req/s) |   Count  Latency (p99)  1min (req/s) |   Count  Latency (p99)  1min (req/s) |   Count  1min (errors/s)
+      0              0             0 | 8268713           1.24      29987.42 |       0              0             0 |     244             0.38
+      0              0             0 | 8268713           1.24      29987.42 |       0              0             0 |     244             0.38
+Stress complete, 16.

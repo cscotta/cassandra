@@ -1,0 +1,9 @@
+======== 21:42:10 PREP read-standard ========
+nodes running binary: 3
+PREP read-standard READY
+caches dropped for read-standard
+======== 21:42:58 MEASURE read-standard ========
+MEASURE read-standard DONE 21:48:06
+======== 21:48:06 PREP read-direct ========
+nodes running binary: 0
+PREP read-direct READY

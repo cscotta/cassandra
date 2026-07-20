@@ -1,0 +1,8 @@
+### 21:24:52 ARM read-standard start: dam=standard directio=false compread=auto autocompact=off readrate=1.0 restore=no
+### 21:30:51 ARM read-standard DONE
+### 21:30:51 ARM read-direct start: dam=direct directio=false compread=direct autocompact=off readrate=1.0 restore=no
+### 21:31:27 ARM read-direct DONE
+### 21:31:27 ARM read-iouring-odirect start: dam=io_uring directio=true compread=io_uring autocompact=off readrate=1.0 restore=no
+io_uring availability lines in node1 log: 1
+### 21:36:49 ARM read-iouring-odirect DONE
+ALL READ ARMS DONE

@@ -1,0 +1,9 @@
+Linux 7.0.13-400.asahi.fc44.aarch64+16k (amx) 	07/06/2026 	_aarch64_	(10 CPU)
+
+avg-cpu:  %user   %nice %system %iowait  %steal   %idle
+           2.96    0.01    1.18   34.02    0.00   61.84
+
+Device            r/s     rkB/s   rrqm/s  %rrqm r_await rareq-sz     w/s     wkB/s   wrqm/s  %wrqm w_await wareq-sz     d/s     dkB/s   drqm/s  %drqm d_await dareq-sz     f/s f_await  aqu-sz  %util
+nvme0n1        421.84  15941.23    34.82   7.62    0.26    37.79   99.88   4944.08    61.20  37.99    0.17    49.50    0.24   7933.92     0.00   0.00    0.05 33308.10    9.25    0.04    0.13   0.70
+
+

@@ -1,0 +1,31 @@
+=== 20:57:17 importing into node1 ===
+/home/cscotta/.local/bin/ccm:7: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  import pkg_resources
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::arrayBaseOffset has been called by org.cliffc.high_scale_lib.NonBlockingHashMap (file:/home/cscotta/projects/cassandra/lib/high-scale-lib-1.0.6.jar)
+WARNING: Please consider reporting this to the maintainers of class org.cliffc.high_scale_lib.NonBlockingHashMap
+WARNING: sun.misc.Unsafe::arrayBaseOffset will be removed in a future release
+
+
+=== 20:57:18 node1 OK ===
+=== 20:57:18 importing into node2 ===
+/home/cscotta/.local/bin/ccm:7: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  import pkg_resources
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::arrayBaseOffset has been called by org.cliffc.high_scale_lib.NonBlockingHashMap (file:/home/cscotta/projects/cassandra/lib/high-scale-lib-1.0.6.jar)
+WARNING: Please consider reporting this to the maintainers of class org.cliffc.high_scale_lib.NonBlockingHashMap
+WARNING: sun.misc.Unsafe::arrayBaseOffset will be removed in a future release
+
+
+=== 20:57:20 node2 OK ===
+=== 20:57:20 importing into node3 ===
+/home/cscotta/.local/bin/ccm:7: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  import pkg_resources
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::arrayBaseOffset has been called by org.cliffc.high_scale_lib.NonBlockingHashMap (file:/home/cscotta/projects/cassandra/lib/high-scale-lib-1.0.6.jar)
+WARNING: Please consider reporting this to the maintainers of class org.cliffc.high_scale_lib.NonBlockingHashMap
+WARNING: sun.misc.Unsafe::arrayBaseOffset will be removed in a future release
+
+
+=== 20:57:22 node3 OK ===
+ALL IMPORTS DONE 20:57:22

@@ -1,0 +1,70 @@
+Skipping keyspace creation
+Executing 0 operations with consistency level LOCAL_ONE and serial consistency level LOCAL_SERIAL
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by com.datastax.oss.driver.shaded.guava.common.util.concurrent.AbstractFuture$UnsafeAtomicHelper (file:/home/cscotta/projects/cassandra/cassandra-easy-stress/build/libs/cassandra-easy-stress-10-all.jar)
+WARNING: Please consider reporting this to the maintainers of class com.datastax.oss.driver.shaded.guava.common.util.concurrent.AbstractFuture$UnsafeAtomicHelper
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::load has been called by com.kenai.jffi.internal.StubLoader in an unnamed module (file:/home/cscotta/projects/cassandra/cassandra-easy-stress/build/libs/cassandra-easy-stress-10-all.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+Could not reach any contact point, make sure you've provided valid addresses (showing first 1 nodes, use getAllErrors() for more): Node(endPoint=/127.0.0.1:9042, hostId=null, hashCode=766bfdb8): [com.datastax.oss.driver.api.core.connection.ConnectionInitException: [s0|control|connecting...] Protocol initialization request, step 1 (OPTIONS): failed to send request (io.netty.channel.StacklessClosedChannelException)]
+com.datastax.oss.driver.api.core.AllNodesFailedException: Could not reach any contact point, make sure you've provided valid addresses (showing first 1 nodes, use getAllErrors() for more): Node(endPoint=/127.0.0.1:9042, hostId=null, hashCode=766bfdb8): [com.datastax.oss.driver.api.core.connection.ConnectionInitException: [s0|control|connecting...] Protocol initialization request, step 1 (OPTIONS): failed to send request (io.netty.channel.StacklessClosedChannelException)]
+	at com.datastax.oss.driver.api.core.AllNodesFailedException.copy(AllNodesFailedException.java:143)
+	at com.datastax.oss.driver.internal.core.util.concurrent.CompletableFutures.getUninterruptibly(CompletableFutures.java:154)
+	at com.datastax.oss.driver.api.core.session.SessionBuilder.build(SessionBuilder.java:837)
+	at org.apache.cassandra.easystress.commands.Run.session_delegate$lambda$0(Run.kt:405)
+	at kotlin.SynchronizedLazyImpl.getValue(LazyJVM.kt:86)
+	at org.apache.cassandra.easystress.commands.Run.getSession(Run.kt:349)
+	at org.apache.cassandra.easystress.commands.Run.createKeyspace(Run.kt:722)
+	at org.apache.cassandra.easystress.commands.Run.execute(Run.kt:456)
+	at org.apache.cassandra.easystress.CommandLineParser.execute(CommandLineParser.kt:73)
+	at org.apache.cassandra.easystress.MainKt.main(Main.kt:29)
+	Suppressed: com.datastax.oss.driver.api.core.connection.ConnectionInitException: [s0|control|connecting...] Protocol initialization request, step 1 (OPTIONS): failed to send request (io.netty.channel.StacklessClosedChannelException)
+		at com.datastax.oss.driver.internal.core.channel.ProtocolInitHandler$InitRequest.fail(ProtocolInitHandler.java:358)
+		at com.datastax.oss.driver.internal.core.channel.ChannelHandlerRequest.writeListener(ChannelHandlerRequest.java:89)
+		at io.netty.util.concurrent.DefaultPromise.notifyListener0(DefaultPromise.java:590)
+		at io.netty.util.concurrent.DefaultPromise.notifyListenersNow(DefaultPromise.java:557)
+		at io.netty.util.concurrent.DefaultPromise.notifyListeners(DefaultPromise.java:492)
+		at io.netty.util.concurrent.DefaultPromise.addListener(DefaultPromise.java:185)
+		at io.netty.channel.DefaultChannelPromise.addListener(DefaultChannelPromise.java:95)
+		at io.netty.channel.DefaultChannelPromise.addListener(DefaultChannelPromise.java:30)
+		at com.datastax.oss.driver.internal.core.channel.ChannelHandlerRequest.send(ChannelHandlerRequest.java:78)
+		at com.datastax.oss.driver.internal.core.channel.ProtocolInitHandler$InitRequest.send(ProtocolInitHandler.java:195)
+		at com.datastax.oss.driver.internal.core.channel.ProtocolInitHandler.onRealConnect(ProtocolInitHandler.java:126)
+		at com.datastax.oss.driver.internal.core.channel.ConnectInitHandler.lambda$connect$0(ConnectInitHandler.java:59)
+		at io.netty.util.concurrent.DefaultPromise.notifyListener0(DefaultPromise.java:590)
+		at io.netty.util.concurrent.DefaultPromise.notifyListeners0(DefaultPromise.java:583)
+		at io.netty.util.concurrent.DefaultPromise.notifyListenersNow(DefaultPromise.java:559)
+		at io.netty.util.concurrent.DefaultPromise.notifyListeners(DefaultPromise.java:492)
+		at io.netty.util.concurrent.DefaultPromise.setValue0(DefaultPromise.java:636)
+		at io.netty.util.concurrent.DefaultPromise.setFailure0(DefaultPromise.java:629)
+		at io.netty.util.concurrent.DefaultPromise.tryFailure(DefaultPromise.java:118)
+		at io.netty.channel.nio.AbstractNioChannel$AbstractNioUnsafe.fulfillConnectPromise(AbstractNioChannel.java:321)
+		at io.netty.channel.nio.AbstractNioChannel$AbstractNioUnsafe.finishConnect(AbstractNioChannel.java:337)
+		at io.netty.channel.nio.NioEventLoop.processSelectedKey(NioEventLoop.java:776)
+		at io.netty.channel.nio.NioEventLoop.processSelectedKeysOptimized(NioEventLoop.java:724)
+		at io.netty.channel.nio.NioEventLoop.processSelectedKeys(NioEventLoop.java:650)
+		at io.netty.channel.nio.NioEventLoop.run(NioEventLoop.java:562)
+		at io.netty.util.concurrent.SingleThreadEventExecutor$4.run(SingleThreadEventExecutor.java:997)
+		at io.netty.util.internal.ThreadExecutorMap$2.run(ThreadExecutorMap.java:74)
+		at io.netty.util.concurrent.FastThreadLocalRunnable.run(FastThreadLocalRunnable.java:30)
+		at java.base/java.lang.Thread.run(Thread.java:1474)
+		Suppressed: io.netty.channel.AbstractChannel$AnnotatedConnectException: Connection refused: /127.0.0.1:9042
+		Caused by: java.net.ConnectException: Connection refused
+			at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+			at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:639)
+			at java.base/sun.nio.ch.SocketChannelImpl.finishConnect(SocketChannelImpl.java:1046)
+			at io.netty.channel.socket.nio.NioSocketChannel.doFinishConnect(NioSocketChannel.java:337)
+			at io.netty.channel.nio.AbstractNioChannel$AbstractNioUnsafe.finishConnect(AbstractNioChannel.java:334)
+			at io.netty.channel.nio.NioEventLoop.processSelectedKey(NioEventLoop.java:776)
+			at io.netty.channel.nio.NioEventLoop.processSelectedKeysOptimized(NioEventLoop.java:724)
+			at io.netty.channel.nio.NioEventLoop.processSelectedKeys(NioEventLoop.java:650)
+			at io.netty.channel.nio.NioEventLoop.run(NioEventLoop.java:562)
+			at io.netty.util.concurrent.SingleThreadEventExecutor$4.run(SingleThreadEventExecutor.java:997)
+			at io.netty.util.internal.ThreadExecutorMap$2.run(ThreadExecutorMap.java:74)
+			at io.netty.util.concurrent.FastThreadLocalRunnable.run(FastThreadLocalRunnable.java:30)
+			at java.base/java.lang.Thread.run(Thread.java:1474)
+	Caused by: io.netty.channel.StacklessClosedChannelException
+		at io.netty.channel.AbstractChannel$AbstractUnsafe.flush0()(Unknown Source)

@@ -1,0 +1,97 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>io_uring Cassandra benchmark</title>
+<style>body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:1100px;margin:2rem auto;padding:0 1rem;line-height:1.5}
+h1{border-bottom:2px solid #ccc}h2{margin-top:1.8em}table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.9em}
+th,td{border:1px solid #ccc;padding:.4em .6em;text-align:right}th:first-child,td:first-child{text-align:left}
+.mgrid{display:grid;grid-template-columns:1fr;gap:1.4em}.metric{border:1px solid #e0e0e0;border-radius:6px;padding:.8em 1em}
+.row{display:grid;grid-template-columns:320px 1fr 90px;gap:.6em;align-items:center;margin:.25em 0}
+.lo{color:#2a7} .cap{color:#666;font-size:.85em}</style></head><body>
+<h1>io_uring read path — Cassandra 3-node benchmark</h1>
+<p class="cap">64&nbsp;GB/node (RF=3, 64M&times;1KB, Zstd@8, LCS-160, leveled), cold start (drop_caches per arm), 30k ops/s offered, 16 threads, queue 64, 5&nbsp;min/arm. Lower is better where noted (▼).</p>
+<h2>Summary</h2><table><tr><th>metric</th><th>Read-only · standard (buffered)</th><th>Read-only · io_uring (O_DIRECT ring)</th><th>80/20 mixed · standard</th><th>80/20 mixed · io_uring O_DIRECT (+compaction_read)</th></tr>
+<tr><td>Read throughput (ops/s)</td><td>27562</td><td>27563</td><td>22056</td><td>22048</td></tr>
+<tr><td>Write throughput (ops/s)</td><td>0</td><td>0</td><td>5507</td><td>5513</td></tr>
+<tr><td>Client read p99 (ms) ▼</td><td>1.24</td><td>1.35</td><td>3.13</td><td>2.84</td></tr>
+<tr><td>Server read p99 (µs) ▼</td><td>770</td><td>924</td><td>2759</td><td>3973</td></tr>
+<tr><td>Errors (total) ▼</td><td>244</td><td>7</td><td>121</td><td>767</td></tr>
+<tr><td>CPU busy (%) ▼</td><td>95.3</td><td>97.2</td><td>97.9</td><td>98.4</td></tr>
+<tr><td>CPU %sys+%soft (kernel) ▼</td><td>23.8</td><td>25.1</td><td>28.5</td><td>29.5</td></tr>
+<tr><td>Disk read IOPS (r/s)</td><td>26551</td><td>28888</td><td>21456</td><td>24375</td></tr>
+<tr><td>Disk read MB/s ▼</td><td>1056</td><td>570</td><td>835</td><td>458</td></tr>
+<tr><td>Disk avg queue depth</td><td>3.6</td><td>2.9</td><td>3.9</td><td>3.3</td></tr>
+<tr><td>Disk %util</td><td>55.9</td><td>55.8</td><td>55.7</td><td>54.7</td></tr>
+<tr><td>Disk r_await (ms) ▼</td><td>0.14</td><td>0.10</td><td>0.17</td><td>0.13</td></tr>
+</table>
+<h2>Charts</h2><div class="mgrid">
+<div class="metric"><b>Read throughput (ops/s)</b>
+<div class="row"><span>Read-only · standard (buffered)</span><div style="background:#2a9d8f;height:1.1em;width:100.0%;border-radius:3px"></div><span>27562</span></div>
+<div class="row"><span>Read-only · io_uring (O_DIRECT ring)</span><div style="background:#2a9d8f;height:1.1em;width:100.0%;border-radius:3px"></div><span>27563</span></div>
+<div class="row"><span>80/20 mixed · standard</span><div style="background:#2a9d8f;height:1.1em;width:80.0%;border-radius:3px"></div><span>22056</span></div>
+<div class="row"><span>80/20 mixed · io_uring O_DIRECT (+compaction_read)</span><div style="background:#2a9d8f;height:1.1em;width:80.0%;border-radius:3px"></div><span>22048</span></div>
+</div>
+<div class="metric"><b>Write throughput (ops/s)</b>
+<div class="row"><span>Read-only · standard (buffered)</span><div style="background:#8ab17d;height:1.1em;width:1.0%;border-radius:3px"></div><span>0</span></div>
+<div class="row"><span>Read-only · io_uring (O_DIRECT ring)</span><div style="background:#8ab17d;height:1.1em;width:1.0%;border-radius:3px"></div><span>0</span></div>
+<div class="row"><span>80/20 mixed · standard</span><div style="background:#8ab17d;height:1.1em;width:99.9%;border-radius:3px"></div><span>5507</span></div>
+<div class="row"><span>80/20 mixed · io_uring O_DIRECT (+compaction_read)</span><div style="background:#8ab17d;height:1.1em;width:100.0%;border-radius:3px"></div><span>5513</span></div>
+</div>
+<div class="metric"><b>Client read p99 (ms)</b> <span class=lo>(lower is better)</span>
+<div class="row"><span>Read-only · standard (buffered)</span><div style="background:#e76f51;height:1.1em;width:39.6%;border-radius:3px"></div><span>1.24</span></div>
+<div class="row"><span>Read-only · io_uring (O_DIRECT ring)</span><div style="background:#e76f51;height:1.1em;width:43.1%;border-radius:3px"></div><span>1.35</span></div>
+<div class="row"><span>80/20 mixed · standard</span><div style="background:#e76f51;height:1.1em;width:100.0%;border-radius:3px"></div><span>3.13</span></div>
+<div class="row"><span>80/20 mixed · io_uring O_DIRECT (+compaction_read)</span><div style="background:#e76f51;height:1.1em;width:90.7%;border-radius:3px"></div><span>2.84</span></div>
+</div>
+<div class="metric"><b>Server read p99 (µs)</b> <span class=lo>(lower is better)</span>
+<div class="row"><span>Read-only · standard (buffered)</span><div style="background:#e9c46a;height:1.1em;width:19.4%;border-radius:3px"></div><span>770</span></div>
+<div class="row"><span>Read-only · io_uring (O_DIRECT ring)</span><div style="background:#e9c46a;height:1.1em;width:23.3%;border-radius:3px"></div><span>924</span></div>
+<div class="row"><span>80/20 mixed · standard</span><div style="background:#e9c46a;height:1.1em;width:69.4%;border-radius:3px"></div><span>2759</span></div>
+<div class="row"><span>80/20 mixed · io_uring O_DIRECT (+compaction_read)</span><div style="background:#e9c46a;height:1.1em;width:100.0%;border-radius:3px"></div><span>3973</span></div>
+</div>
+<div class="metric"><b>Errors (total)</b> <span class=lo>(lower is better)</span>
+<div class="row"><span>Read-only · standard (buffered)</span><div style="background:#c1121f;height:1.1em;width:31.8%;border-radius:3px"></div><span>244</span></div>
+<div class="row"><span>Read-only · io_uring (O_DIRECT ring)</span><div style="background:#c1121f;height:1.1em;width:1.0%;border-radius:3px"></div><span>7</span></div>
+<div class="row"><span>80/20 mixed · standard</span><div style="background:#c1121f;height:1.1em;width:15.8%;border-radius:3px"></div><span>121</span></div>
+<div class="row"><span>80/20 mixed · io_uring O_DIRECT (+compaction_read)</span><div style="background:#c1121f;height:1.1em;width:100.0%;border-radius:3px"></div><span>767</span></div>
+</div>
+<div class="metric"><b>CPU busy (%)</b> <span class=lo>(lower is better)</span>
+<div class="row"><span>Read-only · standard (buffered)</span><div style="background:#264653;height:1.1em;width:96.9%;border-radius:3px"></div><span>95.3</span></div>
+<div class="row"><span>Read-only · io_uring (O_DIRECT ring)</span><div style="background:#264653;height:1.1em;width:98.8%;border-radius:3px"></div><span>97.2</span></div>
+<div class="row"><span>80/20 mixed · standard</span><div style="background:#264653;height:1.1em;width:99.5%;border-radius:3px"></div><span>97.9</span></div>
+<div class="row"><span>80/20 mixed · io_uring O_DIRECT (+compaction_read)</span><div style="background:#264653;height:1.1em;width:100.0%;border-radius:3px"></div><span>98.4</span></div>
+</div>
+<div class="metric"><b>CPU %sys+%soft (kernel)</b> <span class=lo>(lower is better)</span>
+<div class="row"><span>Read-only · standard (buffered)</span><div style="background:#457b9d;height:1.1em;width:80.8%;border-radius:3px"></div><span>23.8</span></div>
+<div class="row"><span>Read-only · io_uring (O_DIRECT ring)</span><div style="background:#457b9d;height:1.1em;width:85.1%;border-radius:3px"></div><span>25.1</span></div>
+<div class="row"><span>80/20 mixed · standard</span><div style="background:#457b9d;height:1.1em;width:96.8%;border-radius:3px"></div><span>28.5</span></div>
+<div class="row"><span>80/20 mixed · io_uring O_DIRECT (+compaction_read)</span><div style="background:#457b9d;height:1.1em;width:100.0%;border-radius:3px"></div><span>29.5</span></div>
+</div>
+<div class="metric"><b>Disk read IOPS (r/s)</b>
+<div class="row"><span>Read-only · standard (buffered)</span><div style="background:#6a4c93;height:1.1em;width:91.9%;border-radius:3px"></div><span>26551</span></div>
+<div class="row"><span>Read-only · io_uring (O_DIRECT ring)</span><div style="background:#6a4c93;height:1.1em;width:100.0%;border-radius:3px"></div><span>28888</span></div>
+<div class="row"><span>80/20 mixed · standard</span><div style="background:#6a4c93;height:1.1em;width:74.3%;border-radius:3px"></div><span>21456</span></div>
+<div class="row"><span>80/20 mixed · io_uring O_DIRECT (+compaction_read)</span><div style="background:#6a4c93;height:1.1em;width:84.4%;border-radius:3px"></div><span>24375</span></div>
+</div>
+<div class="metric"><b>Disk read MB/s</b> <span class=lo>(lower is better)</span>
+<div class="row"><span>Read-only · standard (buffered)</span><div style="background:#1982c4;height:1.1em;width:100.0%;border-radius:3px"></div><span>1056</span></div>
+<div class="row"><span>Read-only · io_uring (O_DIRECT ring)</span><div style="background:#1982c4;height:1.1em;width:54.0%;border-radius:3px"></div><span>570</span></div>
+<div class="row"><span>80/20 mixed · standard</span><div style="background:#1982c4;height:1.1em;width:79.1%;border-radius:3px"></div><span>835</span></div>
+<div class="row"><span>80/20 mixed · io_uring O_DIRECT (+compaction_read)</span><div style="background:#1982c4;height:1.1em;width:43.4%;border-radius:3px"></div><span>458</span></div>
+</div>
+<div class="metric"><b>Disk avg queue depth</b>
+<div class="row"><span>Read-only · standard (buffered)</span><div style="background:#ff924c;height:1.1em;width:93.0%;border-radius:3px"></div><span>3.6</span></div>
+<div class="row"><span>Read-only · io_uring (O_DIRECT ring)</span><div style="background:#ff924c;height:1.1em;width:74.7%;border-radius:3px"></div><span>2.9</span></div>
+<div class="row"><span>80/20 mixed · standard</span><div style="background:#ff924c;height:1.1em;width:100.0%;border-radius:3px"></div><span>3.9</span></div>
+<div class="row"><span>80/20 mixed · io_uring O_DIRECT (+compaction_read)</span><div style="background:#ff924c;height:1.1em;width:85.1%;border-radius:3px"></div><span>3.3</span></div>
+</div>
+<div class="metric"><b>Disk %util</b>
+<div class="row"><span>Read-only · standard (buffered)</span><div style="background:#ff595e;height:1.1em;width:100.0%;border-radius:3px"></div><span>55.9</span></div>
+<div class="row"><span>Read-only · io_uring (O_DIRECT ring)</span><div style="background:#ff595e;height:1.1em;width:99.9%;border-radius:3px"></div><span>55.8</span></div>
+<div class="row"><span>80/20 mixed · standard</span><div style="background:#ff595e;height:1.1em;width:99.7%;border-radius:3px"></div><span>55.7</span></div>
+<div class="row"><span>80/20 mixed · io_uring O_DIRECT (+compaction_read)</span><div style="background:#ff595e;height:1.1em;width:97.9%;border-radius:3px"></div><span>54.7</span></div>
+</div>
+<div class="metric"><b>Disk r_await (ms)</b> <span class=lo>(lower is better)</span>
+<div class="row"><span>Read-only · standard (buffered)</span><div style="background:#52796f;height:1.1em;width:77.7%;border-radius:3px"></div><span>0.14</span></div>
+<div class="row"><span>Read-only · io_uring (O_DIRECT ring)</span><div style="background:#52796f;height:1.1em;width:59.4%;border-radius:3px"></div><span>0.10</span></div>
+<div class="row"><span>80/20 mixed · standard</span><div style="background:#52796f;height:1.1em;width:100.0%;border-radius:3px"></div><span>0.17</span></div>
+<div class="row"><span>80/20 mixed · io_uring O_DIRECT (+compaction_read)</span><div style="background:#52796f;height:1.1em;width:75.9%;border-radius:3px"></div><span>0.13</span></div>
+</div>
+</div></body></html>

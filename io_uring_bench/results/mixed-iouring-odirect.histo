@@ -1,0 +1,19 @@
+/home/cscotta/.local/bin/ccm:7: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  import pkg_resources
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::arrayBaseOffset has been called by org.cliffc.high_scale_lib.NonBlockingHashMap (file:/home/cscotta/projects/cassandra/lib/high-scale-lib-1.0.6.jar)
+WARNING: Please consider reporting this to the maintainers of class org.cliffc.high_scale_lib.NonBlockingHashMap
+WARNING: sun.misc.Unsafe::arrayBaseOffset will be removed in a future release
+
+iouring_bench/readbench histograms
+Percentile      Read Latency     Write Latency          SSTables    Partition Size        Cell Count
+                    (micros)          (micros)                             (bytes)                  
+50%                   258.00             10.00              1.00              1109                 1
+75%                   372.00             14.00              1.00              1109                 1
+95%                   924.00             35.00              1.00              1109                 1
+98%                  1916.00             60.00              1.00              1109                 1
+99%                  3973.00            103.00              1.00              1109                 1
+Min                    11.00              0.00              0.00               925                 0
+Max                 42510.00           6866.00              1.00              1109                 1
+
+

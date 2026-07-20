@@ -1,0 +1,55 @@
+--- Execution profile ---
+Total samples       : 19004
+
+          ns  percent  samples  top
+  ----------  -------  -------  ---
+ 20590000000   21.62%     4109  __syscall_cancel_arch
+  6510000000    6.84%     1299  syscall
+  3710000000    3.90%      741  [vdso]
+  2860000000    3.00%      569  updateBytesCRC32
+  1980000000    2.08%      396  __GI___pthread_cond_signal
+  1965000000    2.06%      390  /tmp/libzstd-jni-1.5.7-218394491236243691463.so (deleted)
+  1700000000    1.78%      339  __GI___lll_lock_wake
+  1315000000    1.38%      263  org.apache.cassandra.utils.MurmurHash.hash3_x64_128
+  1165000000    1.22%      231  java.util.concurrent.TimeUnit.convert
+  1045000000    1.10%      208  itable stub
+   835000000    0.88%      167  org.apache.cassandra.io.sstable.SSTableReadsListener$SelectionReason.trace
+   820000000    0.86%      164  java.lang.StringLatin1.toLowerCase
+   810000000    0.85%      162  __GI_memcpy
+   720000000    0.76%      143  org.apache.cassandra.concurrent.CassandraThread.getThreadLocalMetrics
+   665000000    0.70%      133  org.apache.cassandra.metrics.ThreadLocalMeter.mark
+   660000000    0.69%      132  SharedRuntime::dexp
+   580000000    0.61%      114  java.util.concurrent.locks.LockSupport.unpark
+   530000000    0.56%      106  org.apache.cassandra.utils.FastByteOperations$UnsafeOperations.compareTo
+   500000000    0.52%      100  java.util.concurrent.atomic.LongAdder.add
+   475000000    0.50%       95  java.util.concurrent.ConcurrentLinkedQueue.poll
+   445000000    0.47%       89  java.util.concurrent.ConcurrentSkipListMap.findPredecessor
+   440000000    0.46%       88  java.util.concurrent.ConcurrentHashMap.get
+   435000000    0.46%       87  java.lang.ThreadLocal$ThreadLocalMap.getEntry
+   395000000    0.41%       79  jdk.internal.util.ArraysSupport.vectorizedMismatch
+   395000000    0.41%       79  copy_byte_f
+   370000000    0.39%       74  java.util.concurrent.ConcurrentLinkedQueue.offer
+   370000000    0.39%       74  org.apache.cassandra.io.util.RebufferingInputStream.readUnsignedVInt
+   360000000    0.38%       72  void OopOopIterateDispatch<ZMarkBarrierFollowOopClosure<false, (ZGenerationIdOptional)1> >::Table::oop_oop_iterate<InstanceKlass, oopDesc*>
+   350000000    0.37%       70  java.util.concurrent.ConcurrentSkipListMap.cpr
+   345000000    0.36%       69  org.apache.cassandra.db.transform.Stack.add
+   335000000    0.35%       67  org.apache.cassandra.concurrent.SEPWorker.selfAssign
+   320000000    0.34%       63  com.google.common.collect.RegularImmutableSet.contains
+   315000000    0.33%       63  java.util.HashMap.getNode
+   300000000    0.31%       60  ZBarrier::mark_from_old_slow_path
+   295000000    0.31%       59  ZBarrier::relocate_or_remap
+   295000000    0.31%       59  unsafe_arraycopy
+   290000000    0.30%       57  java.util.concurrent.ConcurrentHashMap.computeIfPresent
+   290000000    0.30%       57  org.apache.cassandra.db.filter.ClusteringIndexNamesFilter.getSlices
+   285000000    0.30%       57  __clock_gettime
+   275000000    0.29%       55  java.nio.DirectByteBuffer.get
+   270000000    0.28%       54  org.apache.cassandra.db.transform.BaseRows.hasNext
+   260000000    0.27%       51  org.apache.cassandra.db.transform.BaseRows.partitionKey
+   250000000    0.26%       50  org.apache.cassandra.utils.memory.BufferPool$LocalPool.put
+   235000000    0.25%       47  _int_malloc
+   235000000    0.25%       47  java.lang.Long.compareTo
+   225000000    0.24%       45  vtable stub
+   225000000    0.24%       44  org.apache.cassandra.db.DecoratedKey.compareTo
+   220000000    0.23%       44  io.netty.channel.epoll.Native.epollWait
+   215000000    0.23%       43  java.util.Comparators$NaturalOrderComparator.compare
+   210000000    0.22%       42  org.apache.cassandra.io.sstable.format.big.BigTableReader.getRowIndexEntry
