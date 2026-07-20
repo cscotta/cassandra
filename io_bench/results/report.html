@@ -1,0 +1,138 @@
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>Cassandra compression-chunk IO-efficiency</title>
+<style>body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:1100px;margin:2rem auto;padding:0 1rem;line-height:1.5}
+h1{border-bottom:2px solid #ccc}h2{margin-top:1.8em}
+table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.9em}
+th,td{border:1px solid #ccc;padding:.4em .6em;text-align:right}
+th:first-child,td:first-child{text-align:left}
+.mgrid{display:grid;grid-template-columns:1fr;gap:1.4em}
+.metric{border:1px solid #e0e0e0;border-radius:6px;padding:.8em 1em}
+.row{display:grid;grid-template-columns:180px 1fr 130px;gap:.6em;align-items:center;margin:.25em 0}
+.lo{color:#2a7}.cap{color:#666;font-size:.9em}
+.note{background:#f7f7f9;border:1px solid #e0e0e0;border-radius:6px;padding:.4em 1em;font-size:.9em}</style></head><body>
+<h1>Cassandra compression-chunk-size IO-efficiency sweep</h1>
+
+<p class="cap">One node, XFS on a loop device, caches off
+(<code>file_cache_enabled:false</code>, row/key cache 0). Zstd@8, RF&nbsp;1.
+Headline per-request numbers come from eBPF (<code>block_io.bt</code> at the loop
+device, <code>vfs_reads.bt</code> at the JVM's <code>pread</code>s) and the
+server's <code>io_operations.log</code>; the <code>system_views</code> per-read
+histograms are a CQL cross-check (jshell + driver). Lower is better where
+noted&nbsp;(&#9660;).</p>
+<div class="note"><b>Measurement caveats baked into these numbers</b>
+<ul>
+<li><b>16&nbsp;KB page floor.</b> This kernel has 16&nbsp;KB base pages, so
+<code>read_ahead_kb</code> is floored at one page (16&nbsp;KB). A cold miss reads
+at least one page even when the compressed chunk is smaller, so a 16&nbsp;KB
+chunk config cannot go below a one-page fetch.</li>
+<li><b>Chunk (buffer) cache disabled.</b> Every logical sstable read issues a
+<code>pread</code>, so VFS read IOPS equal logical reads with no in-JVM caching
+in the way.</li>
+<li><b>mmap'd index is invisible to VFS/metrics under <code>disk_access_mode:
+auto</code>.</b> Index-file access via mmap generates page faults, not
+<code>pread</code> syscalls, so it does not appear in <code>vfs_reads.bt</code>
+or the pread-based metrics; only the loop-device eBPF sees that IO.</li>
+<li><b>Attribution point is the loop device.</b> Device bytes/IOPS are counted at
+the single loop device backing the XFS mount (<code>block_rq_complete</code>),
+which is exactly the set of Cassandra's file IO and nothing else.</li>
+<li><b>cqlsh unavailable.</b> All CQL (schema, reads, metrics) runs through the
+DataStax driver in the easy-stress jar. Phase A drives a <b>persistent, warm read
+client</b> (<code>tools/PersistentReader.java</code>) that connects once, so each
+measured window holds only the single query's cold IO &mdash; not a fresh driver
+connect and <code>system_schema</code> fetch.</li>
+</ul></div>
+
+<h2>Configs</h2><table><tr><th>property</th><th>64 KB</th></tr>
+<tr><td>chunk_length_in_kb (verified)</td><td>64</td></tr>
+<tr><td>populate rows</td><td>50000</td></tr>
+<tr><td>loop device</td><td>/dev/loop0</td></tr>
+<tr><td>effective table</td><td>iobench_ks.keyvalue</td></tr>
+</table>
+<h2>Phase A &mdash; cold isolated per-request IO</h2>
+<table><tr><th>metric</th><th>64 KB</th></tr>
+<tr><td>Counted reads / request (DB, data path) &#9660;</td><td>1.00</td></tr>
+<tr><td>io_operations reads / request (target table) &#9660;</td><td>1.00</td></tr>
+<tr><td>Device reads / request (data + mmap index + readahead) &#9660;</td><td>17.0</td></tr>
+<tr><td>Bytes read / request (VFS pread) &#9660;</td><td>15,802</td></tr>
+<tr><td>Device bytes / request &#9660;</td><td>141,312</td></tr>
+<tr><td>Files touched / request &#9660;</td><td>1.00</td></tr>
+<tr><td>Bytes decompressed / request &#9660;</td><td>17,084</td></tr>
+<tr><td>Decompression amplification (decompressed/bytes_read) &#9660;</td><td>1.08</td></tr>
+<tr><td>Readahead over-fetch (device/VFS) &#9660;</td><td>8.94</td></tr>
+</table>
+<h2>Phase B &mdash; aggregate under capped page cache</h2>
+<table><tr><th>metric</th><th>64 KB</th></tr>
+<tr><td>Device IOPS / op &#9660;</td><td>n/a</td></tr>
+<tr><td>Device bytes / op &#9660;</td><td>n/a</td></tr>
+<tr><td>Page-cache hit %</td><td>n/a</td></tr>
+<tr><td>Throughput (ops/s)</td><td>n/a</td></tr>
+</table>
+<h2>Charts</h2><div class="mgrid">
+<div class="metric"><b>[A] Counted reads / request (DB, data path)</b> <span class=lo>(lower is better)</span>
+<div class="row"><span>64 KB</span><div style="background:#6a4c93;height:1.1em;width:100.0%;border-radius:3px"></div><span>1.00</span></div>
+</div>
+<div class="metric"><b>[A] io_operations reads / request (target table)</b> <span class=lo>(lower is better)</span>
+<div class="row"><span>64 KB</span><div style="background:#4c6a93;height:1.1em;width:100.0%;border-radius:3px"></div><span>1.00</span></div>
+</div>
+<div class="metric"><b>[A] Device reads / request (data + mmap index + readahead)</b> <span class=lo>(lower is better)</span>
+<div class="row"><span>64 KB</span><div style="background:#e76f51;height:1.1em;width:100.0%;border-radius:3px"></div><span>17.0</span></div>
+</div>
+<div class="metric"><b>[A] Bytes read / request (VFS pread)</b> <span class=lo>(lower is better)</span>
+<div class="row"><span>64 KB</span><div style="background:#1982c4;height:1.1em;width:100.0%;border-radius:3px"></div><span>15,802</span></div>
+</div>
+<div class="metric"><b>[A] Device bytes / request</b> <span class=lo>(lower is better)</span>
+<div class="row"><span>64 KB</span><div style="background:#e76f51;height:1.1em;width:100.0%;border-radius:3px"></div><span>141,312</span></div>
+</div>
+<div class="metric"><b>[A] Files touched / request</b> <span class=lo>(lower is better)</span>
+<div class="row"><span>64 KB</span><div style="background:#2a9d8f;height:1.1em;width:100.0%;border-radius:3px"></div><span>1.00</span></div>
+</div>
+<div class="metric"><b>[A] Bytes decompressed / request</b> <span class=lo>(lower is better)</span>
+<div class="row"><span>64 KB</span><div style="background:#8ab17d;height:1.1em;width:100.0%;border-radius:3px"></div><span>17,084</span></div>
+</div>
+<div class="metric"><b>[A] Decompression amplification (decompressed/bytes_read)</b> <span class=lo>(lower is better)</span>
+<div class="row"><span>64 KB</span><div style="background:#ff924c;height:1.1em;width:100.0%;border-radius:3px"></div><span>1.08</span></div>
+</div>
+<div class="metric"><b>[A] Readahead over-fetch (device/VFS)</b> <span class=lo>(lower is better)</span>
+<div class="row"><span>64 KB</span><div style="background:#ff595e;height:1.1em;width:100.0%;border-radius:3px"></div><span>8.94</span></div>
+</div>
+<div class="metric"><b>[B] Device IOPS / op</b> <span class=lo>(lower is better)</span>
+<div class="row"><span>64 KB</span><div style="background:#6a4c93;height:1.1em;width:0.0%;border-radius:3px"></div><span>n/a</span></div>
+</div>
+<div class="metric"><b>[B] Device bytes / op</b> <span class=lo>(lower is better)</span>
+<div class="row"><span>64 KB</span><div style="background:#e76f51;height:1.1em;width:0.0%;border-radius:3px"></div><span>n/a</span></div>
+</div>
+<div class="metric"><b>[B] Page-cache hit %</b> <span class=lo>(higher is better)</span>
+<div class="row"><span>64 KB</span><div style="background:#2a9d8f;height:1.1em;width:0.0%;border-radius:3px"></div><span>n/a</span></div>
+</div>
+<div class="metric"><b>[B] Throughput (ops/s)</b> <span class=lo>(higher is better)</span>
+<div class="row"><span>64 KB</span><div style="background:#264653;height:1.1em;width:0.0%;border-radius:3px"></div><span>n/a</span></div>
+</div>
+</div>
+
+<h2>How to read this</h2>
+<ul>
+<li><b>Three read counts, on purpose.</b> <i>Counted reads (DB)</i> is Cassandra's
+own per-request physical-read counter &mdash; the data-path reads it issued (index
+is mmap under <code>auto</code>, so it is not counted here). <i>io_operations reads
+(target table)</i> is the same thing seen from the log, filtered to the queried
+table. <i>Device reads</i> is every loop-device read completion in the window,
+which additionally includes the mmap <code>Index.db</code> page-fault(s) and any
+readahead. For a narrow-partition point read the first two are ~1; the device
+count is ~2 (data + index).</li>
+<li><b>IOPS/request and bytes/request are the headline.</b> Smaller compression
+chunks should cut bytes/request (less over-read per lookup) but can raise
+IOPS/request and files touched; larger chunks amortize IOPS but inflate bytes
+and decompression work. The sweep makes that trade-off explicit.</li>
+<li><b>Over-fetch ratio</b> = device bytes &divide; VFS bytes over the same
+window. &gt;1 means readahead/alignment pulled more off the device than the JVM
+asked for; with the one-page readahead floor this is bounded but nonzero for
+sub-page chunks.</li>
+<li><b>Decompression amplification</b> = bytes decompressed &divide; bytes read.
+It rises with chunk size because a point lookup must inflate a whole chunk to
+return one row.</li>
+<li><b>Phase B page-cache hit %</b> is derived from the VFS-vs-device byte delta
+under the <code>memory.high</code> cap; it shows how much of the working set the
+capped cache still absorbed at load.</li>
+</ul>
+
+</body></html>

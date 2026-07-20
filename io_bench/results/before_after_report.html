@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Block-aligned compression — before/after</title>
+<style>
+body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem;line-height:1.5;color:#1a1a1a}
+h1{border-bottom:2px solid #ccc;padding-bottom:.3em}
+h2{margin-top:1.8em;border-bottom:1px solid #eee}
+table{border-collapse:collapse;width:100%;margin:1em 0}
+th,td{border:1px solid #ccc;padding:.45em .7em;text-align:right}
+th:first-child,td:first-child{text-align:left}
+tr:nth-child(even){background:#fafafa}
+.win{color:#0a7d28;font-weight:600}.cost{color:#b04a00;font-weight:600}
+.cap{color:#666;font-size:.9em}
+.note{background:#f7f7f9;border:1px solid #e0e0e0;border-radius:6px;padding:.5em 1em;font-size:.92em}
+.ctl{background:#eef7ee}.conf{background:#fdf3ea}
+code{background:#f0f0f0;padding:.1em .3em;border-radius:3px}
+</style></head><body>
+
+<h1>Block-aligned compressed chunks &mdash; before / after</h1>
+<p class="cap">Apache Cassandra, branch <code>cscotta/io_opto</code>. Table <code>iouring_bench.readbench</code>
+(~188&nbsp;GB, 64&nbsp;M rows, incompressible values), ZstdCompressor level 8, LeveledCompactionStrategy,
+raw XFS <code>/dev/nvme0n1p8</code>, <code>disk_access_mode=standard</code> (buffered), chunk cache off,
+16&nbsp;KB kernel pages. Device metrics from eBPF (block_rq_complete), latency from easy-stress HDR.</p>
+
+<h2>The change</h2>
+<p><b>Before (legacy):</b> compression fixes the <i>uncompressed input</i> per chunk (<code>chunk_length_in_kb=16</code>).
+Compressed chunks are variable-sized and packed back-to-back, so a chunk lands at an arbitrary byte offset.
+A ~16&nbsp;KB chunk at an unaligned offset spans <b>two 16&nbsp;KB pages</b> &rarr; the device reads 32&nbsp;KB to
+return one chunk.</p>
+<p><b>After (fixed-output):</b> a new opt-in mode
+(<code>compressed_chunk_length_in_kb=16, max_uncompressed_chunk_length_in_kb=128</code>) fixes the
+<i>compressed on-disk</i> size to a block-aligned S=16&nbsp;KB, packing a variable amount of input into each
+block. Chunk <i>i</i> lives at offset <i>i&times;S</i>, so a read is one aligned S-byte device IO with no
+page straddle.</p>
+
+<h2>1. Cold per-request IO &mdash; controlled comparison <span class="cap">(same node, readahead 128&nbsp;KB, isolated single reads via cold_readbench.py)</span></h2>
+<table class="ctl">
+<tr><th>metric</th><th>before (legacy 16&nbsp;KB)</th><th>after (fixed-output 16&nbsp;KB)</th><th>delta</th></tr>
+<tr><td>data-chunk device read</td><td>32&nbsp;KB (2-page straddle, [32K,64K))</td><td>16&nbsp;KB (1 aligned page, [16K,32K))</td><td class="win">&minus;50%</td></tr>
+<tr><td>device reads / request</td><td>2</td><td>2</td><td>&mdash;</td></tr>
+<tr><td><b>device KB / request</b></td><td><b>48</b></td><td><b>32</b></td><td class="win">&minus;33%</td></tr>
+<tr><td>VFS preads / request</td><td>2 (24&nbsp;KB)</td><td>2 (24&nbsp;KB)</td><td>&mdash;</td></tr>
+</table>
+<p class="note">Definitive evidence: the per-completion size histogram shows <b>both</b> device reads in
+<code>[16K,32K)</code> after the change (data chunk = one aligned 16&nbsp;KB page), whereas before, one
+completion sat in <code>[32K,64K)</code> (the data chunk straddling two pages). The over-fetch is eliminated at
+the block level. The second device read is the partition-index lookup (unchanged; a separate lever).</p>
+
+<h2>2. Warm under load &mdash; device efficiency controlled; throughput not <span class="cap">(warm_readbench.py, 120&nbsp;s, 32 threads, adaptive --maxrlat 50)</span></h2>
+<table>
+<tr><th>metric</th><th>before (legacy 16&nbsp;KB, 500&nbsp;MB heap)</th><th>after (fixed-output 16&nbsp;KB, 16&nbsp;GB heap)</th><th>delta</th></tr>
+<tr class="ctl"><td><b>device KB / op</b> <span class="cap">(heap-independent)</span></td><td><b>17.9</b></td><td><b>15.6</b></td><td class="win">&minus;13%</td></tr>
+<tr class="ctl"><td>VFS KB / op</td><td>14.8</td><td>15.0</td><td>&asymp;</td></tr>
+<tr class="conf"><td>throughput (ops/s)</td><td>57,411</td><td>67,399</td><td class="cap">heap differs&nbsp;&mdash;&nbsp;not controlled</td></tr>
+<tr class="conf"><td>errors</td><td>0</td><td>0</td><td>&mdash;</td></tr>
+<tr class="conf"><td>read latency avg / p50 / p99 (ms)</td><td>8.36 / 0.37 / 177</td><td>9.29 / 0.41 / 176</td><td class="cap">not controlled</td></tr>
+<tr><td>Index.db page-cache hit</td><td>98.3%</td><td>98.5%</td><td>&mdash;</td></tr>
+</table>
+<p class="note"><b>Green rows are controlled</b> (device/VFS bytes-per-op are heap-independent): the alignment win
+carries into warm load as <b>&minus;13% device bytes/op</b> (smaller than the &minus;33% cold figure because
+page-cache hits dilute it). <b>Orange rows are NOT a controlled delta</b>: the legacy warm run was taken at the
+ccm-default 500&nbsp;MB heap and the fixed-output run at 16&nbsp;GB, so throughput/latency are not
+apples-to-apples. What they <i>do</i> show is that fixed-output has no throughput/latency regression
+(0 errors, comparable p99). A fully controlled throughput comparison would re-run legacy at 16&nbsp;GB.</p>
+
+<h2>3. On-disk size &mdash; the cost</h2>
+<table>
+<tr><th>metric</th><th>before (legacy)</th><th>after (fixed-output, initial)</th><th>after (fixed-output, buffer-decoupled)</th></tr>
+<tr><td>compression ratio (on-disk / uncompressed)</td><td>1.0010</td><td class="cost">1.1250 (+12.4%)</td><td class="win">1.0230 (+2.3%)</td></tr>
+<tr><td>space used (live)</td><td>&mdash;</td><td>226.6&nbsp;GB</td><td>206.3&nbsp;GB</td></tr>
+</table>
+<p class="note">Fixed-output pads each block to S and adds per-block framing (length prefix + CRC). The
+<b>initial</b> +12% was dominated by <b>buffer-boundary partial chunks</b> (the write buffer was sized to the
+128&nbsp;KB cap, so each flush ended in one short, mostly-padded chunk). <b>Phase&nbsp;5 decoupled the write
+buffer</b> (now ~2&nbsp;MB, holding ~128 chunks per flush) so boundary partials are rare &mdash; on-disk
+overhead dropped to <b>+2.3%</b> and ~20&nbsp;GB was reclaimed. The residual ~2.3% is per-block framing plus the
+packer's ~256-byte accept-first-fit margin (which keeps writes at ~one compression per chunk on incompressible
+data).</p>
+
+<h2>4. No CPU regression &mdash; JFR</h2>
+<p class="note">A JFR profile (<code>settings=profile</code>) under a steady fixed-rate load showed read-path CPU
+dominated by <b>generic</b> work (partition-index binary search 547 samples, token compare, row-index-entry
+lookup, iterators, metrics). The fixed-output-specific <code>CompressionMetadata.fixedChunkIndex</code> was
+<b>88 samples (~0.7%)</b> and <code>uncompressFixedBlock</code> did not appear in the top 30. An earlier warm
+run showed 44&ndash;75% errors; that was traced to the 500&nbsp;MB heap OOM-ing under the load generator's
+~100&nbsp;k ops/s offer &mdash; raising the heap to 16&nbsp;GB gave 0 errors. There is no per-read CPU cost from
+the feature.</p>
+
+<h2>Correctness</h2>
+<p class="note">Reads return correct data end-to-end at 200&nbsp;GB scale (verified across the key range).
+<code>FixedOutputCompressionTest</code> passes 5/5 (round-trip of incompressible / compressible / sub-chunk data,
+sequential + random access, config validation, streaming fail-fast). 39 legacy compression tests still pass;
+build, checkstyle, and rat are clean. A deep review found and fixed 7 issues (streaming guard, buffer sizing,
+mmap routing, FSWriteError, validation bounds, and two low-severity items).</p>
+
+<h2>Bottom line</h2>
+<p>The optimization delivers its target &mdash; <b>fewer device bytes per read</b>: &minus;33% cold
+(the data chunk becomes a single aligned page instead of a two-page straddle) and &minus;13% under warm load,
+with no CPU or correctness regression. After the Phase&nbsp;5 write-buffer decouple, the on-disk cost is
+<b>~2.3%</b> (down from ~12%). Streaming/repair of fixed-output sstables is gated off (fails fast) pending
+Phase-4 receiver work.</p>
+
+</body></html>

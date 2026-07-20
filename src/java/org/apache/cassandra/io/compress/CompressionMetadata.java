@@ -60,6 +60,10 @@ import org.apache.cassandra.utils.concurrent.WrappedSharedCloseable;
  */
 public class CompressionMetadata extends WrappedSharedCloseable
 {
+    // Fixed-output (block-aligned) on-disk block framing: [int payloadLen][payload][int CRC32][pad].
+    public static final int FIXED_BLOCK_HEADER_BYTES = 4;
+    public static final int FIXED_BLOCK_CRC_BYTES = 4;
+
     // dataLength can represent either the true length of the file
     // or some shorter value, in the case we want to impose a shorter limit on readers
     // (when early opening, we want to ensure readers cannot read past fully written sections)
@@ -72,6 +76,10 @@ public class CompressionMetadata extends WrappedSharedCloseable
     @Nullable // null when no dictionary
     private final CompressionDictionary compressionDictionary;
     private volatile ICompressor resolvedCompressor;
+    // Fixed-output only: the largest actual uncompressed chunk length, computed from the offset table.
+    // Read buffers are sized to this (not the configured cap), so incompressible data uses ~S-sized
+    // buffers that pool cleanly instead of cap-sized ones. 0 in legacy mode.
+    private final int fixedMaxUncompressedChunk;
 
     @VisibleForTesting
     public static CompressionMetadata open(File chunksIndexFile,
@@ -107,9 +115,26 @@ public class CompressionMetadata extends WrappedSharedCloseable
             int maxCompressedSize = Integer.MAX_VALUE;
             if (hasMaxCompressedSize)
                 maxCompressedSize = stream.readInt();
+
+            // Fixed-output mode is self-describing: the compressed target and uncompressed cap are
+            // stored as reserved keys in the option map (read above). Strip them before handing the
+            // remaining options to the compressor. Their absence means legacy fixed-input mode.
+            int compressedChunkLength = 0;
+            int maxUncompressedChunkLength = 0;
+            String fixedOutputMarker = options.remove(CompressionParams.FIXED_OUTPUT_LENGTH_MARKER);
+            if (fixedOutputMarker != null)
+            {
+                compressedChunkLength = Integer.parseInt(fixedOutputMarker);
+                String capMarker = options.remove(CompressionParams.FIXED_OUTPUT_MAX_UNCOMPRESSED_MARKER);
+                maxUncompressedChunkLength = capMarker != null
+                                             ? Integer.parseInt(capMarker)
+                                             : (int) Math.min((long) compressedChunkLength * CompressionParams.DEFAULT_MAX_UNCOMPRESSED_MULTIPLE, Integer.MAX_VALUE);
+            }
+
             try
             {
-                parameters = new CompressionParams(compressorName, chunkLength, maxCompressedSize, options);
+                parameters = new CompressionParams(compressorName, chunkLength, maxCompressedSize, options,
+                                                   compressedChunkLength, maxUncompressedChunkLength);
             }
             catch (ConfigurationException e)
             {
@@ -154,6 +179,29 @@ public class CompressionMetadata extends WrappedSharedCloseable
         this.chunkOffsets = chunkOffsets;
         this.chunkOffsetsSize = chunkOffsetsSize;
         this.compressionDictionary = compressionDictionary;
+        this.fixedMaxUncompressedChunk = parameters.usesFixedOutputChunks()
+                                         ? computeFixedMaxUncompressedChunk(chunkOffsets, chunkOffsetsSize, dataLength, parameters.compressedChunkLength())
+                                         : 0;
+    }
+
+    /**
+     * The largest actual uncompressed chunk length across the offset table (fixed-output). Sizing read
+     * buffers to this instead of the configured cap keeps incompressible data on ~S-sized buffers that
+     * pool cleanly. O(chunkCount) once per open.
+     */
+    private static int computeFixedMaxUncompressedChunk(Memory chunkOffsets, long chunkOffsetsSize, long dataLength, int compressedChunkLength)
+    {
+        long count = chunkOffsetsSize >> 3;
+        int max = compressedChunkLength; // never smaller than one block target
+        for (long i = 0; i < count; i++)
+        {
+            long base = chunkOffsets.getLong(i << 3);
+            long end = (i + 1 < count) ? chunkOffsets.getLong((i + 1) << 3) : dataLength;
+            int len = (int) (end - base);
+            if (len > max)
+                max = len;
+        }
+        return max;
     }
 
     private static AutoCloseable[] buildCloseableArray(Memory chunkOffsets, CompressionDictionary dictionary)
@@ -198,6 +246,7 @@ public class CompressionMetadata extends WrappedSharedCloseable
         this.chunkOffsetsSize = copy.chunkOffsetsSize;
         this.compressionDictionary = copy.compressionDictionary;
         this.resolvedCompressor = copy.resolvedCompressor;
+        this.fixedMaxUncompressedChunk = copy.fixedMaxUncompressedChunk;
     }
 
     public ICompressor compressor()
@@ -328,6 +377,9 @@ public class CompressionMetadata extends WrappedSharedCloseable
      */
     public Chunk chunkFor(long position)
     {
+        if (parameters.usesFixedOutputChunks())
+            return fixedOutputChunkFor(position);
+
         // position of the chunk
         long idx = 8 * (position / parameters.chunkLength());
 
@@ -346,8 +398,117 @@ public class CompressionMetadata extends WrappedSharedCloseable
         return new Chunk(chunkOffset, (int) (nextChunkOffset - chunkOffset - 4)); // "4" bytes reserved for checksum
     }
 
+    /**
+     * Fixed-output mode: chunk i occupies a fixed, block-aligned {@code S} bytes at compressed
+     * offset {@code i * S}; the on-disk block carries its own length prefix, checksum, and padding,
+     * so the returned {@link Chunk} length is the full aligned block size {@code S} (the reader
+     * reads exactly that and parses the block internally).
+     */
+    private Chunk fixedOutputChunkFor(long position)
+    {
+        if (position < 0)
+            throw new CorruptSSTableException(new IllegalArgumentException(String.format("Invalid negative position %d", position)),
+                                              chunksIndexFile);
+        if (position >= dataLength)
+            throw new CorruptSSTableException(new EOFException(), chunksIndexFile);
+
+        int idx = fixedChunkIndex(position);
+        long s = parameters.compressedChunkLength();
+        return new Chunk(idx * s, (int) s);
+    }
+
+    /**
+     * Binary-searches the stored uncompressed-offset table for the index of the chunk containing
+     * {@code position} (largest index whose uncompressed start &le; position). Fixed-output only.
+     */
+    private int fixedChunkIndex(long position)
+    {
+        long count = chunkOffsetsSize >> 3;
+        long lo = 0;
+        long hi = count - 1;
+        long result = 0;
+        while (lo <= hi)
+        {
+            long mid = (lo + hi) >>> 1;
+            long off = chunkOffsets.getLong(mid << 3);
+            if (off <= position)
+            {
+                result = mid;
+                lo = mid + 1;
+            }
+            else
+            {
+                hi = mid - 1;
+            }
+        }
+        return (int) result;
+    }
+
+    /**
+     * @return the uncompressed offset of the start of the chunk containing {@code position}. Used by
+     * the rebufferer/cache to align and key on the chunk base (the legacy path masks by chunkLength).
+     */
+    public long uncompressedChunkBase(long position)
+    {
+        if (parameters.usesFixedOutputChunks())
+            return chunkOffsets.getLong((long) fixedChunkIndex(position) << 3);
+        return (position / parameters.chunkLength()) * (long) parameters.chunkLength();
+    }
+
+    /**
+     * @return the uncompressed byte length of the chunk containing {@code position} (the amount the
+     * chunk decompresses to). In fixed-output mode this varies per chunk.
+     */
+    public int uncompressedChunkLength(long position)
+    {
+        if (parameters.usesFixedOutputChunks())
+        {
+            int idx = fixedChunkIndex(position);
+            long count = chunkOffsetsSize >> 3;
+            long base = chunkOffsets.getLong((long) idx << 3);
+            long end = (idx + 1 < count) ? chunkOffsets.getLong((long) (idx + 1) << 3) : dataLength;
+            return (int) (end - base);
+        }
+        long base = (position / parameters.chunkLength()) * (long) parameters.chunkLength();
+        return (int) Math.min(parameters.chunkLength(), dataLength - base);
+    }
+
+    /**
+     * @return the exact uncompressed length of a fixed-output {@code chunk}, derived from its compressed
+     * offset (which is {@code chunkIndex * S}). The reader sizes the decompression destination to this
+     * so that streaming-written frames (which carry no content-size header) decompress correctly; it is
+     * also correct for frames that do carry a content size. Fixed-output only.
+     */
+    public int fixedOutputUncompressedLength(Chunk chunk)
+    {
+        long s = parameters.compressedChunkLength();
+        int idx = (int) (chunk.offset / s);
+        long count = chunkOffsetsSize >> 3;
+        long base = chunkOffsets.getLong((long) idx << 3);
+        long end = (idx + 1 < count) ? chunkOffsets.getLong((long) (idx + 1) << 3) : dataLength;
+        return (int) (end - base);
+    }
+
+    /**
+     * @return the size of the read/decompression buffer for one chunk: the fixed-output uncompressed
+     * cap, or the (fixed) chunk length in legacy mode.
+     */
+    public int bufferSize()
+    {
+        return parameters.usesFixedOutputChunks() ? fixedMaxUncompressedChunk : parameters.chunkLength();
+    }
+
     public long getDataOffsetForChunkOffset(long chunkOffset)
     {
+        if (parameters.usesFixedOutputChunks())
+        {
+            long s = parameters.compressedChunkLength();
+            long idx = chunkOffset / s;
+            if (idx < 0 || (idx << 3) >= chunkOffsetsSize || chunkOffset % s != 0)
+                throw new IllegalArgumentException("No chunk with offset " + chunkOffset);
+            return chunkOffsets.getLong(idx << 3);
+        }
+
         long l = 0;
         long h = (chunkOffsetsSize >> 3) - 1;
         long idx, offset;
@@ -378,6 +539,25 @@ public class CompressionMetadata extends WrappedSharedCloseable
         long lastOffset = -1;
         for (SSTableReader.PartitionPositionBounds section : sections)
         {
+            if (parameters.usesFixedOutputChunks())
+            {
+                if (section.upperPosition <= section.lowerPosition)
+                    continue;
+                long s = parameters.compressedChunkLength();
+                int startIndex = fixedChunkIndex(section.lowerPosition);
+                int endIndex = fixedChunkIndex(section.upperPosition - 1);
+                for (int i = startIndex; i <= endIndex; i++)
+                {
+                    long chunkOffset = i * s;
+                    if (chunkOffset > lastOffset)
+                    {
+                        lastOffset = chunkOffset;
+                        size += s; // fixed-output block: checksum + padding are already inside S
+                    }
+                }
+                continue;
+            }
+
             int startIndex = (int) (section.lowerPosition / parameters.chunkLength());
 
             int endIndex = (int) (section.upperPosition / parameters.chunkLength());
@@ -412,6 +592,18 @@ public class CompressionMetadata extends WrappedSharedCloseable
 
         for (SSTableReader.PartitionPositionBounds section : sections)
         {
+            if (parameters.usesFixedOutputChunks())
+            {
+                if (section.upperPosition <= section.lowerPosition)
+                    continue;
+                long s = parameters.compressedChunkLength();
+                int startIndex = fixedChunkIndex(section.lowerPosition);
+                int endIndex = fixedChunkIndex(section.upperPosition - 1);
+                for (int i = startIndex; i <= endIndex; i++)
+                    offsets.add(new Chunk(i * s, (int) s)); // full aligned block (length prefix + CRC + pad inside)
+                continue;
+            }
+
             int startIndex = (int) (section.lowerPosition / parameters.chunkLength());
 
             int endIndex = (int) (section.upperPosition / parameters.chunkLength());
@@ -498,8 +690,18 @@ public class CompressionMetadata extends WrappedSharedCloseable
             try
             {
                 out.writeUTF(parameters.getSstableCompressor().serializedAs().getSimpleName());
-                out.writeInt(parameters.getOtherOptions().size());
-                for (Map.Entry<String, String> entry : parameters.getOtherOptions().entrySet())
+
+                // Fixed-output params ride along as reserved keys in the option map so the mode is
+                // known before the offset table is read, without a format-version bump.
+                Map<String, String> headerOptions = parameters.getOtherOptions();
+                if (parameters.usesFixedOutputChunks())
+                {
+                    headerOptions = new HashMap<>(headerOptions);
+                    headerOptions.put(CompressionParams.FIXED_OUTPUT_LENGTH_MARKER, Integer.toString(parameters.compressedChunkLength()));
+                    headerOptions.put(CompressionParams.FIXED_OUTPUT_MAX_UNCOMPRESSED_MARKER, Integer.toString(parameters.maxUncompressedChunkLength()));
+                }
+                out.writeInt(headerOptions.size());
+                for (Map.Entry<String, String> entry : headerOptions.entrySet())
                 {
                     out.writeUTF(entry.getKey());
                     out.writeUTF(entry.getValue());
@@ -580,15 +782,31 @@ public class CompressionMetadata extends WrappedSharedCloseable
         {
             SafeMemory tOffsets = this.offsets.sharedCopy();
 
-            // calculate how many entries we need, if our dataLength is truncated
-            int tCount = (int) (dataLength / parameters.chunkLength());
-            if (dataLength % parameters.chunkLength() != 0)
-                tCount++;
+            int tCount;
+            if (parameters.usesFixedOutputChunks())
+            {
+                // offsets hold uncompressed cumulative chunk starts; keep chunks whose start is
+                // within the (possibly truncated) dataLength. Each chunk occupies a fixed S bytes.
+                long s = parameters.compressedChunkLength();
+                tCount = 0;
+                while (tCount < this.count && tOffsets.getLong(tCount * 8L) < dataLength)
+                    tCount++;
+                assert tCount > 0;
+                if (tCount < this.count)
+                    compressedLength = tCount * s;
+            }
+            else
+            {
+                // calculate how many entries we need, if our dataLength is truncated
+                tCount = (int) (dataLength / parameters.chunkLength());
+                if (dataLength % parameters.chunkLength() != 0)
+                    tCount++;
 
-            assert tCount > 0;
-            // grab our actual compressed length from the next offset from our the position we're opened to
-            if (tCount < this.count)
-                compressedLength = tOffsets.getLong(tCount * 8L);
+                assert tCount > 0;
+                // grab our actual compressed length from the next offset from our the position we're opened to
+                if (tCount < this.count)
+                    compressedLength = tOffsets.getLong(tCount * 8L);
+            }
 
             return new CompressionMetadata(file, parameters,
                                            tOffsets, tCount * 8L, dataLength,

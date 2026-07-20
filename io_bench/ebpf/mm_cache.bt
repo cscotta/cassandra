@@ -1,0 +1,61 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+// ============================================================================
+// mm_cache.bt -- per-inode page-cache accesses vs misses, for per-COMPONENT
+//                (Index.db / Data.db / ...) page-cache hit-rate attribution.
+//
+//   sudo bpftrace io_bench/ebpf/mm_cache.bt <S_DEV>
+//
+// <S_DEV> is the KERNEL dev_t of the FILESYSTEM's block device (positional $1).
+// Page-cache tracepoints live at the inode/superblock layer, so for an XFS mount
+// on /dev/nvme0n1p8 this is the PARTITION's dev_t (259:8) = (259<<20)|8, NOT the
+// parent disk 259:0 that block_rq_* uses. Read it from sysfs:
+//   read MAJ MIN < <(tr ':' ' ' < /sys/class/block/nvme0n1p8/dev); echo $(((MAJ<<20)|MIN))
+//
+// Two tracepoints, both carrying i_ino + s_dev (verified on 7.0.13 aarch64):
+//   mm_filemap_get_pages        -> a buffered read of pages [index, last_index]
+//                                  (ACCESS, hit or miss). accessed pages =
+//                                  last_index - index + 1.
+//   mm_filemap_add_to_page_cache-> one page inserted from disk (MISS).
+//
+// Per inode:  hit_rate = 1 - miss_pages / accessed_pages.
+// The orchestrator maps each i_ino -> sstable component (Index.db/Data.db/...)
+// and aggregates, so index vs data hit rate falls out. Counting is in-kernel
+// (sum/count maps), so it stays accurate at high throughput (no perf-buffer loss).
+// O_DIRECT reads bypass the page cache and do not fire these; Cassandra's
+// standard (buffered) path does.
+// ============================================================================
+
+BEGIN
+{
+    printf("# mm_cache.bt s_dev=%d\n", $1);
+}
+
+tracepoint:filemap:mm_filemap_get_pages /args->s_dev == $1/
+{
+    @acc[args->i_ino] = sum(args->last_index - args->index + 1);
+}
+
+tracepoint:filemap:mm_filemap_add_to_page_cache /args->s_dev == $1/
+{
+    @miss[args->i_ino] = count();
+}
+
+// bpftrace auto-dumps @acc[ino]: pages and @miss[ino]: pages at exit; the
+// orchestrator parses those and joins i_ino -> component.

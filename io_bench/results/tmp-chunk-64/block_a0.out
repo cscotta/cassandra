@@ -1,0 +1,41 @@
+Attached 4 probes
+# block_io.bt dev_t=7340032 major=7 minor=0
+# reads/writes counted at block_rq_complete; per-comm at block_rq_issue
+
+SUMMARY read_completions=38 read_bytes=348160 write_completions=26 write_bytes=139264 other_completions=0
+
+
+@other_completions: 0
+@rd_issue_by_thread[Native-Transpor, 109706, 109876]: 2
+@rd_issue_by_thread[kworker/9:1H, 554, 554]: 15
+@rd_issue_by_thread[kworker/8:1H, 560, 560]: 21
+@rd_issue_bytes_by_comm[Native-Transpor]: 32768
+@rd_issue_bytes_by_comm[kworker/9:1H]: 124416
+@rd_issue_bytes_by_comm[kworker/8:1H]: 190976
+@rd_issue_cnt_by_comm[Native-Transpor]: 2
+@rd_issue_cnt_by_comm[kworker/9:1H]: 15
+@rd_issue_cnt_by_comm[kworker/8:1H]: 21
+@read_bytes: 348160
+@read_completions: 38
+@read_lat_us:
+[2, 4)                 2 |@@@@@@                                              |
+[4, 8)                 1 |@@@                                                 |
+[8, 16)                1 |@@@                                                 |
+[16, 32)               5 |@@@@@@@@@@@@@@@                                     |
+[32, 64)               1 |@@@                                                 |
+[64, 128)             17 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[128, 256)             6 |@@@@@@@@@@@@@@@@@@                                  |
+[256, 512)             3 |@@@@@@@@@                                           |
+[512, 1K)              0 |                                                    |
+[1K, 2K)               2 |@@@@@@                                              |
+
+@read_req_bytes:
+[512, 1K)              8 |@@@@@@@@@@@@@@@@@@@@@@@                             |
+[1K, 2K)               0 |                                                    |
+[2K, 4K)               0 |                                                    |
+[4K, 8K)              12 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                  |
+[8K, 16K)              0 |                                                    |
+[16K, 32K)            18 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+
+@write_bytes: 139264
+@write_completions: 26

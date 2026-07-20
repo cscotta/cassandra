@@ -1,0 +1,99 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+// ============================================================================
+// vfs_reads.bt -- attribute logical (VFS) positioned reads issued by Cassandra.
+//
+// With Cassandra's chunk cache DISABLED, every logical sstable read issues a
+// pread() to the OS. This script counts those preads (= VFS read IOPS) and the
+// requested byte volume, per file descriptor. The orchestrator resolves each fd
+// to an sstable component path via /proc/<PID>/fd/<fd> at parse time.
+//
+// PAGE-CACHE HIT DERIVATION:
+//   page-cache hit bytes  ~=  (VFS requested bytes from this script)
+//                             - (block-device fetched bytes from block_io.bt)
+//   measured over the SAME wall-clock window. Whatever the VFS layer asked for
+//   but the block layer did NOT have to fetch was served from the OS page cache.
+//   (Block bytes can even EXCEED VFS bytes -- that is readahead over-fetch; see
+//   the 16 KB page / readahead caveat in README.md.)
+//
+// ---------------------------------------------------------------------------
+// INVOCATION / substitution mechanism  (identical to block_io.bt)
+// ---------------------------------------------------------------------------
+//   sudo bpftrace io_bench/ebpf/vfs_reads.bt <PID>
+//
+// <PID> is the Cassandra JVM process id (tgid), passed as bpftrace positional
+// parameter $1 and compared against the `pid` builtin in the probe filter
+// (`/pid == $1/`). The `pid` builtin is the tgid, so ALL JVM threads
+// (ReadStage-N, CompactionExecutor-N, ...) match. `tid` and `comm` identify the
+// individual thread.
+//
+// ---------------------------------------------------------------------------
+// Tracepoint field names verified on this kernel (7.0.13 aarch64, bpftrace
+// v0.24.2) via `bpftrace -lv`:
+//   sys_enter_pread64:  __syscall_nr, fd (unsigned int), buf, count (size_t), pos
+//   sys_enter_preadv:   __syscall_nr, fd (unsigned long), vec, vlen, pos_l, pos_h
+//   sys_enter_preadv2:  ... + rwf_t flags
+//
+// pread64 carries the requested byte count DIRECTLY in `count`. preadv/preadv2
+// do NOT: the byte count is spread across `vlen` iovecs (in the `vec` array in
+// user memory), so this script counts preadv/preadv2 CALLS per fd but cannot
+// report their exact byte volume from the tracepoint alone. Cassandra's
+// positioned sstable reads go through pread64 (single ByteBuffer), so preadv*
+// counts are expected to be ~0; a nonzero value flags an unexpected code path.
+// ============================================================================
+
+BEGIN
+{
+    printf("# vfs_reads.bt pid=%d tracing pread64 + preadv + preadv2\n", $1);
+    printf("# pread bytes are exact (args->count); preadv* are call-counted only\n");
+}
+
+tracepoint:syscalls:sys_enter_pread64 /pid == $1/
+{
+    @pread_count           = count();
+    @pread_bytes           = sum(args->count);
+    @pread_cnt_by_fd[args->fd]   = count();
+    @pread_bytes_by_fd[args->fd] = sum(args->count);
+    @pread_req_bytes       = hist(args->count);     // requested-size distribution
+    @pread_cnt_by_comm[comm] = count();             // ReadStage vs Compaction, etc.
+}
+
+tracepoint:syscalls:sys_enter_preadv /pid == $1/
+{
+    @preadv_count            = count();
+    @preadv_cnt_by_fd[args->fd] = count();
+}
+
+tracepoint:syscalls:sys_enter_preadv2 /pid == $1/
+{
+    @preadv2_count           = count();
+    @preadv2_cnt_by_fd[args->fd] = count();
+}
+
+END
+{
+    printf("\nSUMMARY pread_count=%llu pread_bytes=%llu preadv_count=%llu preadv2_count=%llu\n",
+           (uint64)@pread_count, (uint64)@pread_bytes,
+           (uint64)@preadv_count, (uint64)@preadv2_count);
+
+    // The SUMMARY line above is the primary parse target. The scalar counters,
+    // the @pread_req_bytes histogram and the per-fd / per-comm breakdowns are
+    // then auto-dumped by bpftrace as `@name[key]: v` lines; the scalar values
+    // there are consistent with SUMMARY.
+}

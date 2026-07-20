@@ -44,13 +44,17 @@ import org.apache.cassandra.io.sstable.format.SSTableFormat.Components;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.io.util.DataInputBuffer;
+import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.RandomAccessReader;
 import org.apache.cassandra.io.util.SequentialWriterOption;
+import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.schema.CompressionParams;
 import org.apache.cassandra.utils.ChecksumType;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 /**
@@ -111,6 +115,113 @@ public class CompressedInputStreamTest
     public void testCorruptedReadUncompressedChunks() throws Exception
     {
         testCompressedReadWith(new long[]{1L, 122L, 123L, 124L, 456L}, false, true, 3);
+    }
+
+    @Test
+    public void testFixedOutputStreamingRead() throws Exception
+    {
+        File parentDir = new File(tempFolder.newFolder());
+        Descriptor desc = new Descriptor(parentDir, "ks", "cf", new SequenceBasedSSTableId(1));
+        File tmp = desc.fileFor(Components.DATA);
+        MetadataCollector collector = new MetadataCollector(new ClusteringComparator(BytesType.instance));
+        CompressionParams param = fixedOutputParams();
+
+        long n = 300000; // ~2.4 MB of longs -> spans many fixed-output blocks
+        long[] positions = new long[(int) n];
+        try (CompressedSequentialWriter writer = new CompressedSequentialWriter(tmp,
+                                                                                desc.fileFor(Components.COMPRESSION_INFO),
+                                                                                null, SequentialWriterOption.DEFAULT,
+                                                                                param, collector))
+        {
+            for (long l = 0; l < n; l++)
+            {
+                positions[(int) l] = writer.position();
+                writer.writeLong(l);
+            }
+            writer.finish();
+        }
+
+        CompressionMetadata comp = CompressionInfoComponent.load(desc, null);
+        assertTrue(comp.parameters.usesFixedOutputChunks());
+
+        long[] valuesToCheck = { 0, 30000, 90000, 150000, 210000, 270000, n - 1 };
+        List<SSTableReader.PartitionPositionBounds> sections = new ArrayList<>();
+        for (long v : valuesToCheck)
+        {
+            long position = positions[(int) v];
+            sections.add(new SSTableReader.PartitionPositionBounds(position, position + 8));
+        }
+
+        CompressionMetadata.Chunk[] chunks = comp.getChunksForSections(sections);
+        long[] uncompressedOffsets = new long[chunks.length];
+        for (int i = 0; i < chunks.length; i++)
+            uncompressedOffsets[i] = comp.getDataOffsetForChunkOffset(chunks[i].offset);
+
+        // read the on-disk blocks (fixed-output: exactly chunk.length == S bytes, no trailing CRC)
+        int size = 0;
+        for (CompressionMetadata.Chunk c : chunks)
+            size += c.length;
+        byte[] toRead = new byte[size];
+        try (RandomAccessReader f = RandomAccessReader.open(tmp))
+        {
+            int pos = 0;
+            for (CompressionMetadata.Chunk c : chunks)
+            {
+                f.seek(c.offset);
+                pos += f.read(toRead, pos, c.length);
+            }
+        }
+
+        CompressionInfo info = CompressionInfo.newInstance(chunks, uncompressedOffsets, param);
+        CompressedInputStream input = new CompressedInputStream(new DataInputBuffer(toRead), info, ChecksumType.CRC32, () -> 1.0);
+        try (DataInputStream in = new DataInputStream(input))
+        {
+            for (int i = 0; i < sections.size(); i++)
+            {
+                input.position(sections.get(i).lowerPosition);
+                long readValue = in.readLong();
+                assertEquals("expected " + valuesToCheck[i] + " but was " + readValue, valuesToCheck[i], readValue);
+            }
+        }
+    }
+
+    @Test
+    public void testFixedOutputCompressionInfoSerialization() throws Exception
+    {
+        // A CompressionInfo for a fixed-output table must round-trip the mode and the per-chunk
+        // uncompressed offsets over the streaming wire.
+        CompressionParams param = fixedOutputParams();
+        CompressionMetadata.Chunk[] chunks = {
+            new CompressionMetadata.Chunk(0, 16 * 1024),
+            new CompressionMetadata.Chunk(16 * 1024, 16 * 1024),
+            new CompressionMetadata.Chunk(32 * 1024, 16 * 1024)
+        };
+        long[] uncompressedOffsets = { 0, 40000, 95000 };
+        CompressionInfo info = CompressionInfo.newInstance(chunks, uncompressedOffsets, param);
+
+        try (DataOutputBuffer out = new DataOutputBuffer())
+        {
+            CompressionInfo.serializer.serialize(info, out, MessagingService.current_version);
+            assertEquals(out.getLength(), CompressionInfo.serializer.serializedSize(info, MessagingService.current_version));
+            try (DataInputBuffer in = new DataInputBuffer(out.buffer(), false))
+            {
+                CompressionInfo back = CompressionInfo.serializer.deserialize(in, MessagingService.current_version);
+                assertTrue(back.parameters().usesFixedOutputChunks());
+                assertEquals(param.compressedChunkLength(), back.parameters().compressedChunkLength());
+                assertEquals(param.maxUncompressedChunkLength(), back.parameters().maxUncompressedChunkLength());
+                assertEquals(chunks.length, back.chunks().length);
+                assertArrayEquals(uncompressedOffsets, back.uncompressedChunkOffsets());
+            }
+        }
+    }
+
+    private static CompressionParams fixedOutputParams()
+    {
+        Map<String, String> opts = new HashMap<>();
+        opts.put("class", "ZstdCompressor");
+        opts.put("compressed_chunk_length_in_kb", "16");
+        opts.put("max_uncompressed_chunk_length_in_kb", "128");
+        return CompressionParams.fromMap(opts);
     }
 
     /**

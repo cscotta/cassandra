@@ -1,0 +1,538 @@
+{
+  "chunk_kb": 64,
+  "ks": "iobench_ks",
+  "table_logical": "kv",
+  "table_effective": "keyvalue",
+  "pk_col": "key",
+  "dev_t": 7340032,
+  "loop_dev": "/dev/loop0",
+  "loop_majmin": "7:0",
+  "heap": "8G",
+  "mem_high": "10G",
+  "populate_rows": 50000,
+  "compression": "{'class':'ZstdCompressor','chunk_length_in_kb':64,'compression_level':8}",
+  "timestamp": "2026-07-18T11:35:14",
+  "phase_a": {
+    "reads": 4,
+    "agg": {
+      "iolog_target_reads": {
+        "mean": 1.0,
+        "median": 1.0,
+        "n": 4,
+        "min": 1,
+        "max": 1
+      },
+      "iolog_target_bytes": {
+        "mean": 15804.75,
+        "median": 15802.0,
+        "n": 4,
+        "min": 15788,
+        "max": 15827
+      },
+      "counted_reads_db": {
+        "mean": 1.0,
+        "median": 1.0,
+        "n": 4,
+        "min": 1.0,
+        "max": 1.0
+      },
+      "counted_bytes_db": {
+        "mean": 17084.0,
+        "median": 17084.0,
+        "n": 4,
+        "min": 17084.0,
+        "max": 17084.0
+      },
+      "files_per_req": {
+        "mean": 1.0,
+        "median": 1.0,
+        "n": 4,
+        "min": 1,
+        "max": 1
+      },
+      "decompressed_per_req": {
+        "mean": 17084.0,
+        "median": 17084.0,
+        "n": 4,
+        "min": 17084.0,
+        "max": 17084.0
+      },
+      "device_iops_per_req": {
+        "mean": 18.5,
+        "median": 17.0,
+        "n": 4,
+        "min": 2,
+        "max": 38
+      },
+      "device_bytes_per_req": {
+        "mean": 165888.0,
+        "median": 141312.0,
+        "n": 4,
+        "min": 32768,
+        "max": 348160
+      },
+      "vfs_iops_per_req": {
+        "mean": 1.0,
+        "median": 1.0,
+        "n": 4,
+        "min": 1,
+        "max": 1
+      },
+      "vfs_bytes_per_req": {
+        "mean": 15804.75,
+        "median": 15802.0,
+        "n": 4,
+        "min": 15788,
+        "max": 15827
+      },
+      "overfetch_ratio": {
+        "mean": 10.488695584806102,
+        "median": 8.941240669641987,
+        "n": 4,
+        "min": 2.07444922765257,
+        "max": 21.997851772287863
+      },
+      "page_cache_hit": {
+        "mean": 0.0,
+        "median": 0.0,
+        "n": 4,
+        "min": 0.0,
+        "max": 0.0
+      },
+      "decompression_amplification": {
+        "mean": 1.0809417893660218,
+        "median": 1.081129126883965,
+        "n": 4,
+        "min": 1.079421242181083,
+        "max": 1.0820876615150747
+      }
+    },
+    "per_read": [
+      {
+        "read_index": 0,
+        "key": "001.0.1",
+        "point_read": {
+          "ok": true,
+          "key": "001.0.1",
+          "rows": 1,
+          "us": 3999,
+          "line": "DONE key=001.0.1 rows=1 us=3999"
+        },
+        "block": {
+          "read_completions": 38,
+          "read_bytes": 348160,
+          "write_completions": 26,
+          "write_bytes": 139264,
+          "other_completions": 0
+        },
+        "vfs": {
+          "pread_count": 1,
+          "pread_bytes": 15827,
+          "preadv_count": 0,
+          "preadv2_count": 0
+        },
+        "iolog_delta": {
+          "by_source": {
+            "READ": 1
+          },
+          "target_reads": 1,
+          "files_touched": 1,
+          "target_paths": [
+            "/home/cscotta/io_bench_data/mnt/data/iobench_ks/keyvalue-1b255f4def2540a6000000000000000d/pa-1-big-Data.db"
+          ],
+          "target_bytes_logical": 15827,
+          "by_component": {
+            "Data.db": 1
+          },
+          "sample": [
+            {
+              "src": "READ",
+              "op": "r",
+              "ks": "iobench_ks",
+              "tbl": "keyvalue",
+              "comp": "Data.db",
+              "off": 4594229,
+              "len": 15827,
+              "path": "/home/cscotta/io_bench_data/mnt/data/iobench_ks/keyvalue-1b255f4def2540a6000000000000000d/pa-1-big-Data.db"
+            }
+          ]
+        },
+        "hist": {
+          "read_iops_per_read": {
+            "count": 2.0,
+            "max": 1.0,
+            "p50": 1.0,
+            "p99": 1.0
+          },
+          "bytes_read_per_read": {
+            "count": 2.0,
+            "max": 17084.0,
+            "p50": 17084.0,
+            "p99": 17084.0
+          },
+          "files_touched_per_read": {
+            "count": 2.0,
+            "max": 1.0,
+            "p50": 1.0,
+            "p99": 1.0
+          },
+          "bytes_decompressed_per_read": {
+            "count": 2.0,
+            "max": 17084.0,
+            "p50": 17084.0,
+            "p99": 17084.0
+          },
+          "chunk_cache_hits_per_read": {
+            "count": 2.0,
+            "max": 0.0,
+            "p50": 0.0,
+            "p99": 0.0
+          },
+          "chunk_cache_misses_per_read": {
+            "count": 2.0,
+            "max": 0.0,
+            "p50": 0.0,
+            "p99": 0.0
+          }
+        },
+        "derived": {
+          "iolog_target_reads": 1,
+          "iolog_target_bytes": 15827,
+          "counted_reads_db": 1.0,
+          "counted_bytes_db": 17084.0,
+          "files_per_req": 1,
+          "decompressed_per_req": 17084.0,
+          "device_iops_per_req": 38,
+          "device_bytes_per_req": 348160,
+          "vfs_iops_per_req": 1,
+          "vfs_bytes_per_req": 15827,
+          "overfetch_ratio": 21.997851772287863,
+          "page_cache_hit": 0.0,
+          "decompression_amplification": 1.079421242181083
+        }
+      },
+      {
+        "read_index": 1,
+        "key": "001.0.2",
+        "point_read": {
+          "ok": true,
+          "key": "001.0.2",
+          "rows": 1,
+          "us": 3701,
+          "line": "DONE key=001.0.2 rows=1 us=3701"
+        },
+        "block": {
+          "read_completions": 3,
+          "read_bytes": 49152,
+          "write_completions": 25,
+          "write_bytes": 351744,
+          "other_completions": 2
+        },
+        "vfs": {
+          "pread_count": 1,
+          "pread_bytes": 15788,
+          "preadv_count": 0,
+          "preadv2_count": 0
+        },
+        "iolog_delta": {
+          "by_source": {
+            "READ": 1
+          },
+          "target_reads": 1,
+          "files_touched": 1,
+          "target_paths": [
+            "/home/cscotta/io_bench_data/mnt/data/iobench_ks/keyvalue-1b255f4def2540a6000000000000000d/pa-1-big-Data.db"
+          ],
+          "target_bytes_logical": 15788,
+          "by_component": {
+            "Data.db": 1
+          },
+          "sample": [
+            {
+              "src": "READ",
+              "op": "r",
+              "ks": "iobench_ks",
+              "tbl": "keyvalue",
+              "comp": "Data.db",
+              "off": 3946955,
+              "len": 15788,
+              "path": "/home/cscotta/io_bench_data/mnt/data/iobench_ks/keyvalue-1b255f4def2540a6000000000000000d/pa-1-big-Data.db"
+            }
+          ]
+        },
+        "hist": {
+          "read_iops_per_read": {
+            "count": 3.0,
+            "max": 1.0,
+            "p50": 1.0,
+            "p99": 1.0
+          },
+          "bytes_read_per_read": {
+            "count": 3.0,
+            "max": 17084.0,
+            "p50": 17084.0,
+            "p99": 17084.0
+          },
+          "files_touched_per_read": {
+            "count": 3.0,
+            "max": 1.0,
+            "p50": 1.0,
+            "p99": 1.0
+          },
+          "bytes_decompressed_per_read": {
+            "count": 3.0,
+            "max": 17084.0,
+            "p50": 17084.0,
+            "p99": 17084.0
+          },
+          "chunk_cache_hits_per_read": {
+            "count": 3.0,
+            "max": 0.0,
+            "p50": 0.0,
+            "p99": 0.0
+          },
+          "chunk_cache_misses_per_read": {
+            "count": 3.0,
+            "max": 0.0,
+            "p50": 0.0,
+            "p99": 0.0
+          }
+        },
+        "derived": {
+          "iolog_target_reads": 1,
+          "iolog_target_bytes": 15788,
+          "counted_reads_db": 1.0,
+          "counted_bytes_db": 17084.0,
+          "files_per_req": 1,
+          "decompressed_per_req": 17084.0,
+          "device_iops_per_req": 3,
+          "device_bytes_per_req": 49152,
+          "vfs_iops_per_req": 1,
+          "vfs_bytes_per_req": 15788,
+          "overfetch_ratio": 3.113250570053205,
+          "page_cache_hit": 0.0,
+          "decompression_amplification": 1.0820876615150747
+        }
+      },
+      {
+        "read_index": 2,
+        "key": "001.0.3",
+        "point_read": {
+          "ok": true,
+          "key": "001.0.3",
+          "rows": 1,
+          "us": 3390,
+          "line": "DONE key=001.0.3 rows=1 us=3390"
+        },
+        "block": {
+          "read_completions": 2,
+          "read_bytes": 32768,
+          "write_completions": 0,
+          "write_bytes": 0,
+          "other_completions": 0
+        },
+        "vfs": {
+          "pread_count": 1,
+          "pread_bytes": 15796,
+          "preadv_count": 0,
+          "preadv2_count": 0
+        },
+        "iolog_delta": {
+          "by_source": {
+            "READ": 1
+          },
+          "target_reads": 1,
+          "files_touched": 1,
+          "target_paths": [
+            "/home/cscotta/io_bench_data/mnt/data/iobench_ks/keyvalue-1b255f4def2540a6000000000000000d/pa-1-big-Data.db"
+          ],
+          "target_bytes_logical": 15796,
+          "by_component": {
+            "Data.db": 1
+          },
+          "sample": [
+            {
+              "src": "READ",
+              "op": "r",
+              "ks": "iobench_ks",
+              "tbl": "keyvalue",
+              "comp": "Data.db",
+              "off": 5525874,
+              "len": 15796,
+              "path": "/home/cscotta/io_bench_data/mnt/data/iobench_ks/keyvalue-1b255f4def2540a6000000000000000d/pa-1-big-Data.db"
+            }
+          ]
+        },
+        "hist": {
+          "read_iops_per_read": {
+            "count": 4.0,
+            "max": 1.0,
+            "p50": 1.0,
+            "p99": 1.0
+          },
+          "bytes_read_per_read": {
+            "count": 4.0,
+            "max": 17084.0,
+            "p50": 17084.0,
+            "p99": 17084.0
+          },
+          "files_touched_per_read": {
+            "count": 4.0,
+            "max": 1.0,
+            "p50": 1.0,
+            "p99": 1.0
+          },
+          "bytes_decompressed_per_read": {
+            "count": 4.0,
+            "max": 17084.0,
+            "p50": 17084.0,
+            "p99": 17084.0
+          },
+          "chunk_cache_hits_per_read": {
+            "count": 4.0,
+            "max": 0.0,
+            "p50": 0.0,
+            "p99": 0.0
+          },
+          "chunk_cache_misses_per_read": {
+            "count": 4.0,
+            "max": 0.0,
+            "p50": 0.0,
+            "p99": 0.0
+          }
+        },
+        "derived": {
+          "iolog_target_reads": 1,
+          "iolog_target_bytes": 15796,
+          "counted_reads_db": 1.0,
+          "counted_bytes_db": 17084.0,
+          "files_per_req": 1,
+          "decompressed_per_req": 17084.0,
+          "device_iops_per_req": 2,
+          "device_bytes_per_req": 32768,
+          "vfs_iops_per_req": 1,
+          "vfs_bytes_per_req": 15796,
+          "overfetch_ratio": 2.07444922765257,
+          "page_cache_hit": 0.0,
+          "decompression_amplification": 1.0815396302861484
+        }
+      },
+      {
+        "read_index": 3,
+        "key": "001.0.4",
+        "point_read": {
+          "ok": true,
+          "key": "001.0.4",
+          "rows": 1,
+          "us": 3286,
+          "line": "DONE key=001.0.4 rows=1 us=3286"
+        },
+        "block": {
+          "read_completions": 31,
+          "read_bytes": 233472,
+          "write_completions": 14,
+          "write_bytes": 90112,
+          "other_completions": 0
+        },
+        "vfs": {
+          "pread_count": 1,
+          "pread_bytes": 15808,
+          "preadv_count": 0,
+          "preadv2_count": 0
+        },
+        "iolog_delta": {
+          "by_source": {
+            "READ": 1
+          },
+          "target_reads": 1,
+          "files_touched": 1,
+          "target_paths": [
+            "/home/cscotta/io_bench_data/mnt/data/iobench_ks/keyvalue-1b255f4def2540a6000000000000000d/pa-1-big-Data.db"
+          ],
+          "target_bytes_logical": 15808,
+          "by_component": {
+            "Data.db": 1
+          },
+          "sample": [
+            {
+              "src": "READ",
+              "op": "r",
+              "ks": "iobench_ks",
+              "tbl": "keyvalue",
+              "comp": "Data.db",
+              "off": 7893702,
+              "len": 15808,
+              "path": "/home/cscotta/io_bench_data/mnt/data/iobench_ks/keyvalue-1b255f4def2540a6000000000000000d/pa-1-big-Data.db"
+            }
+          ]
+        },
+        "hist": {
+          "read_iops_per_read": {
+            "count": 5.0,
+            "max": 1.0,
+            "p50": 1.0,
+            "p99": 1.0
+          },
+          "bytes_read_per_read": {
+            "count": 5.0,
+            "max": 17084.0,
+            "p50": 17084.0,
+            "p99": 17084.0
+          },
+          "files_touched_per_read": {
+            "count": 5.0,
+            "max": 1.0,
+            "p50": 1.0,
+            "p99": 1.0
+          },
+          "bytes_decompressed_per_read": {
+            "count": 5.0,
+            "max": 17084.0,
+            "p50": 17084.0,
+            "p99": 17084.0
+          },
+          "chunk_cache_hits_per_read": {
+            "count": 5.0,
+            "max": 0.0,
+            "p50": 0.0,
+            "p99": 0.0
+          },
+          "chunk_cache_misses_per_read": {
+            "count": 5.0,
+            "max": 0.0,
+            "p50": 0.0,
+            "p99": 0.0
+          }
+        },
+        "derived": {
+          "iolog_target_reads": 1,
+          "iolog_target_bytes": 15808,
+          "counted_reads_db": 1.0,
+          "counted_bytes_db": 17084.0,
+          "files_per_req": 1,
+          "decompressed_per_req": 17084.0,
+          "device_iops_per_req": 31,
+          "device_bytes_per_req": 233472,
+          "vfs_iops_per_req": 1,
+          "vfs_bytes_per_req": 15808,
+          "overfetch_ratio": 14.76923076923077,
+          "page_cache_hit": 0.0,
+          "decompression_amplification": 1.0807186234817814
+        }
+      }
+    ]
+  },
+  "phase_b": null,
+  "jvm_pid": 109706,
+  "populate": {
+    "rc": 0,
+    "ok": true,
+    "rows": 50000,
+    "stdout_tail": "          0\n  30724          71.42        5133.6 |       0              0             0 |       0              0             0 |       0                0\n  45724          67.47        5133.6 |       0              0             0 |       0              0             0 |       0                0\n  50000           60.8       5112.24 |       0              0             0 |       0              0             0 |       0                0\n  50000           60.8       5112.24 |       0              0             0 |       0              0             0 |       0                0\nStress complete, 1.\n"
+  },
+  "chunk_verify": {
+    "expected": 64,
+    "found": 64,
+    "ok": true
+  }
+}

@@ -139,4 +139,23 @@ public abstract class BufferManagingRebufferer implements Rebufferer, Rebufferer
             return position & -buffer.capacity();
         }
     }
+
+    /**
+     * For chunk readers whose chunk boundaries are not a fixed power-of-two stride (fixed-output
+     * compression): the chunk base is resolved by the reader (a lookup) rather than by masking, and
+     * the shared buffer is sized to the reader's maximum chunk size.
+     */
+    public static class Variable extends BufferManagingRebufferer
+    {
+        public Variable(ChunkReader wrapped)
+        {
+            super(wrapped);
+        }
+
+        @Override
+        long alignedPosition(long position)
+        {
+            return source.chunkBase(position);
+        }
+    }
 }

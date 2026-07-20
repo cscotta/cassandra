@@ -1,0 +1,27 @@
+Attached 4 probes
+# block_io.bt dev_t=7340032 major=7 minor=0
+# reads/writes counted at block_rq_complete; per-comm at block_rq_issue
+/home/cscotta/projects/cassandra/io_bench/ebpf/block_io.bt:118:40-60: WARNING: Success
+Additional Info - helper: map_lookup_percpu_elem, retcode: 0
+           (uint64)@write_completions, (uint64)@write_bytes,
+                                       ~~~~~~~~~~~~~~~~~~~~
+
+SUMMARY read_completions=2 read_bytes=32768 write_completions=0 write_bytes=0 other_completions=0
+
+
+@other_completions: 0
+@rd_issue_by_thread[Native-Transpor, 109706, 109876]: 2
+@rd_issue_bytes_by_comm[Native-Transpor]: 32768
+@rd_issue_cnt_by_comm[Native-Transpor]: 2
+@read_bytes: 32768
+@read_completions: 2
+@read_lat_us:
+[64, 128)              1 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[128, 256)             0 |                                                    |
+[256, 512)             0 |                                                    |
+[512, 1K)              1 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+
+@read_req_bytes:
+[16K, 32K)             2 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+
+@write_completions: 0

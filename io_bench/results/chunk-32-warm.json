@@ -1,0 +1,15 @@
+{
+  "chunk_kb": 32,
+  "compression_ratio": 0.453,
+  "ops": 13271471,
+  "ops_per_s": 110595.59166666666,
+  "errors": 92408,
+  "lat_avg_ms": 814.38,
+  "lat_p50_ms": 830.47,
+  "lat_p99_ms": 2550.14,
+  "hit_index": 0.992838171686922,
+  "hit_data": -0.029952990789174017,
+  "hit_cachestat": 0.7821385244149829,
+  "vfs_kb_per_op": 15.000455598693147,
+  "device_kb_per_op": 8.959056912379946
+}

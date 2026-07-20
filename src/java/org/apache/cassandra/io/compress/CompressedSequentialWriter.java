@@ -21,6 +21,7 @@ import java.io.DataOutputStream;
 import java.io.EOFException;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.channels.Channels;
 import java.nio.file.OpenOption;
 import java.util.Optional;
@@ -76,15 +77,37 @@ public class CompressedSequentialWriter extends SequentialWriter
     private final int maxCompressedLength;
     private final boolean isDictionaryEnabled;
 
+    // Fixed-output (block-aligned) mode: every chunk occupies exactly fixedChunkSize bytes on disk,
+    // laid out as [int payloadLen][compressed payload][int CRC32][zero pad -> fixedChunkSize].
+    // The write buffer is decoupled from (and larger than) the per-chunk uncompressed cap so that a
+    // flush drains into many full chunks plus at most one short trailing chunk; a small buffer would
+    // pad a short chunk at every flush boundary (~one per cap bytes), inflating on-disk size. At 16 MiB
+    // a flush holds ~100+ chunks, so the single short trailing chunk is <1% of blocks (vs ~7% at 2 MiB).
+    static final int FIXED_OUTPUT_WRITE_BUFFER_TARGET = 16 * 1024 * 1024;
+    private final boolean fixedOutput;
+    private final int fixedChunkSize;                // S, a whole number of device blocks
+    private final int fixedPayloadCapacity;          // S - header - CRC (max compressed payload bytes)
+    private final int fixedMaxUncompressed;          // cap on uncompressed bytes packed into one chunk
+    private ByteBuffer fixedBlock;                   // reusable S-sized on-disk block staging buffer
+    private final CRC32 fixedChunkCrc = new CRC32();
+
+    private static int writeBufferSize(CompressionParams parameters)
+    {
+        if (!parameters.usesFixedOutputChunks())
+            return parameters.chunkLength();
+        // hold many chunks per flush, but at least the cap so one full chunk always fits
+        return Math.max(parameters.maxUncompressedChunkLength(), FIXED_OUTPUT_WRITE_BUFFER_TARGET);
+    }
+
     private static ByteBuffer allocateBuffer(CompressionParams parameters)
     {
-        return parameters.getSstableCompressor().preferredBufferType().allocate(parameters.chunkLength());
+        return parameters.getSstableCompressor().preferredBufferType().allocate(writeBufferSize(parameters));
     }
 
     private static SequentialWriterOption buildOption(SequentialWriterOption option, CompressionParams parameters)
     {
         return SequentialWriterOption.newBuilder()
-                                     .bufferSize(parameters.chunkLength())
+                                     .bufferSize(writeBufferSize(parameters))
                                      .bufferType(parameters.getSstableCompressor().preferredBufferType())
                                      .finishOnClose(option.finishOnClose())
                                      .build();
@@ -125,8 +148,13 @@ public class CompressedSequentialWriter extends SequentialWriter
         ICompressor compressor = parameters.getSstableCompressor();
         this.digestFile = Optional.ofNullable(digestFile);
 
-        // buffer for compression should be the same size as buffer itself
-        compressed = compressor.preferredBufferType().allocate(compressor.initialCompressedBufferLength(buffer.capacity()));
+        // Compression scratch: in fixed-output mode a chunk compresses at most `cap` uncompressed
+        // bytes (per-chunk input is capped below), so the scratch only needs to hold that — not the
+        // much larger decoupled write buffer. In legacy mode it matches the (chunk-sized) buffer.
+        int compressedScratch = parameters.usesFixedOutputChunks()
+                                ? compressor.initialCompressedBufferLength(parameters.maxUncompressedChunkLength())
+                                : compressor.initialCompressedBufferLength(buffer.capacity());
+        compressed = compressor.preferredBufferType().allocate(compressedScratch);
 
         maxCompressedLength = parameters.maxCompressedLength();
 
@@ -152,6 +180,14 @@ public class CompressedSequentialWriter extends SequentialWriter
         this.compressionDictionaryManager = compressionDictionaryManager;
         /* Index File (-CompressionInfo.db component) and it's header */
         metadataWriter = CompressionMetadata.Writer.open(parameters, offsetsFile, compressionDictionary);
+
+        this.fixedOutput = parameters.usesFixedOutputChunks();
+        this.fixedChunkSize = parameters.compressedChunkLength();
+        this.fixedPayloadCapacity = fixedOutput ? fixedChunkSize - CompressionMetadata.FIXED_BLOCK_HEADER_BYTES - CompressionMetadata.FIXED_BLOCK_CRC_BYTES : 0;
+        this.fixedMaxUncompressed = fixedOutput ? parameters.maxUncompressedChunkLength() : 0;
+        // BIG_ENDIAN is pinned explicitly: the int length/CRC fields are read back with absolute getInt
+        // on the read side, which assumes this order.
+        this.fixedBlock = fixedOutput ? compressor.preferredBufferType().allocate(fixedChunkSize).order(ByteOrder.BIG_ENDIAN) : null;
 
         this.sstableMetadataCollector = sstableMetadataCollector;
         crcMetadata = createChecksumWriter();
@@ -202,6 +238,12 @@ public class CompressedSequentialWriter extends SequentialWriter
         // resetAndTruncate leaves fchannel.position() past EOF after its verification reads + truncate;
         // re-seek so the next chunk lands at chunkOffset. No-op under linear writes.
         seekToChunkStart();
+
+        if (fixedOutput)
+        {
+            flushDataFixedOutput();
+            return;
+        }
 
         try
         {
@@ -257,6 +299,87 @@ public class CompressedSequentialWriter extends SequentialWriter
             runPostFlush.accept(getLastFlushOffset());
     }
 
+    /**
+     * Fixed-output flush: drain the whole uncompressed buffer into one or more block-aligned chunks,
+     * packing as much input as fits into each fixed-size block via {@link ICompressor#compressBounded}.
+     * The metadata records the uncompressed start offset of each chunk (compressed offset is implicit,
+     * chunkIndex * fixedChunkSize). The final chunk of a mid-stream flush may be short (its block is
+     * still padded to fixedChunkSize); a larger uncompressed buffer amortizes that boundary waste.
+     */
+    private void flushDataFixedOutput()
+    {
+        buffer.flip(); // position=0, limit=uncompressed bytes buffered
+        try
+        {
+            while (buffer.hasRemaining())
+                writeFixedOutputChunk();
+        }
+        catch (IOException e)
+        {
+            throw new RuntimeException("Compression exception", e); // shouldn't happen
+        }
+        lastFlushOffset = uncompressedSize;
+        if (runPostFlush != null)
+            runPostFlush.accept(getLastFlushOffset());
+    }
+
+    private void writeFixedOutputChunk() throws IOException
+    {
+        long uncompressedStart = uncompressedSize; // uncompressed base offset of this chunk
+
+        compressed.clear();
+        // The write buffer holds many chunks; bound this chunk's uncompressed input to the cap so a
+        // chunk never decompresses to more than maxUncompressedChunkLength (which sizes read buffers).
+        int savedLimit = buffer.limit();
+        if (buffer.remaining() > fixedMaxUncompressed)
+            buffer.limit(buffer.position() + fixedMaxUncompressed);
+        int consumed = compressor.compressBounded(buffer, compressed, fixedPayloadCapacity);
+        buffer.limit(savedLimit);
+        if (consumed <= 0)
+            throw new IOException("compressBounded made no progress; " + CompressionParams.COMPRESSED_CHUNK_LENGTH_IN_KB + " too small");
+        int payloadLen = compressed.position();
+        if (payloadLen > fixedPayloadCapacity)
+            throw new IOException(String.format("compressBounded produced %d bytes, exceeding the %d-byte payload capacity (compressor %s violated the compressBounded contract)",
+                                                payloadLen, fixedPayloadCapacity, compressor.getClass().getSimpleName()));
+
+        metadataWriter.addOffset(uncompressedStart);
+        chunkCount++;
+        uncompressedSize += consumed;
+        compressedSize += fixedChunkSize; // count padding toward compressed size for an honest ratio
+
+        // per-chunk CRC over the compressed payload
+        compressed.flip(); // 0..payloadLen
+        fixedChunkCrc.reset();
+        fixedChunkCrc.update(compressed.duplicate());
+        int crc = (int) fixedChunkCrc.getValue();
+
+        // assemble the S-sized on-disk block
+        fixedBlock.clear();
+        fixedBlock.putInt(payloadLen);
+        fixedBlock.put(compressed);
+        fixedBlock.putInt(crc);
+        ByteBufferUtil.writeZeroes(fixedBlock, fixedChunkSize - fixedBlock.position());
+        fixedBlock.flip(); // 0..fixedChunkSize
+
+        // Separate the device write from compression failures: a channel.write error must become an
+        // FSWriteError so it drives the disk-failure policy (matching writeChunk in legacy mode),
+        // not the generic "Compression exception" wrapper in flushDataFixedOutput.
+        try
+        {
+            if (IoOperationsLog.isEnabled())
+                IoOperationsLog.logWrite(getPath(), chunkOffset, fixedBlock.remaining());
+            channel.write(fixedBlock);
+        }
+        catch (IOException e)
+        {
+            throw new FSWriteError(e, getPath());
+        }
+        fixedBlock.rewind();
+        crcMetadata.appendFullChecksumOnly(fixedBlock);
+
+        chunkOffset += fixedChunkSize;
+    }
+
     protected void writeChunk(ByteBuffer toWrite)
     {
         try
@@ -294,6 +417,21 @@ public class CompressedSequentialWriter extends SequentialWriter
         assert mark instanceof CompressedFileWriterMark;
 
         CompressedFileWriterMark realMark = (CompressedFileWriterMark) mark;
+
+        if (fixedOutput)
+        {
+            if (realMark.chunkOffset == chunkOffset)
+            {
+                // no chunk flushed since the mark: drop buffered bytes to the right of the mark
+                buffer.position(realMark.validBufferBytes);
+                return;
+            }
+            // A fixed-output chunk was flushed between mark and reset (a large partition crossing a
+            // buffer boundary, only on the append-failure path). Reconstructing the pre-mark buffer
+            // needs the affected blocks decompressed; not implemented in the prototype (the normal
+            // compaction/flush append path does not mark per partition).
+            throw new UnsupportedOperationException("fixed-output resetAndTruncate across a flush boundary is not supported");
+        }
 
         // reset position
         long truncateTarget = realMark.uncDataOffset;
@@ -481,6 +619,16 @@ public class CompressedSequentialWriter extends SequentialWriter
                 }
                 catch (Throwable t) { accumulate = merge(accumulate, t); }
                 compressed = null;
+            }
+
+            if (fixedBlock != null)
+            {
+                try
+                {
+                    MemoryUtil.clean(fixedBlock);
+                }
+                catch (Throwable t) { accumulate = merge(accumulate, t); }
+                fixedBlock = null;
             }
 
             return accumulate;

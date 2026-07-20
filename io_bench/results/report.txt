@@ -1,0 +1,22 @@
+Cassandra compression-chunk IO-efficiency sweep
+============================================================
+configs: 64 KB
+
+PHASE A (cold, isolated single reads; lower is better):
+  Counted reads / request (DB, data path)                        1.00
+  io_operations reads / request (target table)                   1.00
+  Device reads / request (data + mmap index + readahead)           17.0
+  Bytes read / request (VFS pread)                             15,802
+  Device bytes / request                                      141,312
+  Files touched / request                                        1.00
+  Bytes decompressed / request                                 17,084
+  Decompression amplification (decompressed/bytes_read)           1.08
+  Readahead over-fetch (device/VFS)                              8.94
+
+PHASE B (aggregate under capped page cache):
+  Device IOPS / op                                                n/a
+  Device bytes / op                                               n/a
+  Page-cache hit %                                                n/a
+  Throughput (ops/s)                                              n/a
+
+header:          64 KB

@@ -499,9 +499,20 @@ public class FileHandle extends SharedCloseableImpl
                 {
                     if (compressionMetadata != null)
                     {
-                        regions = mmappedRegionsCache != null ? mmappedRegionsCache.getOrCreate(channel, compressionMetadata, bufferSize)
-                                                              : MmappedRegions.map(channel, compressionMetadata);
-                        rebuffererFactory = maybeCached(new CompressedChunkReader.Mmap(channel, compressionMetadata, regions, crcCheckChanceSupplier));
+                        if (compressionMetadata.parameters.usesFixedOutputChunks())
+                        {
+                            // The mmap region builder (MmappedRegions.updateState) strides by the legacy
+                            // chunk length + a trailing 4-byte CRC, neither of which holds for fixed-output
+                            // blocks. Use the buffered Standard reader for fixed-output sstables under mmap
+                            // mode until the region builder is made fixed-output-aware (Phase 4).
+                            rebuffererFactory = maybeCached(new CompressedChunkReader.Standard(channel, compressionMetadata, crcCheckChanceSupplier));
+                        }
+                        else
+                        {
+                            regions = mmappedRegionsCache != null ? mmappedRegionsCache.getOrCreate(channel, compressionMetadata, bufferSize)
+                                                                  : MmappedRegions.map(channel, compressionMetadata);
+                            rebuffererFactory = maybeCached(new CompressedChunkReader.Mmap(channel, compressionMetadata, regions, crcCheckChanceSupplier));
+                        }
                     }
                     else
                     {
@@ -559,6 +570,11 @@ public class FileHandle extends SharedCloseableImpl
 
         private RebuffererFactory maybeCached(ChunkReader reader)
         {
+            // Fixed-output (block-aligned) compressed readers have variable-sized uncompressed chunks,
+            // so the chunk cache's power-of-two position masking/keying does not apply. Bypass the
+            // cache for them (the prototype targets aligned device reads, not the chunk cache).
+            if (reader instanceof CompressedChunkReader && ((CompressedChunkReader) reader).fixedOutput)
+                return reader;
             if (chunkCache != null && chunkCache.capacity() > 0)
                 return chunkCache.wrap(reader);
             return reader;

@@ -41,13 +41,59 @@ public abstract class CompressedChunkReader extends AbstractReaderFileProxy impl
     final int maxCompressedLength;
     final DoubleSupplier crcCheckChanceSupplier;
 
+    // Fixed-output (block-aligned) mode: each chunk is a self-describing block of fixedChunkSize bytes,
+    // laid out as [int payloadLen][compressed payload][int CRC32][zero pad]. chunkFor returns
+    // Chunk(chunkIndex * fixedChunkSize, fixedChunkSize); the reader parses the block internally.
+    final boolean fixedOutput;
+    final int fixedChunkSize;
+    final int fixedPayloadCapacity;
+
     protected CompressedChunkReader(ChannelProxy channel, CompressionMetadata metadata, DoubleSupplier crcCheckChanceSupplier)
     {
         super(channel, metadata.dataLength);
         this.metadata = metadata;
         this.maxCompressedLength = metadata.maxCompressedLength();
         this.crcCheckChanceSupplier = crcCheckChanceSupplier;
-        assert Integer.bitCount(metadata.chunkLength()) == 1; //must be a power of two
+        this.fixedOutput = metadata.parameters.usesFixedOutputChunks();
+        this.fixedChunkSize = metadata.parameters.compressedChunkLength();
+        this.fixedPayloadCapacity = fixedOutput
+                                    ? fixedChunkSize - CompressionMetadata.FIXED_BLOCK_HEADER_BYTES - CompressionMetadata.FIXED_BLOCK_CRC_BYTES
+                                    : 0;
+        assert fixedOutput || Integer.bitCount(metadata.chunkLength()) == 1; //legacy chunk length must be a power of two
+    }
+
+    /**
+     * Decompress a fixed-output block into {@code uncompressed}. {@code block} must hold the full
+     * S-byte block starting at position 0. Parses the length prefix, optionally verifies the embedded
+     * per-chunk CRC over the compressed payload, then decompresses the payload.
+     */
+    protected void uncompressFixedBlock(ByteBuffer block, ByteBuffer uncompressed, CompressionMetadata.Chunk chunk, boolean shouldCheckCrc) throws IOException
+    {
+        int payloadLen = block.getInt(0);
+        if (payloadLen < 0 || payloadLen > fixedPayloadCapacity)
+            throw new CorruptBlockException(channel.filePath(), chunk);
+
+        ByteBuffer payload = block.duplicate();
+        payload.position(CompressionMetadata.FIXED_BLOCK_HEADER_BYTES)
+               .limit(CompressionMetadata.FIXED_BLOCK_HEADER_BYTES + payloadLen);
+        payload = payload.slice(); // 0..payloadLen
+
+        if (shouldCheckCrc)
+        {
+            int checksum = (int) ChecksumType.CRC32.of(payload);
+            int stored = block.getInt(CompressionMetadata.FIXED_BLOCK_HEADER_BYTES + payloadLen);
+            if (stored != checksum)
+                throw new CorruptBlockException(channel.filePath(), chunk);
+            payload.position(0).limit(payloadLen);
+        }
+
+        uncompressed.clear();
+        // Size the destination to the chunk's EXACT uncompressed length: streaming-written frames carry
+        // no content-size header, and Zstd's one-shot decompress then requires an exactly-sized output
+        // (an oversized buffer yields 0 bytes). This is also correct for frames that do carry a size.
+        uncompressed.limit(metadata.fixedOutputUncompressedLength(chunk));
+        metadata.compressor().uncompress(payload, uncompressed);
+        uncompressed.flip();
     }
 
     protected CompressedChunkReader forScan()
@@ -81,7 +127,13 @@ public abstract class CompressedChunkReader extends AbstractReaderFileProxy impl
     @Override
     public int chunkSize()
     {
-        return metadata.chunkLength();
+        return metadata.bufferSize();
+    }
+
+    @Override
+    public long chunkBase(long position)
+    {
+        return fixedOutput ? metadata.uncompressedChunkBase(position) : (position & -(long) chunkSize());
     }
 
     @Override
@@ -93,6 +145,8 @@ public abstract class CompressedChunkReader extends AbstractReaderFileProxy impl
     @Override
     public Rebufferer instantiateRebufferer(boolean isScan)
     {
+        if (fixedOutput)
+            return new BufferManagingRebufferer.Variable(isScan ? forScan() : this);
         return new BufferManagingRebufferer.Aligned(isScan ? forScan() : this);
     }
 
@@ -314,7 +368,7 @@ public abstract class CompressedChunkReader extends AbstractReaderFileProxy impl
         @Override
         public void readChunk(long position, ByteBuffer uncompressed)
         {
-            assert (position & -uncompressed.capacity()) == position;
+            assert fixedOutput || (position & -uncompressed.capacity()) == position;
             assert position <= fileLength;
 
             try
@@ -324,7 +378,21 @@ public abstract class CompressedChunkReader extends AbstractReaderFileProxy impl
 
                 uncompressed.clear();
                 CompressedReader readFrom = (scanReader != null && scanReader.allocated()) ? scanReader : reader;
-                if (chunk.length < maxCompressedLength)
+
+                if (fixedOutput)
+                {
+                    // read the whole S-byte block (chunk.length == S; no separate trailing CRC) and parse it
+                    ByteBuffer block = readFrom.read(chunk, false);
+                    try
+                    {
+                        uncompressFixedBlock(block, uncompressed, chunk, shouldCheckCrc);
+                    }
+                    catch (IOException e)
+                    {
+                        throw new CorruptBlockException(channel.filePath(), chunk, e);
+                    }
+                }
+                else if (chunk.length < maxCompressedLength)
                 {
                     ByteBuffer compressed = readFrom.read(chunk, shouldCheckCrc);
                     try
@@ -335,14 +403,15 @@ public abstract class CompressedChunkReader extends AbstractReaderFileProxy impl
                     {
                         throw new CorruptBlockException(channel.filePath(), chunk, e);
                     }
+                    uncompressed.flip();
                 }
                 else
                 {
                     ByteBuffer buffer = readFrom.read(chunk, shouldCheckCrc);
                     uncompressed.put(buffer);
+                    uncompressed.flip();
                 }
 
-                uncompressed.flip();
                 if (ReadIOTracker.isEnabled())
                     ReadIOTracker.recordDecompressed(uncompressed.remaining());
             }
@@ -439,15 +508,28 @@ public abstract class CompressedChunkReader extends AbstractReaderFileProxy impl
         {
             try
             {
-                // accesses must always be aligned
-                assert (position & -uncompressed.capacity()) == position;
+                // accesses must always be aligned (legacy mode); fixed-output positions are chunk bases
+                assert fixedOutput || (position & -uncompressed.capacity()) == position;
                 assert position <= fileLength;
 
                 CompressionMetadata.Chunk chunk = metadata.chunkFor(position);
                 boolean shouldCheckCrc = shouldCheckCrc();
 
                 CompressedReader readFrom = (scanReader != null && scanReader.allocated()) ? scanReader : reader;
-                if (chunk.length < maxCompressedLength)
+
+                if (fixedOutput)
+                {
+                    ByteBuffer block = readFrom.read(chunk, false);
+                    try
+                    {
+                        uncompressFixedBlock(block, uncompressed, chunk, shouldCheckCrc);
+                    }
+                    catch (IOException e)
+                    {
+                        throw new CorruptBlockException(channel.filePath(), chunk, e);
+                    }
+                }
+                else if (chunk.length < maxCompressedLength)
                 {
                     ByteBuffer compressed = readFrom.read(chunk, shouldCheckCrc);
                     uncompressed.clear();
@@ -460,6 +542,7 @@ public abstract class CompressedChunkReader extends AbstractReaderFileProxy impl
                     {
                         throw new CorruptBlockException(channel.filePath(), chunk, e);
                     }
+                    uncompressed.flip();
                 }
                 else
                 {
@@ -478,8 +561,9 @@ public abstract class CompressedChunkReader extends AbstractReaderFileProxy impl
                             || scratch.getInt(0) != checksum)
                             throw new CorruptBlockException(channel.filePath(), chunk);
                     }
+                    uncompressed.flip();
                 }
-                uncompressed.flip();
+
                 if (ReadIOTracker.isEnabled())
                     ReadIOTracker.recordDecompressed(uncompressed.remaining());
             }
@@ -517,8 +601,8 @@ public abstract class CompressedChunkReader extends AbstractReaderFileProxy impl
         {
             try
             {
-                // accesses must always be aligned
-                assert (position & -uncompressed.capacity()) == position;
+                // accesses must always be aligned (legacy mode); fixed-output positions are chunk bases
+                assert fixedOutput || (position & -uncompressed.capacity()) == position;
                 assert position <= fileLength;
 
                 CompressionMetadata.Chunk chunk = metadata.chunkFor(position);
@@ -527,6 +611,24 @@ public abstract class CompressedChunkReader extends AbstractReaderFileProxy impl
                 long segmentOffset = region.offset();
                 int chunkOffset = Ints.checkedCast(chunk.offset - segmentOffset);
                 ByteBuffer compressedChunk = region.buffer();
+
+                if (fixedOutput)
+                {
+                    ByteBuffer block = compressedChunk.duplicate();
+                    block.position(chunkOffset).limit(chunkOffset + chunk.length);
+                    block = block.slice(); // 0..S
+                    try
+                    {
+                        uncompressFixedBlock(block, uncompressed, chunk, shouldCheckCrc());
+                    }
+                    catch (IOException e)
+                    {
+                        throw new CorruptBlockException(channel.filePath(), chunk, e);
+                    }
+                    if (ReadIOTracker.isEnabled())
+                        ReadIOTracker.recordDecompressed(uncompressed.remaining());
+                    return;
+                }
 
                 compressedChunk.position(chunkOffset).limit(chunkOffset + chunk.length);
 

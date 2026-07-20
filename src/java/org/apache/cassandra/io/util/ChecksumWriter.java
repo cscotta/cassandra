@@ -115,5 +115,17 @@ public class ChecksumWriter
             throw new FSWriteError(e, digestFile);
         }
     }
+
+    /**
+     * Fold the bytes between {@code bb.position()} and {@code bb.limit()} into the whole-file checksum
+     * only, without computing or emitting a per-chunk incremental CRC. Used by fixed-output
+     * compression, which embeds its own per-chunk CRC inside each block, so the digest must still
+     * cover the exact on-disk bytes (block header + payload + CRC + padding) without extra output.
+     */
+    public void appendFullChecksumOnly(ByteBuffer bb)
+    {
+        ByteBuffer toAppend = bb.duplicate();
+        fullChecksum.update(toAppend);
+    }
 }
 

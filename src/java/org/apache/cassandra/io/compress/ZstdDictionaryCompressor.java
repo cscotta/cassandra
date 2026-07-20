@@ -209,6 +209,14 @@ public class ZstdDictionaryCompressor extends ZstdCompressorBase implements ICom
         }
     }
 
+    @Override
+    public int compressBounded(ByteBuffer input, ByteBuffer output, int maxOutputLen) throws IOException
+    {
+        if (dictionary == null)
+            return super.compressBounded(input, output, maxOutputLen); // base streaming, no dictionary
+        return streamingCompressBounded(input, output, maxOutputLen, dictionary.dictionaryForCompression(compressionLevel()));
+    }
+
     @VisibleForTesting
     ZstdCompressionDictionary dictionary()
     {

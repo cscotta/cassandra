@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Compressible data: legacy vs fixed-output</title>
+<style>
+body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:980px;margin:2rem auto;padding:0 1rem;line-height:1.5;color:#1a1a1a}
+h1{border-bottom:2px solid #ccc;padding-bottom:.3em}h2{margin-top:1.8em;border-bottom:1px solid #eee}
+table{border-collapse:collapse;width:100%;margin:1em 0}th,td{border:1px solid #ccc;padding:.45em .7em;text-align:right}
+th:first-child,td:first-child{text-align:left}tr:nth-child(even){background:#fafafa}
+.win{color:#0a7d28;font-weight:600}.cost{color:#b04a00;font-weight:600}
+.cap{color:#666;font-size:.9em}
+.note{background:#f7f7f9;border:1px solid #e0e0e0;border-radius:6px;padding:.5em 1em;font-size:.92em}
+.rec{background:#eef7ee;border:1px solid #cfe6cf;border-radius:6px;padding:.5em 1em}
+code{background:#f0f0f0;padding:.1em .3em;border-radius:3px}
+</style></head><body>
+
+<h1>Compressible data &mdash; legacy 64&nbsp;KB vs fixed-output 16&nbsp;KB</h1>
+<p class="cap">Re-run on a regenerated compressible dataset (SSTableGen value profile changed: unique random head +
+shared-dictionary tail &rarr; Zstd@8 ratio ~0.45, matching production, vs the earlier incompressible ~1.0).
+64&nbsp;M single-row partitions, ~198&nbsp;GB logical. Both configs: BIG format, LCS (offline-releveled),
+autocompaction off, <code>disk_access_mode=standard</code> (buffered), caches off, 16&nbsp;GB heap. Legacy is
+the SSTableGen default (<code>chunk_length_in_kb=64</code>); fixed-output is
+<code>compressed_chunk_length_in_kb=16</code>. So this is a default&rarr;optimized comparison that combines
+chunk-size reduction (64&rarr;16) with block alignment.</p>
+
+<h2>Results</h2>
+<table>
+<tr><th>metric</th><th>legacy 64&nbsp;KB</th><th>fixed-output 16&nbsp;KB</th><th>delta</th></tr>
+<tr><td>on-disk compression ratio</td><td>0.449</td><td>0.492</td><td class="cost">+9.6%</td></tr>
+<tr><td>space used (live)</td><td>91.4&nbsp;GB</td><td>99.8&nbsp;GB</td><td class="cost">+8.4&nbsp;GB</td></tr>
+<tr><td><b>cold device KB / request</b> <span class="cap">(isolated single reads)</span></td><td>112</td><td>40</td><td class="win">&minus;64%</td></tr>
+<tr><td><b>warm device KB / op</b></td><td>25.8</td><td>11.0</td><td class="win">&minus;57%</td></tr>
+<tr><td>warm VFS KB / op</td><td>27.4</td><td>17.0</td><td class="win">&minus;38%</td></tr>
+<tr><td>warm device reads / op</td><td>0.46</td><td>0.45</td><td>&asymp;</td></tr>
+<tr><td><b>warm throughput (ops/s)</b></td><td>52,427</td><td>67,300</td><td class="win">+28%</td></tr>
+<tr><td>warm errors</td><td>0</td><td>0</td><td>&mdash;</td></tr>
+<tr><td>warm latency p50 (ms)</td><td>0.35</td><td>0.44</td><td>&asymp;</td></tr>
+<tr><td>warm latency avg / p99 (ms)</td><td>9.2 / 176</td><td>48.1 / 633</td><td class="cost">tail worse</td></tr>
+</table>
+
+<h2>Reading the results</h2>
+<p><b>The device-read win is much larger on compressible data than it was on incompressible.</b> Cold device
+bytes/request drop <b>64%</b> (112&rarr;40&nbsp;KB) and warm device bytes/op drop <b>57%</b> (25.8&rarr;11.0).
+The reason: a 64&nbsp;KB legacy chunk must be read and decompressed in full to return one ~3.1&nbsp;KB value,
+and on a cold read the buffered fetch plus readahead touches ~112&nbsp;KB of device. A 16&nbsp;KB fixed-output
+block is one aligned read (~16&nbsp;KB) plus the index &mdash; so the over-fetch that a large chunk causes is
+largely eliminated. That efficiency also lifts <b>warm throughput +28%</b> (52.4k&rarr;67.3k ops/s, 0 errors)
+&mdash; each request moves less device IO, so the node sustains more of them.</p>
+
+<p><b>The cost is on-disk size: +9% (ratio 0.449&rarr;0.492).</b> This is new &mdash; on incompressible data
+the ratio was ~1.0 either way, so there was no size cost. On compressible data, smaller compression chunks
+give Zstd less context to find matches, so 16&nbsp;KB chunks compress worse than 64&nbsp;KB. Most of the +9%
+is this chunk-size effect (64&rarr;16), not fixed-output framing itself: the incompressible run measured
+fixed-output framing+padding at ~2.3%, so a like-for-like legacy-16&nbsp;KB vs fixed-output-16&nbsp;KB
+comparison would show only that ~2&ndash;3% overhead, with the rest of the 9% being the context loss shared by
+any 16&nbsp;KB scheme.</p>
+
+<p class="note"><b>Two caveats.</b> (1) This compares 64&nbsp;KB legacy to 16&nbsp;KB fixed-output, so it
+bundles chunk-size reduction with alignment (the realistic default&rarr;optimized move; a like-for-like
+16&nbsp;KB-vs-16&nbsp;KB run would isolate alignment). (2) The warm avg/p99 latency is higher for fixed-output
+(48&nbsp;ms / 633&nbsp;ms vs 9&nbsp;ms / 176&nbsp;ms) while p50 is the same &mdash; the adaptive limiter let
+fixed-output run at a higher sustained load (67k vs 52k ops/s), and the cold-miss tail grows with load; a
+controlled equal-offered-rate run would be needed to separate load-level from any per-read tail cost (the same
+kind of artifact the heap/maxrlat investigation earlier surfaced).</p>
+
+<div class="rec">
+<b>Conclusion:</b> On realistic ~0.45-compressible data, fixed-output-16&nbsp;KB cuts device bytes per read
+by ~57&ndash;64% and raises throughput ~28% versus the 64&nbsp;KB legacy default, at a cost of ~9% more
+on-disk size (mostly the smaller-chunk compression-context loss, not fixed-output framing) and a higher warm
+latency tail at the elevated load it enables. The bytes-per-request win &mdash; the project's target &mdash;
+is larger here than on incompressible data; the on-disk trade is the new consideration compressible data
+introduces, and is tunable via the chosen block size.
+</div>
+
+</body></html>

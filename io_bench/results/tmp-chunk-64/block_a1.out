@@ -1,0 +1,23 @@
+Attached 4 probes
+# block_io.bt dev_t=7340032 major=7 minor=0
+# reads/writes counted at block_rq_complete; per-comm at block_rq_issue
+
+SUMMARY read_completions=3 read_bytes=49152 write_completions=25 write_bytes=351744 other_completions=2
+
+
+@other_completions: 2
+@rd_issue_by_thread[Native-Transpor, 109706, 109876]: 3
+@rd_issue_bytes_by_comm[Native-Transpor]: 49152
+@rd_issue_cnt_by_comm[Native-Transpor]: 3
+@read_bytes: 49152
+@read_completions: 3
+@read_lat_us:
+[128, 256)             1 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[256, 512)             1 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[512, 1K)              1 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+
+@read_req_bytes:
+[16K, 32K)             3 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+
+@write_bytes: 351744
+@write_completions: 25

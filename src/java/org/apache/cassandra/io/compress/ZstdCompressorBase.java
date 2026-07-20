@@ -24,7 +24,10 @@ import java.util.Collections;
 import java.util.Map;
 import java.util.Set;
 
+import com.github.luben.zstd.EndDirective;
 import com.github.luben.zstd.Zstd;
+import com.github.luben.zstd.ZstdCompressCtx;
+import com.github.luben.zstd.ZstdDictCompress;
 import com.google.common.annotations.VisibleForTesting;
 
 import org.slf4j.Logger;
@@ -160,6 +163,115 @@ public abstract class ZstdCompressorBase implements ICompressor
         } catch (Exception e)
         {
             throw new IOException("Compression failed", e);
+        }
+    }
+
+    /**
+     * Fixed-output (pack-to-fill) compression via Zstd streaming: compress a prefix of {@code input}
+     * into ONE frame that fills close to {@code maxOutputLen}, in roughly one forward pass over the
+     * consumed input, instead of the interface default's repeated whole-prefix recompressions.
+     *
+     * The frame is built incrementally (feed a slice, FLUSH to observe how full the output is, feed
+     * more, then END), so the total input size is not known when the frame header is written and the
+     * frame carries no content-size field. The fixed-output read path
+     * ({@code CompressedChunkReader.uncompressFixedBlock}) accounts for this by decompressing into a
+     * destination sized to the chunk's exact uncompressed length (from the metadata offset table).
+     */
+    @Override
+    public int compressBounded(ByteBuffer input, ByteBuffer output, int maxOutputLen) throws IOException
+    {
+        return streamingCompressBounded(input, output, maxOutputLen, null);
+    }
+
+    /**
+     * Shared streaming pack-to-fill implementation. {@code dictionary} is applied to the compression
+     * context when non-null (the dictionary-aware subclass supplies it), so dictionary compression
+     * gets the same single-pass packing.
+     */
+    protected int streamingCompressBounded(ByteBuffer input, ByteBuffer output, int maxOutputLen,
+                                           ZstdDictCompress dictionary) throws IOException
+    {
+        final int available = input.remaining();
+        if (available == 0 || maxOutputLen <= 0)
+            return 0;
+
+        final int inputStart = input.position();
+        final int inputLimit = input.limit();
+        final int outputStart = output.position();
+        final int outputLimit = output.limit();
+        // Never let streaming write past maxOutputLen bytes of output.
+        final int boundedLimit = Math.min(outputLimit, outputStart + maxOutputLen);
+        // Reserve headroom so closing the frame (END: trailing block + epilogue) fits within maxOutputLen.
+        final int endMargin = Math.min(Math.max(1, maxOutputLen / 4), COMPRESS_BOUNDED_OVERHEAD_MARGIN);
+        final int fillTargetPos = outputStart + Math.max(1, maxOutputLen - endMargin);
+
+        ZstdCompressCtx ctx = new ZstdCompressCtx();
+        try
+        {
+            ctx.setLevel(compressionLevel());
+            ctx.setChecksum(ENABLE_CHECKSUM_FLAG);
+            if (dictionary != null)
+                ctx.loadDict(dictionary);
+
+            int consumed = 0;
+            double ratio = 1.0; // compressed/uncompressed; seed conservative (incompressible), refine below
+
+            // Feed input into one frame until the output nears the fill target. FLUSH after each feed so
+            // output.position() reflects all consumed input (lets us size the next feed and decide to stop).
+            for (int iter = 0; iter < MAX_COMPRESS_BOUNDED_TRIALS && consumed < available; iter++)
+            {
+                int remainingFill = fillTargetPos - output.position();
+                if (remainingFill <= 0)
+                    break;
+                long est = (long) Math.ceil(remainingFill / Math.max(ratio, 1e-3));
+                int step = (int) Math.min(available - consumed, Math.max(1L, est));
+
+                input.limit(inputStart + consumed + step);
+                output.limit(boundedLimit);
+                boolean flushed = ctx.compressDirectByteBufferStream(output, input, EndDirective.FLUSH);
+                consumed = input.position() - inputStart;
+                int produced = output.position() - outputStart;
+                if (consumed > 0 && produced > 0)
+                    ratio = produced / (double) consumed;
+                if (!flushed)
+                    break; // output region full: cannot take more input
+            }
+
+            // Close the frame (epilogue) within the bounded output region. With everything already
+            // flushed, END emits only the small frame footer, which fits in endMargin.
+            input.limit(inputStart + consumed);
+            output.limit(boundedLimit);
+            boolean ended = false;
+            for (int i = 0; i < MAX_COMPRESS_BOUNDED_TRIALS && !ended; i++)
+                ended = ctx.compressDirectByteBufferStream(output, input, EndDirective.END);
+
+            if (!ended || consumed == 0)
+            {
+                // Could not fill/close within maxOutputLen (rare: expanding data + tiny margin). Reset and
+                // fall back to the interface default (multi-trial), which produces a content-size frame.
+                input.position(inputStart);
+                input.limit(inputLimit);
+                output.position(outputStart);
+                output.limit(outputLimit);
+                return ICompressor.super.compressBounded(input, output, maxOutputLen);
+            }
+
+            input.position(inputStart + consumed);
+            input.limit(inputLimit);
+            output.limit(outputLimit);
+            return consumed;
+        }
+        catch (IOException e)
+        {
+            throw e;
+        }
+        catch (Exception e)
+        {
+            throw new IOException("Streaming bounded compression failed", e);
+        }
+        finally
+        {
+            ctx.close();
         }
     }
 

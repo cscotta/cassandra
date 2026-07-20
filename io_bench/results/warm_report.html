@@ -1,0 +1,251 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>readbench warm read run</title>
+<style>body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:1000px;margin:2rem auto;padding:0 1rem;line-height:1.5}h1{border-bottom:2px solid #ccc}h2{margin-top:1.8em}table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.9em}th,td{border:1px solid #ccc;padding:.4em .6em;text-align:right}th:first-child,td:first-child{text-align:left}.row{display:grid;grid-template-columns:70px 1fr 110px;gap:.6em;align-items:center;margin:.15em 0}.cap{color:#666;font-size:.9em}.note{background:#f7f7f9;border:1px solid #e0e0e0;border-radius:6px;padding:.4em 1em;font-size:.9em}.metric{border:1px solid #e0e0e0;border-radius:6px;padding:.8em 1em;margin:1em 0}</style></head><body>
+<h1>readbench &mdash; steady-state read run</h1>
+<p class="cap">iouring_bench.readbench | duration=120s maxrlat=r140000ms threads=64 | disk_access_mode=standard, chunk cache off, Zstd@8 64KB, LCS, /dev/nvme0n1p8, working set ~188GB &gt; 62GB RAM</p>
+<h2>Summary</h2><table><tr><th>metric</th><th>value</th></tr>
+<tr><td>chunk_length_in_kb</td><td>64</td></tr>
+<tr><td>compression ratio</td><td>0.4380</td></tr>
+<tr><td>read latency avg (ms)</td><td>2585.350</td></tr>
+<tr><td>read latency p50 (ms)</td><td>2516.580</td></tr>
+<tr><td>read latency p99 (ms)</td><td>7851.740</td></tr>
+<tr><td>ops served</td><td>12500303</td></tr>
+<tr><td>throughput</td><td>104169 ops/s</td></tr>
+<tr><td>errors</td><td>824047 (6.18%)</td></tr>
+<tr><td>page-cache hit rate (cachestat, mm)</td><td>66.7%</td></tr>
+<tr><td>page-cache hit rate (VFS-vs-device IOPS)</td><td>81.2%</td></tr>
+<tr><td>index (Index.db) page-cache hit rate</td><td>99.2%</td></tr>
+<tr><td>data (Data.db) page-cache hit rate</td><td>7.5%</td></tr>
+<tr><td>cachestat hits / misses</td><td>24594195 / 12264080</td></tr>
+<tr><td>device reads/op (p8, approx)</td><td>0.20</td></tr>
+<tr><td>device KB/op (p8, approx)</td><td>15.7</td></tr>
+</table>
+<h2>Per-component page-cache hit rate</h2><p class="cap">Page-level, from mm_filemap tracepoints per inode (accesses = mm_filemap_get_pages ranges, misses = mm_filemap_add_to_page_cache); inodes joined to sstable component. In-kernel counted, so accurate at throughput.</p>
+<table><tr><th>component</th><th>hit rate</th><th>accessed pages</th><th>miss pages</th></tr>
+<tr><td>Index.db</td><td>99.2%</td><td>10186792</td><td>80358</td></tr>
+<tr><td>Data.db</td><td>7.5%</td><td>12991050</td><td>12019574</td></tr>
+<tr><td>other</td><td>56.2%</td><td>96</td><td>42</td></tr>
+</table>
+<h2>Throughput &amp; latency over time (easy-stress rows)</h2>
+<div class="metric"><b>Reads/s (1-min rate)</b>
+<div class="row"><span>t0</span><div style="background:#1982c4;height:1em;width:1.0%;border-radius:3px"></div><span>0</span></div>
+<div class="row"><span>t1</span><div style="background:#1982c4;height:1em;width:11.3%;border-radius:3px"></div><span>11414</span></div>
+<div class="row"><span>t2</span><div style="background:#1982c4;height:1em;width:11.3%;border-radius:3px"></div><span>11414</span></div>
+<div class="row"><span>t3</span><div style="background:#1982c4;height:1em;width:11.5%;border-radius:3px"></div><span>11628</span></div>
+<div class="row"><span>t4</span><div style="background:#1982c4;height:1em;width:12.8%;border-radius:3px"></div><span>12980</span></div>
+<div class="row"><span>t5</span><div style="background:#1982c4;height:1em;width:12.8%;border-radius:3px"></div><span>12980</span></div>
+<div class="row"><span>t6</span><div style="background:#1982c4;height:1em;width:15.3%;border-radius:3px"></div><span>15416</span></div>
+<div class="row"><span>t7</span><div style="background:#1982c4;height:1em;width:15.3%;border-radius:3px"></div><span>15416</span></div>
+<div class="row"><span>t8</span><div style="background:#1982c4;height:1em;width:18.7%;border-radius:3px"></div><span>18885</span></div>
+<div class="row"><span>t9</span><div style="background:#1982c4;height:1em;width:22.8%;border-radius:3px"></div><span>23084</span></div>
+<div class="row"><span>t10</span><div style="background:#1982c4;height:1em;width:22.8%;border-radius:3px"></div><span>23084</span></div>
+<div class="row"><span>t11</span><div style="background:#1982c4;height:1em;width:28.2%;border-radius:3px"></div><span>28504</span></div>
+<div class="row"><span>t12</span><div style="background:#1982c4;height:1em;width:28.2%;border-radius:3px"></div><span>28504</span></div>
+<div class="row"><span>t13</span><div style="background:#1982c4;height:1em;width:33.9%;border-radius:3px"></div><span>34218</span></div>
+<div class="row"><span>t14</span><div style="background:#1982c4;height:1em;width:40.7%;border-radius:3px"></div><span>41086</span></div>
+<div class="row"><span>t15</span><div style="background:#1982c4;height:1em;width:40.7%;border-radius:3px"></div><span>41086</span></div>
+<div class="row"><span>t16</span><div style="background:#1982c4;height:1em;width:46.4%;border-radius:3px"></div><span>46828</span></div>
+<div class="row"><span>t17</span><div style="background:#1982c4;height:1em;width:46.4%;border-radius:3px"></div><span>46828</span></div>
+<div class="row"><span>t18</span><div style="background:#1982c4;height:1em;width:51.6%;border-radius:3px"></div><span>52131</span></div>
+<div class="row"><span>t19</span><div style="background:#1982c4;height:1em;width:56.8%;border-radius:3px"></div><span>57397</span></div>
+<div class="row"><span>t20</span><div style="background:#1982c4;height:1em;width:56.8%;border-radius:3px"></div><span>57397</span></div>
+<div class="row"><span>t21</span><div style="background:#1982c4;height:1em;width:62.9%;border-radius:3px"></div><span>63530</span></div>
+<div class="row"><span>t22</span><div style="background:#1982c4;height:1em;width:62.9%;border-radius:3px"></div><span>63530</span></div>
+<div class="row"><span>t23</span><div style="background:#1982c4;height:1em;width:68.1%;border-radius:3px"></div><span>68837</span></div>
+<div class="row"><span>t24</span><div style="background:#1982c4;height:1em;width:72.9%;border-radius:3px"></div><span>73650</span></div>
+<div class="row"><span>t25</span><div style="background:#1982c4;height:1em;width:72.9%;border-radius:3px"></div><span>73650</span></div>
+<div class="row"><span>t26</span><div style="background:#1982c4;height:1em;width:76.3%;border-radius:3px"></div><span>77059</span></div>
+<div class="row"><span>t27</span><div style="background:#1982c4;height:1em;width:76.3%;border-radius:3px"></div><span>77059</span></div>
+<div class="row"><span>t28</span><div style="background:#1982c4;height:1em;width:78.8%;border-radius:3px"></div><span>79607</span></div>
+<div class="row"><span>t29</span><div style="background:#1982c4;height:1em;width:84.2%;border-radius:3px"></div><span>85049</span></div>
+<div class="row"><span>t30</span><div style="background:#1982c4;height:1em;width:84.2%;border-radius:3px"></div><span>85049</span></div>
+<div class="row"><span>t31</span><div style="background:#1982c4;height:1em;width:87.4%;border-radius:3px"></div><span>88286</span></div>
+<div class="row"><span>t32</span><div style="background:#1982c4;height:1em;width:87.4%;border-radius:3px"></div><span>88286</span></div>
+<div class="row"><span>t33</span><div style="background:#1982c4;height:1em;width:90.2%;border-radius:3px"></div><span>91125</span></div>
+<div class="row"><span>t34</span><div style="background:#1982c4;height:1em;width:93.3%;border-radius:3px"></div><span>94272</span></div>
+<div class="row"><span>t35</span><div style="background:#1982c4;height:1em;width:93.3%;border-radius:3px"></div><span>94272</span></div>
+<div class="row"><span>t36</span><div style="background:#1982c4;height:1em;width:94.7%;border-radius:3px"></div><span>95686</span></div>
+<div class="row"><span>t37</span><div style="background:#1982c4;height:1em;width:94.7%;border-radius:3px"></div><span>95686</span></div>
+<div class="row"><span>t38</span><div style="background:#1982c4;height:1em;width:97.6%;border-radius:3px"></div><span>98560</span></div>
+<div class="row"><span>t39</span><div style="background:#1982c4;height:1em;width:100.0%;border-radius:3px"></div><span>101030</span></div>
+<div class="row"><span>t40</span><div style="background:#1982c4;height:1em;width:100.0%;border-radius:3px"></div><span>101030</span></div>
+<div class="row"><span>t41</span><div style="background:#1982c4;height:1em;width:100.0%;border-radius:3px"></div><span>101030</span></div>
+<div class="row"><span>t42</span><div style="background:#1982c4;height:1em;width:100.0%;border-radius:3px"></div><span>101030</span></div>
+</div>
+<div class="metric"><b>Read p99 latency (ms)</b>
+<div class="row"><span>t0</span><div style="background:#ff924c;height:1em;width:1.0%;border-radius:3px"></div><span>12.9</span></div>
+<div class="row"><span>t1</span><div style="background:#ff924c;height:1em;width:1.0%;border-radius:3px"></div><span>8.7</span></div>
+<div class="row"><span>t2</span><div style="background:#ff924c;height:1em;width:1.0%;border-radius:3px"></div><span>5.9</span></div>
+<div class="row"><span>t3</span><div style="background:#ff924c;height:1em;width:1.0%;border-radius:3px"></div><span>2.3</span></div>
+<div class="row"><span>t4</span><div style="background:#ff924c;height:1em;width:1.0%;border-radius:3px"></div><span>0.8</span></div>
+<div class="row"><span>t5</span><div style="background:#ff924c;height:1em;width:1.0%;border-radius:3px"></div><span>1.5</span></div>
+<div class="row"><span>t6</span><div style="background:#ff924c;height:1em;width:1.0%;border-radius:3px"></div><span>1.5</span></div>
+<div class="row"><span>t7</span><div style="background:#ff924c;height:1em;width:1.0%;border-radius:3px"></div><span>1.1</span></div>
+<div class="row"><span>t8</span><div style="background:#ff924c;height:1em;width:1.0%;border-radius:3px"></div><span>0.8</span></div>
+<div class="row"><span>t9</span><div style="background:#ff924c;height:1em;width:1.0%;border-radius:3px"></div><span>1.2</span></div>
+<div class="row"><span>t10</span><div style="background:#ff924c;height:1em;width:1.0%;border-radius:3px"></div><span>1.8</span></div>
+<div class="row"><span>t11</span><div style="background:#ff924c;height:1em;width:1.0%;border-radius:3px"></div><span>1.3</span></div>
+<div class="row"><span>t12</span><div style="background:#ff924c;height:1em;width:1.0%;border-radius:3px"></div><span>1.6</span></div>
+<div class="row"><span>t13</span><div style="background:#ff924c;height:1em;width:1.0%;border-radius:3px"></div><span>66.0</span></div>
+<div class="row"><span>t14</span><div style="background:#ff924c;height:1em;width:2.3%;border-radius:3px"></div><span>190.7</span></div>
+<div class="row"><span>t15</span><div style="background:#ff924c;height:1em;width:8.0%;border-radius:3px"></div><span>664.0</span></div>
+<div class="row"><span>t16</span><div style="background:#ff924c;height:1em;width:18.8%;border-radius:3px"></div><span>1553.5</span></div>
+<div class="row"><span>t17</span><div style="background:#ff924c;height:1em;width:21.9%;border-radius:3px"></div><span>1809.7</span></div>
+<div class="row"><span>t18</span><div style="background:#ff924c;height:1em;width:34.1%;border-radius:3px"></div><span>2813.5</span></div>
+<div class="row"><span>t19</span><div style="background:#ff924c;height:1em;width:41.4%;border-radius:3px"></div><span>3421.9</span></div>
+<div class="row"><span>t20</span><div style="background:#ff924c;height:1em;width:57.0%;border-radius:3px"></div><span>4711.6</span></div>
+<div class="row"><span>t21</span><div style="background:#ff924c;height:1em;width:57.3%;border-radius:3px"></div><span>4730.8</span></div>
+<div class="row"><span>t22</span><div style="background:#ff924c;height:1em;width:60.5%;border-radius:3px"></div><span>4995.6</span></div>
+<div class="row"><span>t23</span><div style="background:#ff924c;height:1em;width:69.7%;border-radius:3px"></div><span>5762.4</span></div>
+<div class="row"><span>t24</span><div style="background:#ff924c;height:1em;width:71.0%;border-radius:3px"></div><span>5865.1</span></div>
+<div class="row"><span>t25</span><div style="background:#ff924c;height:1em;width:71.0%;border-radius:3px"></div><span>5865.1</span></div>
+<div class="row"><span>t26</span><div style="background:#ff924c;height:1em;width:72.5%;border-radius:3px"></div><span>5992.0</span></div>
+<div class="row"><span>t27</span><div style="background:#ff924c;height:1em;width:82.1%;border-radius:3px"></div><span>6785.5</span></div>
+<div class="row"><span>t28</span><div style="background:#ff924c;height:1em;width:95.8%;border-radius:3px"></div><span>7918.3</span></div>
+<div class="row"><span>t29</span><div style="background:#ff924c;height:1em;width:96.1%;border-radius:3px"></div><span>7942.5</span></div>
+<div class="row"><span>t30</span><div style="background:#ff924c;height:1em;width:96.1%;border-radius:3px"></div><span>7942.5</span></div>
+<div class="row"><span>t31</span><div style="background:#ff924c;height:1em;width:96.1%;border-radius:3px"></div><span>7942.5</span></div>
+<div class="row"><span>t32</span><div style="background:#ff924c;height:1em;width:95.1%;border-radius:3px"></div><span>7857.6</span></div>
+<div class="row"><span>t33</span><div style="background:#ff924c;height:1em;width:95.1%;border-radius:3px"></div><span>7857.6</span></div>
+<div class="row"><span>t34</span><div style="background:#ff924c;height:1em;width:100.0%;border-radius:3px"></div><span>8261.6</span></div>
+<div class="row"><span>t35</span><div style="background:#ff924c;height:1em;width:96.1%;border-radius:3px"></div><span>7942.5</span></div>
+<div class="row"><span>t36</span><div style="background:#ff924c;height:1em;width:98.8%;border-radius:3px"></div><span>8163.1</span></div>
+<div class="row"><span>t37</span><div style="background:#ff924c;height:1em;width:98.1%;border-radius:3px"></div><span>8101.7</span></div>
+<div class="row"><span>t38</span><div style="background:#ff924c;height:1em;width:96.7%;border-radius:3px"></div><span>7988.8</span></div>
+<div class="row"><span>t39</span><div style="background:#ff924c;height:1em;width:96.7%;border-radius:3px"></div><span>7988.8</span></div>
+<div class="row"><span>t40</span><div style="background:#ff924c;height:1em;width:98.1%;border-radius:3px"></div><span>8101.7</span></div>
+<div class="row"><span>t41</span><div style="background:#ff924c;height:1em;width:98.1%;border-radius:3px"></div><span>8101.7</span></div>
+<div class="row"><span>t42</span><div style="background:#ff924c;height:1em;width:98.1%;border-radius:3px"></div><span>8101.7</span></div>
+</div>
+<h2>Page-cache over time (cachestat, 2s samples)</h2>
+<div class="metric"><b>Hit ratio (%)</b>
+<div class="row"><span>t0</span><div style="background:#2a9d8f;height:1em;width:1.0%;border-radius:3px"></div><span>0.0</span></div>
+<div class="row"><span>t1</span><div style="background:#2a9d8f;height:1em;width:8.2%;border-radius:3px"></div><span>8.2</span></div>
+<div class="row"><span>t2</span><div style="background:#2a9d8f;height:1em;width:7.5%;border-radius:3px"></div><span>7.5</span></div>
+<div class="row"><span>t3</span><div style="background:#2a9d8f;height:1em;width:8.9%;border-radius:3px"></div><span>8.9</span></div>
+<div class="row"><span>t4</span><div style="background:#2a9d8f;height:1em;width:14.0%;border-radius:3px"></div><span>14.0</span></div>
+<div class="row"><span>t5</span><div style="background:#2a9d8f;height:1em;width:19.9%;border-radius:3px"></div><span>19.9</span></div>
+<div class="row"><span>t6</span><div style="background:#2a9d8f;height:1em;width:28.1%;border-radius:3px"></div><span>28.1</span></div>
+<div class="row"><span>t7</span><div style="background:#2a9d8f;height:1em;width:32.5%;border-radius:3px"></div><span>32.5</span></div>
+<div class="row"><span>t8</span><div style="background:#2a9d8f;height:1em;width:37.4%;border-radius:3px"></div><span>37.4</span></div>
+<div class="row"><span>t9</span><div style="background:#2a9d8f;height:1em;width:37.2%;border-radius:3px"></div><span>37.2</span></div>
+<div class="row"><span>t10</span><div style="background:#2a9d8f;height:1em;width:38.7%;border-radius:3px"></div><span>38.7</span></div>
+<div class="row"><span>t11</span><div style="background:#2a9d8f;height:1em;width:39.4%;border-radius:3px"></div><span>39.4</span></div>
+<div class="row"><span>t12</span><div style="background:#2a9d8f;height:1em;width:40.2%;border-radius:3px"></div><span>40.2</span></div>
+<div class="row"><span>t13</span><div style="background:#2a9d8f;height:1em;width:40.8%;border-radius:3px"></div><span>40.8</span></div>
+<div class="row"><span>t14</span><div style="background:#2a9d8f;height:1em;width:42.3%;border-radius:3px"></div><span>42.3</span></div>
+<div class="row"><span>t15</span><div style="background:#2a9d8f;height:1em;width:42.2%;border-radius:3px"></div><span>42.2</span></div>
+<div class="row"><span>t16</span><div style="background:#2a9d8f;height:1em;width:43.2%;border-radius:3px"></div><span>43.2</span></div>
+<div class="row"><span>t17</span><div style="background:#2a9d8f;height:1em;width:42.5%;border-radius:3px"></div><span>42.5</span></div>
+<div class="row"><span>t18</span><div style="background:#2a9d8f;height:1em;width:43.1%;border-radius:3px"></div><span>43.1</span></div>
+<div class="row"><span>t19</span><div style="background:#2a9d8f;height:1em;width:44.1%;border-radius:3px"></div><span>44.1</span></div>
+<div class="row"><span>t20</span><div style="background:#2a9d8f;height:1em;width:45.1%;border-radius:3px"></div><span>45.1</span></div>
+<div class="row"><span>t21</span><div style="background:#2a9d8f;height:1em;width:60.7%;border-radius:3px"></div><span>60.7</span></div>
+<div class="row"><span>t22</span><div style="background:#2a9d8f;height:1em;width:72.0%;border-radius:3px"></div><span>72.0</span></div>
+<div class="row"><span>t23</span><div style="background:#2a9d8f;height:1em;width:71.7%;border-radius:3px"></div><span>71.7</span></div>
+<div class="row"><span>t24</span><div style="background:#2a9d8f;height:1em;width:71.0%;border-radius:3px"></div><span>71.0</span></div>
+<div class="row"><span>t25</span><div style="background:#2a9d8f;height:1em;width:69.8%;border-radius:3px"></div><span>69.8</span></div>
+<div class="row"><span>t26</span><div style="background:#2a9d8f;height:1em;width:70.8%;border-radius:3px"></div><span>70.8</span></div>
+<div class="row"><span>t27</span><div style="background:#2a9d8f;height:1em;width:70.2%;border-radius:3px"></div><span>70.2</span></div>
+<div class="row"><span>t28</span><div style="background:#2a9d8f;height:1em;width:69.9%;border-radius:3px"></div><span>69.9</span></div>
+<div class="row"><span>t29</span><div style="background:#2a9d8f;height:1em;width:69.6%;border-radius:3px"></div><span>69.6</span></div>
+<div class="row"><span>t30</span><div style="background:#2a9d8f;height:1em;width:69.6%;border-radius:3px"></div><span>69.6</span></div>
+<div class="row"><span>t31</span><div style="background:#2a9d8f;height:1em;width:70.2%;border-radius:3px"></div><span>70.2</span></div>
+<div class="row"><span>t32</span><div style="background:#2a9d8f;height:1em;width:68.7%;border-radius:3px"></div><span>68.7</span></div>
+<div class="row"><span>t33</span><div style="background:#2a9d8f;height:1em;width:69.4%;border-radius:3px"></div><span>69.4</span></div>
+<div class="row"><span>t34</span><div style="background:#2a9d8f;height:1em;width:70.3%;border-radius:3px"></div><span>70.3</span></div>
+<div class="row"><span>t35</span><div style="background:#2a9d8f;height:1em;width:70.4%;border-radius:3px"></div><span>70.4</span></div>
+<div class="row"><span>t36</span><div style="background:#2a9d8f;height:1em;width:69.4%;border-radius:3px"></div><span>69.4</span></div>
+<div class="row"><span>t37</span><div style="background:#2a9d8f;height:1em;width:70.1%;border-radius:3px"></div><span>70.1</span></div>
+<div class="row"><span>t38</span><div style="background:#2a9d8f;height:1em;width:69.2%;border-radius:3px"></div><span>69.2</span></div>
+<div class="row"><span>t39</span><div style="background:#2a9d8f;height:1em;width:69.6%;border-radius:3px"></div><span>69.6</span></div>
+<div class="row"><span>t40</span><div style="background:#2a9d8f;height:1em;width:69.1%;border-radius:3px"></div><span>69.1</span></div>
+<div class="row"><span>t41</span><div style="background:#2a9d8f;height:1em;width:69.6%;border-radius:3px"></div><span>69.6</span></div>
+<div class="row"><span>t42</span><div style="background:#2a9d8f;height:1em;width:70.0%;border-radius:3px"></div><span>70.0</span></div>
+<div class="row"><span>t43</span><div style="background:#2a9d8f;height:1em;width:69.5%;border-radius:3px"></div><span>69.5</span></div>
+<div class="row"><span>t44</span><div style="background:#2a9d8f;height:1em;width:70.5%;border-radius:3px"></div><span>70.5</span></div>
+<div class="row"><span>t45</span><div style="background:#2a9d8f;height:1em;width:70.0%;border-radius:3px"></div><span>70.0</span></div>
+<div class="row"><span>t46</span><div style="background:#2a9d8f;height:1em;width:70.6%;border-radius:3px"></div><span>70.6</span></div>
+<div class="row"><span>t47</span><div style="background:#2a9d8f;height:1em;width:70.1%;border-radius:3px"></div><span>70.1</span></div>
+<div class="row"><span>t48</span><div style="background:#2a9d8f;height:1em;width:70.0%;border-radius:3px"></div><span>70.0</span></div>
+<div class="row"><span>t49</span><div style="background:#2a9d8f;height:1em;width:70.4%;border-radius:3px"></div><span>70.4</span></div>
+<div class="row"><span>t50</span><div style="background:#2a9d8f;height:1em;width:69.8%;border-radius:3px"></div><span>69.8</span></div>
+<div class="row"><span>t51</span><div style="background:#2a9d8f;height:1em;width:71.0%;border-radius:3px"></div><span>71.0</span></div>
+<div class="row"><span>t52</span><div style="background:#2a9d8f;height:1em;width:70.2%;border-radius:3px"></div><span>70.2</span></div>
+<div class="row"><span>t53</span><div style="background:#2a9d8f;height:1em;width:70.1%;border-radius:3px"></div><span>70.1</span></div>
+<div class="row"><span>t54</span><div style="background:#2a9d8f;height:1em;width:70.3%;border-radius:3px"></div><span>70.3</span></div>
+<div class="row"><span>t55</span><div style="background:#2a9d8f;height:1em;width:69.1%;border-radius:3px"></div><span>69.1</span></div>
+<div class="row"><span>t56</span><div style="background:#2a9d8f;height:1em;width:70.4%;border-radius:3px"></div><span>70.4</span></div>
+<div class="row"><span>t57</span><div style="background:#2a9d8f;height:1em;width:70.5%;border-radius:3px"></div><span>70.5</span></div>
+<div class="row"><span>t58</span><div style="background:#2a9d8f;height:1em;width:70.3%;border-radius:3px"></div><span>70.3</span></div>
+<div class="row"><span>t59</span><div style="background:#2a9d8f;height:1em;width:70.6%;border-radius:3px"></div><span>70.6</span></div>
+<div class="row"><span>t60</span><div style="background:#2a9d8f;height:1em;width:70.7%;border-radius:3px"></div><span>70.7</span></div>
+<div class="row"><span>t61</span><div style="background:#2a9d8f;height:1em;width:70.1%;border-radius:3px"></div><span>70.1</span></div>
+<div class="row"><span>t62</span><div style="background:#2a9d8f;height:1em;width:100.0%;border-radius:3px"></div><span>100.0</span></div>
+</div>
+<div class="metric"><b>Page cache resident (MB)</b>
+<div class="row"><span>t0</span><div style="background:#6a4c93;height:1em;width:37.8%;border-radius:3px"></div><span>21131</span></div>
+<div class="row"><span>t1</span><div style="background:#6a4c93;height:1em;width:39.0%;border-radius:3px"></div><span>21813</span></div>
+<div class="row"><span>t2</span><div style="background:#6a4c93;height:1em;width:40.2%;border-radius:3px"></div><span>22476</span></div>
+<div class="row"><span>t3</span><div style="background:#6a4c93;height:1em;width:41.4%;border-radius:3px"></div><span>23132</span></div>
+<div class="row"><span>t4</span><div style="background:#6a4c93;height:1em;width:42.5%;border-radius:3px"></div><span>23743</span></div>
+<div class="row"><span>t5</span><div style="background:#6a4c93;height:1em;width:44.5%;border-radius:3px"></div><span>24875</span></div>
+<div class="row"><span>t6</span><div style="background:#6a4c93;height:1em;width:46.4%;border-radius:3px"></div><span>25915</span></div>
+<div class="row"><span>t7</span><div style="background:#6a4c93;height:1em;width:48.6%;border-radius:3px"></div><span>27131</span></div>
+<div class="row"><span>t8</span><div style="background:#6a4c93;height:1em;width:51.1%;border-radius:3px"></div><span>28553</span></div>
+<div class="row"><span>t9</span><div style="background:#6a4c93;height:1em;width:53.6%;border-radius:3px"></div><span>29952</span></div>
+<div class="row"><span>t10</span><div style="background:#6a4c93;height:1em;width:56.9%;border-radius:3px"></div><span>31800</span></div>
+<div class="row"><span>t11</span><div style="background:#6a4c93;height:1em;width:60.2%;border-radius:3px"></div><span>33644</span></div>
+<div class="row"><span>t12</span><div style="background:#6a4c93;height:1em;width:63.8%;border-radius:3px"></div><span>35646</span></div>
+<div class="row"><span>t13</span><div style="background:#6a4c93;height:1em;width:67.7%;border-radius:3px"></div><span>37829</span></div>
+<div class="row"><span>t14</span><div style="background:#6a4c93;height:1em;width:71.5%;border-radius:3px"></div><span>39963</span></div>
+<div class="row"><span>t15</span><div style="background:#6a4c93;height:1em;width:76.4%;border-radius:3px"></div><span>42670</span></div>
+<div class="row"><span>t16</span><div style="background:#6a4c93;height:1em;width:81.2%;border-radius:3px"></div><span>45366</span></div>
+<div class="row"><span>t17</span><div style="background:#6a4c93;height:1em;width:86.3%;border-radius:3px"></div><span>48203</span></div>
+<div class="row"><span>t18</span><div style="background:#6a4c93;height:1em;width:91.5%;border-radius:3px"></div><span>51150</span></div>
+<div class="row"><span>t19</span><div style="background:#6a4c93;height:1em;width:96.7%;border-radius:3px"></div><span>54036</span></div>
+<div class="row"><span>t20</span><div style="background:#6a4c93;height:1em;width:100.0%;border-radius:3px"></div><span>55876</span></div>
+<div class="row"><span>t21</span><div style="background:#6a4c93;height:1em;width:99.3%;border-radius:3px"></div><span>55486</span></div>
+<div class="row"><span>t22</span><div style="background:#6a4c93;height:1em;width:99.6%;border-radius:3px"></div><span>55656</span></div>
+<div class="row"><span>t23</span><div style="background:#6a4c93;height:1em;width:98.6%;border-radius:3px"></div><span>55093</span></div>
+<div class="row"><span>t24</span><div style="background:#6a4c93;height:1em;width:98.0%;border-radius:3px"></div><span>54742</span></div>
+<div class="row"><span>t25</span><div style="background:#6a4c93;height:1em;width:97.7%;border-radius:3px"></div><span>54611</span></div>
+<div class="row"><span>t26</span><div style="background:#6a4c93;height:1em;width:96.8%;border-radius:3px"></div><span>54073</span></div>
+<div class="row"><span>t27</span><div style="background:#6a4c93;height:1em;width:95.9%;border-radius:3px"></div><span>53578</span></div>
+<div class="row"><span>t28</span><div style="background:#6a4c93;height:1em;width:94.6%;border-radius:3px"></div><span>52850</span></div>
+<div class="row"><span>t29</span><div style="background:#6a4c93;height:1em;width:93.6%;border-radius:3px"></div><span>52283</span></div>
+<div class="row"><span>t30</span><div style="background:#6a4c93;height:1em;width:91.4%;border-radius:3px"></div><span>51072</span></div>
+<div class="row"><span>t31</span><div style="background:#6a4c93;height:1em;width:90.4%;border-radius:3px"></div><span>50533</span></div>
+<div class="row"><span>t32</span><div style="background:#6a4c93;height:1em;width:88.4%;border-radius:3px"></div><span>49400</span></div>
+<div class="row"><span>t33</span><div style="background:#6a4c93;height:1em;width:87.5%;border-radius:3px"></div><span>48918</span></div>
+<div class="row"><span>t34</span><div style="background:#6a4c93;height:1em;width:84.8%;border-radius:3px"></div><span>47370</span></div>
+<div class="row"><span>t35</span><div style="background:#6a4c93;height:1em;width:83.9%;border-radius:3px"></div><span>46886</span></div>
+<div class="row"><span>t36</span><div style="background:#6a4c93;height:1em;width:82.6%;border-radius:3px"></div><span>46146</span></div>
+<div class="row"><span>t37</span><div style="background:#6a4c93;height:1em;width:81.8%;border-radius:3px"></div><span>45683</span></div>
+<div class="row"><span>t38</span><div style="background:#6a4c93;height:1em;width:83.5%;border-radius:3px"></div><span>46682</span></div>
+<div class="row"><span>t39</span><div style="background:#6a4c93;height:1em;width:84.3%;border-radius:3px"></div><span>47078</span></div>
+<div class="row"><span>t40</span><div style="background:#6a4c93;height:1em;width:83.5%;border-radius:3px"></div><span>46633</span></div>
+<div class="row"><span>t41</span><div style="background:#6a4c93;height:1em;width:83.3%;border-radius:3px"></div><span>46550</span></div>
+<div class="row"><span>t42</span><div style="background:#6a4c93;height:1em;width:83.6%;border-radius:3px"></div><span>46721</span></div>
+<div class="row"><span>t43</span><div style="background:#6a4c93;height:1em;width:82.8%;border-radius:3px"></div><span>46279</span></div>
+<div class="row"><span>t44</span><div style="background:#6a4c93;height:1em;width:82.9%;border-radius:3px"></div><span>46329</span></div>
+<div class="row"><span>t45</span><div style="background:#6a4c93;height:1em;width:82.3%;border-radius:3px"></div><span>45966</span></div>
+<div class="row"><span>t46</span><div style="background:#6a4c93;height:1em;width:82.5%;border-radius:3px"></div><span>46103</span></div>
+<div class="row"><span>t47</span><div style="background:#6a4c93;height:1em;width:81.8%;border-radius:3px"></div><span>45727</span></div>
+<div class="row"><span>t48</span><div style="background:#6a4c93;height:1em;width:81.6%;border-radius:3px"></div><span>45602</span></div>
+<div class="row"><span>t49</span><div style="background:#6a4c93;height:1em;width:80.1%;border-radius:3px"></div><span>44740</span></div>
+<div class="row"><span>t50</span><div style="background:#6a4c93;height:1em;width:79.2%;border-radius:3px"></div><span>44258</span></div>
+<div class="row"><span>t51</span><div style="background:#6a4c93;height:1em;width:78.7%;border-radius:3px"></div><span>43969</span></div>
+<div class="row"><span>t52</span><div style="background:#6a4c93;height:1em;width:77.8%;border-radius:3px"></div><span>43463</span></div>
+<div class="row"><span>t53</span><div style="background:#6a4c93;height:1em;width:76.9%;border-radius:3px"></div><span>42980</span></div>
+<div class="row"><span>t54</span><div style="background:#6a4c93;height:1em;width:76.0%;border-radius:3px"></div><span>42444</span></div>
+<div class="row"><span>t55</span><div style="background:#6a4c93;height:1em;width:75.8%;border-radius:3px"></div><span>42371</span></div>
+<div class="row"><span>t56</span><div style="background:#6a4c93;height:1em;width:74.9%;border-radius:3px"></div><span>41866</span></div>
+<div class="row"><span>t57</span><div style="background:#6a4c93;height:1em;width:74.1%;border-radius:3px"></div><span>41420</span></div>
+<div class="row"><span>t58</span><div style="background:#6a4c93;height:1em;width:73.6%;border-radius:3px"></div><span>41109</span></div>
+<div class="row"><span>t59</span><div style="background:#6a4c93;height:1em;width:72.7%;border-radius:3px"></div><span>40637</span></div>
+<div class="row"><span>t60</span><div style="background:#6a4c93;height:1em;width:72.7%;border-radius:3px"></div><span>40624</span></div>
+<div class="row"><span>t61</span><div style="background:#6a4c93;height:1em;width:73.6%;border-radius:3px"></div><span>41100</span></div>
+<div class="row"><span>t62</span><div style="background:#6a4c93;height:1em;width:73.6%;border-radius:3px"></div><span>41100</span></div>
+</div>
+<div class="note"><b>Caveats.</b><ul><li>Page-cache hit rate is the reliable metric here (cachestat mm counters, cross-checked by the VFS-vs-device IOPS delta). The byte-level VFS-vs-device figure is confounded by 16&nbsp;KB-page over-fetch and is not shown.</li><li>At this throughput, per-op eBPF read counts undercount (high-frequency tracepoint loss); use the cold isolated tool (cold_readbench.py) for exact per-request IO (2 reads, 72&nbsp;KB/req). Ratios (hit rate) are robust; absolute per-op eBPF counts at scale are lower bounds.</li><li>disk_access_mode=standard (buffered index), chunk cache off, Zstd@8 64&nbsp;KB chunks, LCS, data on raw XFS (/dev/nvme0n1p8). Working set ~188&nbsp;GB &gt; 62&nbsp;GB RAM.</li></ul></div>
+</body></html>

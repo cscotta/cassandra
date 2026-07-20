@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Fixed-Output Block-Aligned Compression: Design and Evaluation</title>
+<style>
+body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:1080px;margin:2rem auto;padding:0 1rem;line-height:1.6;color:#1a1a1a}
+h1{border-bottom:2px solid #ccc;padding-bottom:.3em}
+h2{margin-top:2em;border-bottom:1px solid #eee;padding-bottom:.2em}
+h3{margin-top:1.3em;color:#333}
+table{border-collapse:collapse;width:100%;margin:1em 0}th,td{border:1px solid #ccc;padding:.4em .55em;text-align:right;font-size:.92em}
+th:first-child,td:first-child{text-align:left}tr:nth-child(even){background:#fafafa}
+.base{background:#eef3f8}.win{color:#0a7d28;font-weight:600}.cost{color:#b04a00;font-weight:600}.neu{color:#666}
+.cap{color:#666;font-size:.9em}
+.note{background:#f7f7f9;border:1px solid #e0e0e0;border-radius:6px;padding:.6em 1em;font-size:.92em}
+.rec{background:#eef7ee;border:1px solid #cfe6cf;border-radius:6px;padding:.6em 1em}
+code{background:#f0f0f0;padding:.1em .3em;border-radius:3px}
+ol,ul{padding-left:1.4em}
+.toc a{text-decoration:none}
+</style></head><body>
+
+<h1>Fixed-Output Block-Aligned Compression for Apache Cassandra</h1>
+<p class="cap">Design and evaluation of a block-aligned compressed-chunk mode for the SSTable read path, branch
+<code>cscotta/io_opto</code>. This document covers the objective, the design, the benchmark methodology, the
+evaluation criteria, and the measured results.</p>
+
+<div class="toc note">
+<b>Contents</b>
+<ol>
+<li>Objective</li>
+<li>Problem statement</li>
+<li>Goals and non-goals</li>
+<li>Design and approach</li>
+<li>Instrumentation and benchmark methodology</li>
+<li>Evaluation criteria</li>
+<li>Results</li>
+<li>Findings</li>
+<li>Recommendation</li>
+<li>Correctness and verification</li>
+<li>Caveats and limitations</li>
+<li>Remaining work</li>
+</ol>
+</div>
+
+<h2>1. Objective</h2>
+<p>Reduce the device IO a single-partition read spends on the compressed data file, and measure that reduction
+with per-read instrumentation. A compressed chunk in Cassandra lands at an arbitrary byte offset in
+<code>Data.db</code>. When the chunk is smaller than or unaligned to the device or page granularity, a read of
+that chunk pulls extra bytes off the device. The objective is to make each compressed chunk occupy a fixed,
+block-aligned on-disk size so a chunk read is one aligned device transfer, without an increase in on-disk size
+and without breaking the SSTable format or the streaming protocol.</p>
+
+<h2>2. Problem statement</h2>
+<p>Two forms of over-fetch appear on the read path.</p>
+<ol>
+<li>Alignment straddle. A compressed chunk that is not aligned to the page size spans two pages. A buffered read
+of that chunk faults both pages. On the 16 KB page kernel used for this work, a 16 KB compressed chunk at an
+unaligned offset materializes two pages.</li>
+<li>Chunk granularity. To return one small value the reader must read and decompress the whole chunk it lives in.
+A 64 KB uncompressed chunk holds about twenty 3.1 KB values, so a read of one value pulls the entire chunk.</li>
+</ol>
+<p>The default compression stores a fixed uncompressed input size per chunk and a variable compressed output
+size, so the compressed offset of a chunk is not aligned to any device boundary. The direct and io_uring readers
+already align the compressed offset down and over-read the delta for this reason. The design target is to remove
+the delta by fixing the on-disk chunk size.</p>
+
+<h2>3. Goals and non-goals</h2>
+<h3>Goals</h3>
+<ul>
+<li>Each compressed chunk occupies a fixed on-disk size S that is a whole number of device blocks, so a chunk
+read is one aligned transfer with zero over-read delta.</li>
+<li>No round-up padding scheme. Pack a variable amount of input into each chunk until the compressed output fills
+S, leaving only a small sub-block tail.</li>
+<li>On-disk overhead stays low relative to the default compression.</li>
+<li>Write-time recompression stays close to one compression per chunk.</li>
+<li>The mode is opt-in per table and is off by default.</li>
+</ul>
+<h3>Non-goals and constraints</h3>
+<ul>
+<li>No SSTable format version bump. Legacy SSTables stay byte-identical and the mode is self-describing.</li>
+<li>No messaging or streaming protocol version bump. Peers that do not understand the mode reject it rather than
+corrupt data.</li>
+<li>The default fixed-input compression path is unchanged.</li>
+</ul>
+
+<h2>4. Design and approach</h2>
+
+<h3>4.1 On-disk format</h3>
+<p>Every chunk occupies exactly S bytes on disk, aligned to a block boundary. The block layout is a 4-byte
+payload length, the compressed payload, a 4-byte CRC32 over the payload, then zero padding to S. The framing is
+8 bytes per block. S is configured by the compression option <code>compressed_chunk_length_in_kb</code> and must
+be a multiple of the 4 KB alignment floor. A second option, <code>max_uncompressed_chunk_length_in_kb</code>,
+caps the uncompressed input packed into one chunk so the decompression buffer is bounded.</p>
+
+<h3>4.2 Metadata and self-describing mode</h3>
+<p>Because the compressed size is now fixed, the compressed offset of chunk i is implicit at i times S. The
+metadata therefore stores the uncompressed cumulative offset table instead of the compressed offset table, which
+is comparable in size. <code>chunkFor(position)</code> binary-searches the uncompressed offsets rather than
+dividing by a fixed chunk length. The mode is recorded as reserved marker keys in the
+<code>-CompressionInfo.db</code> option map, so an SSTable declares its own mode and no format version changes.
+The messaging serializer carries the same markers, so a streamed SSTable is self-describing on the receiver.</p>
+
+<h3>4.3 Pack-to-fill compressor API</h3>
+<p>A new method <code>ICompressor.compressBounded(input, output, maxOutputLen)</code> compresses a prefix of the
+input so the output fills close to <code>maxOutputLen</code>, and returns the number of input bytes consumed. The
+default implementation compresses a candidate prefix directly into the output, accepts the first prefix that
+fits, and grows the prefix only when the output is under-filled. For incompressible data this is one compression
+per chunk. For compressible data it grows across a few trials.</p>
+
+<h3>4.4 Zstd streaming override</h3>
+<p>The default multi-trial path recompresses overlapping prefixes from scratch, which costs three to six full
+compressions per chunk on compressible data. <code>ZstdCompressorBase</code> overrides
+<code>compressBounded</code> with a streaming implementation. It feeds input into one Zstd frame through
+<code>ZstdCompressCtx.compressDirectByteBufferStream</code>, flushes after each feed to observe how full the
+output is, then closes the frame with an end directive. This packs a chunk in roughly one forward pass over the
+consumed input. The dictionary-aware subclass loads the trained dictionary into the same streaming context.</p>
+<p>A streaming frame built incrementally does not know its total size when the header is written, so it carries no
+content-size field. The one-shot Zstd decompress path needs an exactly sized destination in that case. The reader
+was changed to size the decompression buffer to each chunk's exact uncompressed length, taken from the metadata
+offset table through <code>CompressionMetadata.fixedOutputUncompressedLength</code>. This is correct for frames
+that do carry a size as well.</p>
+
+<h3>4.5 Packer tightening</h3>
+<p>Two write-path constants govern padding. The accept threshold decides how full a block must be before the
+packer stops growing, and the write buffer size governs how often a flush emits a short trailing block. Raising
+the accept threshold from 15/16 to 63/64 and the flush buffer from 2 MiB to 16 MiB raised the average block fill
+from 93.6% to 98.6% and cut padding from 6.4% to 1.45%, with no change to the on-disk format and no effect on
+reads. These are the two padding sources that appeared when the compressible data was measured.</p>
+
+<h3>4.6 Reader and rebufferer</h3>
+<p>The reader reads exactly S bytes at i times S, which is one aligned device transfer with a zero over-read
+delta on the direct and io_uring paths. Decompression reads the payload length from the block header, verifies
+the CRC over the payload, and decompresses into a buffer sized to the chunk's exact uncompressed length. A
+variable-chunk rebufferer derives the chunk base from <code>chunkFor</code> rather than masking by a power of
+two, and sizes its buffer to the observed maximum uncompressed chunk length rather than the configured cap.</p>
+
+<h3>4.7 Streaming and repair receiver</h3>
+<p>Fixed-output SSTables stream and repair. The wire <code>CompressionInfo</code> carries the per-chunk
+uncompressed offsets and the mode markers. The receiver parses the fixed block layout, verifies the embedded
+CRC, and places chunks by the streamed uncompressed offsets rather than a fixed stride. A peer that does not
+understand the mode rejects the unknown compressor options rather than misplacing chunks.</p>
+
+<h2>5. Instrumentation and benchmark methodology</h2>
+<p>The read path was instrumented so a benchmark can attribute IO at four levels. The measurement machine is a
+single node with an XFS data disk on an NVMe partition, a 16 GB heap, and buffered reads on a 16 KB page kernel.
+The workload is 64 M single-row partitions, about 203 GB logical, roughly 0.45-compressible under Zstd level 8,
+LCS, with key, row, and chunk caches off.</p>
+<table>
+<tr><th>level</th><th>source</th><th>what it measures</th></tr>
+<tr><td>device</td><td>block_io.bt eBPF probe</td><td>device read completions and bytes, filtered to the data partition</td></tr>
+<tr><td>VFS</td><td>vfs_reads.bt eBPF probe</td><td>pread syscall count and bytes for the server process</td></tr>
+<tr><td>page cache</td><td>mm_cache.bt eBPF probe and cachestat</td><td>per-component and system-wide cache hit rate</td></tr>
+<tr><td>server</td><td>system_views per-read histograms</td><td>read_iops, bytes_read, files_touched, bytes_decompressed per read command</td></tr>
+<tr><td>server</td><td>io_operations log</td><td>per-operation Data.db and Index.db read split</td></tr>
+<tr><td>machine</td><td>mpstat and iostat</td><td>CPU busy, user, system, iowait, idle, and device utilization</td></tr>
+</table>
+<p>The server histograms require the node to start with <code>io_tracking.enabled</code> and
+<code>set_sep_thread_name</code>. The counter <code>read_iops</code> is recorded in
+<code>ReadIOContext.physicalReadOps</code> on every <code>ChannelProxy.read</code>, so it counts pread syscalls
+per read command and includes reads served from the page cache. It is not the device read count.</p>
+<p>Each arm runs three phases. A cold phase issues isolated reads with the page cache dropped before each. A warm
+SLO phase runs at 32 threads under an adaptive 50 ms p99 latency target. A warm saturation phase runs at 64
+threads with a fixed 140 k offered rate to drive the system past its knee. The saturation phase exists because
+the SLO target throttles offered load and leaves CPU and device utilization far below full, which understated the
+achievable throughput in earlier runs. Rewrites between arms run with <code>upgradesstables -j 0</code> across
+all 10 compaction threads.</p>
+
+<h2>6. Evaluation criteria</h2>
+<ul>
+<li>On-disk compression ratio, live space, and average block fill.</li>
+<li>Device bytes per read, cold per request and warm per operation. This is the primary target.</li>
+<li>Per-read counts and bytes at the server level, reported as full p50, p99, and max distributions.</li>
+<li>Warm throughput, error rate, and read latency under both the SLO target and saturation.</li>
+<li>CPU busy and iowait, and device utilization, to identify the bottleneck.</li>
+<li>Rewrite wall time as a one-time conversion cost.</li>
+<li>Read correctness at scale and unit-level round-trip correctness.</li>
+</ul>
+
+<h2>7. Results</h2>
+<p>All figures are from the final fully-instrumented sweep on the compressible dataset. The baseline is legacy
+64 KB compression at ratio 0.450.</p>
+
+<h3>7.1 On-disk</h3>
+<table>
+<tr><th>arm</th><th>ratio</th><th>vs legacy</th><th>block fill</th><th>rewrite time</th></tr>
+<tr class="base"><td>legacy 64 KB</td><td>0.450</td><td>—</td><td>n/a</td><td>1.3 min</td></tr>
+<tr><td>fixed-output 16 KB</td><td>0.484</td><td class="cost">+7.6%</td><td>98.58%</td><td>5.8 min</td></tr>
+<tr><td>fixed-output 32 KB</td><td>0.453</td><td class="neu">+0.7%</td><td>98.65%</td><td>5.6 min</td></tr>
+<tr><td>fixed-output 48 KB</td><td>0.442</td><td class="win">−1.8%</td><td>99.02%</td><td>4.3 min</td></tr>
+<tr><td>fixed-output 64 KB</td><td>0.438</td><td class="win">−2.7%</td><td>99.12%</td><td>5.5 min</td></tr>
+</table>
+
+<h3>7.2 Device bytes per read</h3>
+<p>This is the primary result. It is monotonic in both warm modes. The curve crosses legacy between S=48 and
+S=64, so a fixed 64 KB block over-fetches more than legacy's roughly 29 KB compressed chunk.</p>
+<table>
+<tr><th>device KB/op</th><th>legacy</th><th>fo-16</th><th>fo-32</th><th>fo-48</th><th>fo-64</th></tr>
+<tr><td>SLO</td><td class="base">25.9</td><td class="win">11.0 (−57%)</td><td class="win">17.6 (−32%)</td><td class="win">24.4 (−6%)</td><td class="cost">30.8 (+19%)</td></tr>
+<tr><td>SAT</td><td class="base">13.2</td><td class="win">5.5 (−58%)</td><td class="win">9.0 (−32%)</td><td class="win">12.3 (−7%)</td><td class="cost">15.7 (+19%)</td></tr>
+</table>
+
+<h3>7.3 Per-query read count and bytes</h3>
+<p>The read-op count does not move with chunk size. Server <code>read_iops</code> and
+<code>files_touched</code> are flat across arms, while <code>bytes_read</code> rises with S. This is measured
+per arm under a warm read load.</p>
+<table>
+<tr><th>arm</th><th>read_iops p50/p99/max</th><th>files_touched p50/p99/max</th><th>bytes_read p50/p99/max</th></tr>
+<tr class="base"><td>legacy 64</td><td>2 / 5 / 10</td><td>2 / 3 / 5</td><td>42.5 / 73.5 / 127 KB</td></tr>
+<tr><td>fo-16</td><td>2 / 5 / 10</td><td>2 / 3 / 5</td><td>24.6 / 51.0 / 106 KB</td></tr>
+<tr><td>fo-32</td><td>2 / 5 / 10</td><td>2 / 3 / 5</td><td>35.4 / 88.1 / 127 KB</td></tr>
+<tr><td>fo-48</td><td>2 / 5 / 8</td><td>2 / 3 / 5</td><td>42.5 / 127 / 152 KB</td></tr>
+<tr><td>fo-64</td><td>2 / 5 / 10</td><td>2 / 3 / 5</td><td>51.0 / 152 / 219 KB</td></tr>
+</table>
+
+<h3>7.4 Warm throughput and machine utilization</h3>
+<p>Throughput is limited by CPU on this machine and is equal across arms within noise. The client and server
+share 10 cores. Under saturation the device is about half utilized while CPU is near full, so the byte savings
+do not convert to throughput here. They convert to headroom. The saturation error rate rises with chunk size.</p>
+<table>
+<tr><th>arm</th><th>SLO ops/s</th><th>SAT ops/s</th><th>SAT errors</th><th>SAT CPU busy / iowait</th><th>SAT device %util</th></tr>
+<tr class="base"><td>legacy 64</td><td>61,627</td><td>109,672</td><td>1.48%</td><td>93.9 / 8.1</td><td>50.8</td></tr>
+<tr><td>fo-16</td><td>57,429</td><td>111,833</td><td class="win">0.00%</td><td>93.9 / 9.1</td><td>52.8</td></tr>
+<tr><td>fo-32</td><td>57,384</td><td>110,596</td><td>0.69%</td><td>94.0 / 7.7</td><td>52.3</td></tr>
+<tr><td>fo-48</td><td>52,430</td><td>107,535</td><td class="cost">3.11%</td><td>94.7 / 8.2</td><td>47.9</td></tr>
+<tr><td>fo-64</td><td class="cost">69,157 overloaded</td><td>104,169</td><td class="cost">6.18%</td><td>95.6 / 6.6</td><td>47.4</td></tr>
+</table>
+<p class="cap">The fo-64 SLO run overloaded at 4.84% errors and a p50 of 2936 ms, so its throughput is
+queue-inflated rather than sustainable capacity. It is marked and excluded from SLO comparison.</p>
+
+<h2>8. Findings</h2>
+<p>The win is bytes per read, not read-op count. Device reads per request near 2 to 3, the Data.db 1 plus
+Index.db 2 split, and server <code>read_iops</code> at p50 2 are all independent of chunk size. Every arm issues
+the same handful of reads. Fixed-output changes the bytes each read moves. Device bytes per operation fall 57% at
+S=16 under load.</p>
+<p>The on-disk cost and the read-byte win trade off through S. Smaller S reads fewer bytes and costs more on disk.
+Larger S costs less on disk and reads more bytes. The on-disk cost comes from two sources that were separated by
+measurement. Padding was the packer's accept threshold and per-flush short blocks, which the tightening removed.
+The remaining cost at small S is compression context, since a smaller chunk gives Zstd a smaller window.</p>
+<p>Throughput on this machine is CPU-bound and equal across arms, because the client and server share the cores
+and the device stays about half utilized. On a device-bound machine the byte savings would show as throughput.
+Here they show as headroom, visible in the saturation error rate that stays at zero for the smaller-S arms and
+rises for legacy and the larger-S arms.</p>
+
+<h2>9. Recommendation</h2>
+<div class="rec">
+<p>S=32 is the balanced default. It costs 0.7% more on disk and cuts device bytes per operation by 32%, with a
+lower error rate than legacy under load. S=16 is the choice when the read-byte reduction is the priority, at 57%
+fewer device bytes and 7.6% more on disk. Pairing S=16 with a trained Zstd dictionary would recover most of that
+on-disk cost. S=48 is a point that beats legacy on both storage and device at once, 1.8% smaller on disk and 6 to
+7% fewer device bytes, with a modest read win. S=64 should be avoided for point reads, since it over-fetches 19%
+more than legacy and has the worst error profile under load.</p>
+</div>
+
+<h2>10. Correctness and verification</h2>
+<ul>
+<li>Unit tests pass for the fixed-output write and read round trip across incompressible, compressible, and
+sub-chunk sizes, for the streaming compressBounded contract, and for the streaming receiver. The Zstd,
+dictionary, and general compressor suites pass.</li>
+<li>A deep review of the write path, metadata, and reader was run and its findings were addressed.</li>
+<li>Reads return correct data end to end at 200 GB scale across the key range, on the standard buffered path and
+on the io_uring direct path.</li>
+<li>The benchmark results were checked by an adversarial verification pass that cross-checked every metric against
+the raw traces, flagged overloaded runs, and confirmed which metrics are robust.</li>
+</ul>
+
+<h2>11. Caveats and limitations</h2>
+<ul>
+<li>The typical per-query read count is 2, measured as <code>read_iops</code> p50. The tail reaches 8 to 10 for
+keys spread across sstable generations or keys landing far from a Summary sample.</li>
+<li>The <code>bytes_decompressed</code> histogram p50 is a reservoir or recording artifact. It reads 0 for some
+arms including legacy under warm load, so it is not trusted and is not fixed-output-specific.</li>
+<li>Cold device bytes per request are read-ahead-inflated and quantized to 16 KB pages. The clean cold signal is
+VFS bytes per request, which equals S plus 16.</li>
+<li>Throughput and latency are CPU-bound and run-variable. Legacy SLO measured 61.6 k in the final run and 52.4 k
+in an aborted earlier run at the same config.</li>
+<li>The streaming override reduces recompression to about one pass per chunk but did not reduce rewrite wall time,
+which is dominated by per-chunk context setup and total compression work.</li>
+<li>The chunk_cache per-read histograms are unwired and the chunk cache is off in this configuration, so they read
+0 and are excluded.</li>
+</ul>
+
+<h2>12. Remaining work</h2>
+<ul>
+<li>Trained Zstd dictionary support for fixed-output, to recover the small-S on-disk cost. The compress and
+decompress legs compose today. The training input stage needs the SSTableChunkSampler to read the fixed-output
+block layout.</li>
+<li>Resolve the <code>bytes_decompressed</code> recording so the metric is usable.</li>
+<li>Phase 4 residual hardening. The mmap reader falls back to the standard reader for fixed-output rather than
+using an mmap stride, resetAndTruncate across a flush boundary is unsupported, and a repair and bootstrap dtest
+remains to be run.</li>
+<li>Confirm the throughput win on a device-bound machine, where the byte savings would raise throughput rather
+than headroom.</li>
+</ul>
+
+</body></html>

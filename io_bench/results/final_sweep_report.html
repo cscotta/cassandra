@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Final sweep: fixed-output vs legacy compression</title>
+<style>
+body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:1180px;margin:2rem auto;padding:0 1rem;line-height:1.55;color:#1a1a1a}
+h1{border-bottom:2px solid #ccc;padding-bottom:.3em}h2{margin-top:1.8em;border-bottom:1px solid #eee}h3{margin-top:1.1em;color:#333}
+table{border-collapse:collapse;width:100%;margin:1em 0}th,td{border:1px solid #ccc;padding:.35em .5em;text-align:right;font-size:.9em}
+th:first-child,td:first-child{text-align:left}tr:nth-child(even){background:#fafafa}
+.base{background:#eef3f8}.win{color:#0a7d28;font-weight:600}.cost{color:#b04a00;font-weight:600}.neu{color:#666}
+.cap{color:#666;font-size:.88em}
+.note{background:#f7f7f9;border:1px solid #e0e0e0;border-radius:6px;padding:.5em 1em;font-size:.9em}
+.warn{background:#fdf6ec;border:1px solid #e6d8b8;border-radius:6px;padding:.5em 1em;font-size:.9em}
+.rec{background:#eef7ee;border:1px solid #cfe6cf;border-radius:6px;padding:.6em 1em}
+code{background:#f0f0f0;padding:.1em .3em;border-radius:3px}
+</style></head><body>
+
+<h1>Final sweep: legacy vs fixed-output 16, 32, 48, 64 KB</h1>
+<p class="cap">One dataset, one build, one node. The table is <code>iouring_bench.readbench</code>: about 203 GB
+logical, 64 M single-row partitions, roughly 0.45-compressible under Zstd level 8, BIG format, LCS, XFS on
+<code>/dev/nvme0n1p8</code>. Read path is <code>disk_access_mode=standard</code>, buffered, on a 16 KB page
+kernel. Key, row, and chunk caches are off; heap is 16 GB; autocompaction is off. The node runs with
+<code>io_tracking.enabled</code> and <code>set_sep_thread_name</code>, so the per-read server histograms populate.
+Fixed-output uses the Zstd streaming packer with tight fill. Rewrites ran with <code>upgradesstables -j 0</code>
+across all 10 compaction threads. Each arm has two warm modes. SLO uses <code>--maxrlat 50</code> at 32 threads
+and reports throughput at a latency target. SAT uses a fixed 140 k offered rate at 64 threads and drives the
+system to saturation. Every value below is the measured figure from the raw traces. Findings were verified by an
+adversarial review pass.</p>
+
+<h2>Wins by arm</h2>
+<p>Each arm has a distinct advantage over the legacy 64 KB baseline. The two middle arms are the strongest
+practical choices and are easy to miss in the detail tables, so they are called out here.</p>
+<table>
+<tr><th>arm</th><th>headline win</th><th>on-disk vs legacy</th><th>device bytes/read vs legacy</th><th>trade</th></tr>
+<tr><td>fo-16</td><td>Largest read-byte reduction, best cache residency, cleanest under load</td><td class="cost">+7.6%</td><td class="win">−57% SLO, −58% SAT</td><td>costs the most on disk</td></tr>
+<tr><td>fo-32</td><td>Meaningful read-byte cut at almost no storage cost, and lower error rate than legacy under load</td><td class="neu">+0.7%</td><td class="win">−32% both modes</td><td>balanced default</td></tr>
+<tr><td>fo-48</td><td>Smaller on disk than legacy and still fewer device bytes, a win on both axes at once</td><td class="win">−1.8%</td><td class="win">−6% SLO, −7% SAT</td><td>higher error rate only at extreme saturation</td></tr>
+<tr><td>fo-64</td><td>Smallest on disk</td><td class="win">−2.7%</td><td class="cost">+19% both modes</td><td>over-fetches more than legacy, worst errors</td></tr>
+</table>
+<p>fo-32 improves three things at once for a 0.7% storage cost: device bytes per read fall 32%, the SAT error
+rate drops to 0.69% against legacy's 1.48%, and the page-cache hit rate rises to 78.2% against legacy's 73.3%.
+fo-48 is the only arm that beats legacy on storage and device at the same time. It is 1.8% smaller on disk and
+reads 6 to 7% fewer device bytes, with zero errors at the SLO load. Its higher error rate appears only at the
+deliberate 140 k saturation over-push, not at normal load.</p>
+
+<h2>1. On-disk</h2>
+<p>These are the authoritative <code>tablestats</code> compression ratios, read after the rewrite settled so
+obsolete sstables were already deleted. Overhead falls as S grows because a larger block gives Zstd more context.
+The crossover to within 2% of legacy is near S=30, and S of 48 or more is smaller on disk than legacy. Rewrite is
+a one-time conversion cost.</p>
+<table>
+<tr><th>arm</th><th>compression ratio</th><th>vs legacy</th><th>space (live)</th><th>block fill</th><th>rewrite time</th></tr>
+<tr class="base"><td>legacy 64 KB</td><td>0.450</td><td>—</td><td>91.4 GB</td><td>n/a</td><td>1.3 min</td></tr>
+<tr><td>fixed-output 16 KB</td><td>0.484</td><td class="cost">+7.6%</td><td>98.2 GB</td><td>98.58%</td><td>5.8 min</td></tr>
+<tr><td>fixed-output 32 KB</td><td>0.453</td><td class="cost">+0.7%</td><td>92.1 GB</td><td>98.65%</td><td>5.6 min</td></tr>
+<tr><td>fixed-output 48 KB</td><td>0.442</td><td class="win">−1.8%</td><td>90.0 GB</td><td>99.02%</td><td>4.3 min</td></tr>
+<tr><td>fixed-output 64 KB</td><td>0.438</td><td class="win">−2.7%</td><td>89.5 GB</td><td>99.12%</td><td>5.5 min</td></tr>
+</table>
+
+<h2>2. Cold per read</h2>
+<p>These are isolated single reads with the page cache dropped before each. The cold VFS bytes per request equal
+S plus 16 KB, which is one data block plus one index page, and that figure is clean and monotonic. The cold
+device bytes per request are inflated by kernel read-ahead and quantized to 16 KB pages, so they are noisy at
+n=40 and should be read alongside the VFS figure, not on their own. Data.db reads and Index.db reads are 1 and 2
+on every arm, so the read-op count does not move with S.</p>
+<h3>2a. Read counts and bytes per request</h3>
+<table>
+<tr><th>arm</th><th>device reads/req</th><th>device KB/req</th><th>VFS preads/req</th><th>VFS KB/req</th><th>Data.db reads</th><th>Index.db reads</th></tr>
+<tr class="base"><td>legacy 64</td><td>3.0</td><td>74.0</td><td>3.0</td><td>44.7</td><td>1</td><td>2</td></tr>
+<tr><td>fo-16</td><td>2.5</td><td>40.0</td><td>3.0</td><td>32.0</td><td>1</td><td>2</td></tr>
+<tr><td>fo-32</td><td>2.0</td><td>48.0</td><td>3.0</td><td>48.0</td><td>1</td><td>2</td></tr>
+<tr><td>fo-48</td><td>3.0</td><td>80.0</td><td>3.0</td><td>64.0</td><td>1</td><td>2</td></tr>
+<tr><td>fo-64</td><td>2.0</td><td>80.0</td><td>3.0</td><td>80.0</td><td>1</td><td>2</td></tr>
+</table>
+<h3>2b. Cold server per-read histograms, p50 / p99 / max</h3>
+<p>These come from the system_views per-read histograms captured right after the cold reads. The last two
+columns are pre-existing per-read metrics from <code>tablehistograms</code>. Read latency there is the server
+local read latency, distinct from the client-side HDR latency in the warm tables.</p>
+<table>
+<tr><th>arm</th><th>read_iops</th><th>files_touched</th><th>bytes_read</th><th>bytes_decompressed</th><th>sstables/read p50/p99</th><th>read lat p50/p99 (ms)</th></tr>
+<tr class="base"><td>legacy 64</td><td>3 / 5 / 5</td><td>2 / 4 / 4</td><td>51 / 73 / 73 KB</td><td>73 / 152 / 152 KB</td><td>1 / 1</td><td>1.9 / 2.3</td></tr>
+<tr><td>fo-16</td><td>1 / 4 / 7</td><td>1 / 3 / 5</td><td>8 / 73 / 106 KB</td><td>0 / 152 / 152 KB</td><td>0 / 1</td><td>0.02 / 4.8</td></tr>
+<tr><td>fo-32</td><td>1 / 4 / 7</td><td>1 / 3 / 5</td><td>8 / 51 / 88 KB</td><td>0 / 73 / 88 KB</td><td>0 / 1</td><td>0.02 / 2.8</td></tr>
+<tr><td>fo-48</td><td>1 / 4 / 8</td><td>1 / 3 / 5</td><td>8 / 88 / 127 KB</td><td>0 / 152 / 263 KB</td><td>0 / 1</td><td>0.02 / 4.8</td></tr>
+<tr><td>fo-64</td><td>1 / 4 / 7</td><td>1 / 3 / 5</td><td>8 / 88 / 183 KB</td><td>0 / 127 / 316 KB</td><td>0 / 1</td><td>0.02 / 4.8</td></tr>
+</table>
+
+<h2>3. Per-query IOPS across the sweep</h2>
+<p>This is the metric that caused confusion in an earlier draft. <code>read_iops</code> counts pread syscalls per
+read command. It is recorded in <code>ReadIOContext.physicalReadOps</code>, incremented on every
+<code>ChannelProxy.read</code>. It is not the device read count. The value for one read command is the sum of
+every pread across every sstable the partition touches. For a fully-compacted key that is one buffered
+index-scan pread plus one data-chunk pread, so the typical value is 2. The tail reaches 8 to 10 for keys matched
+in several live sstable generations or keys landing far from a Summary sample, which lengthens the index scan
+across extra buffer refills. Point reads disable read-ahead, so read-ahead is not a factor here.</p>
+<p>The table below is the per-arm distribution measured under a moderate warm read load, one arm at a time.
+<code>read_iops</code> and <code>files_touched</code> are flat across all arms, which is the point: the read-op
+count does not move with S. <code>bytes_read</code> rises with S, which is the bytes-per-read effect showing up
+at the server-histogram level, matching the device-byte curve in section 6.</p>
+<table>
+<tr><th rowspan="2">arm</th><th colspan="3">read_iops</th><th colspan="3">files_touched</th><th colspan="3">bytes_read (KB)</th><th colspan="3">bytes_decompressed (KB)</th></tr>
+<tr><th>p50</th><th>p99</th><th>max</th><th>p50</th><th>p99</th><th>max</th><th>p50</th><th>p99</th><th>max</th><th>p50</th><th>p99</th><th>max</th></tr>
+<tr class="base"><td>legacy 64</td><td>2</td><td>5</td><td>10</td><td>2</td><td>3</td><td>5</td><td>42.5</td><td>73.5</td><td>127</td><td>0</td><td>152</td><td>152</td></tr>
+<tr><td>fo-16</td><td>2</td><td>5</td><td>10</td><td>2</td><td>3</td><td>5</td><td>24.6</td><td>51.0</td><td>106</td><td>9.9</td><td>73.5</td><td>152</td></tr>
+<tr><td>fo-32</td><td>2</td><td>5</td><td>10</td><td>2</td><td>3</td><td>5</td><td>35.4</td><td>88.1</td><td>127</td><td>35.4</td><td>152</td><td>152</td></tr>
+<tr><td>fo-48</td><td>2</td><td>5</td><td>8</td><td>2</td><td>3</td><td>5</td><td>42.5</td><td>127</td><td>152</td><td>0</td><td>263</td><td>263</td></tr>
+<tr><td>fo-64</td><td>2</td><td>5</td><td>10</td><td>2</td><td>3</td><td>5</td><td>51.0</td><td>152</td><td>219</td><td>0</td><td>316</td><td>316</td></tr>
+</table>
+<p class="cap">Each row is a 35 s warm burst at about 60 k reads per second, over 200 M cumulative samples. The
+burst dominates the roughly 1028-slot decaying reservoir, so each arm's distribution reflects that arm.</p>
+<p class="warn">The <code>bytes_decompressed</code> p50 is unreliable. It reads 0 for legacy, fo-48, and fo-64,
+but 9.9 KB and 35.4 KB for fo-16 and fo-32, on data whose reads all decompress a chunk. The zero is not
+fixed-output-specific, since legacy shows it too, and it does not track S. Treat this counter's p50 as a
+reservoir or recording artifact, not a real value. Its p99 and max do track S and are usable as a
+relative signal.</p>
+<h3>The same count reconciled across measurement levels</h3>
+<p>The four levels agree that a point read issues about 2 to 3 reads. <code>read_iops</code> is greater than or
+equal to device reads because preads served from the page cache never reach the device.</p>
+<table>
+<tr><th>level</th><th>metric</th><th>typical per query</th><th>meaning</th></tr>
+<tr><td>device, block_io</td><td>device reads / req</td><td>2–3 cold</td><td>physical device IOPS, the figure earlier testing reported as 2</td></tr>
+<tr><td>VFS, vfs_reads</td><td>preads / req</td><td>3 cold</td><td>read syscalls issued to the filesystem</td></tr>
+<tr><td>server, read_iops</td><td>pread syscalls / query</td><td>p50 2, p99 5, max 8–10</td><td>counts cache-served preads as well as device reads</td></tr>
+<tr><td>io_operations log</td><td>Data.db / Index.db reads</td><td>1 / 2</td><td>one data block plus the index summary-to-index scan</td></tr>
+</table>
+
+<h2>4. Warm under SLO</h2>
+<p>Adaptive <code>--maxrlat 50</code> at 32 threads. Four arms hold the latency target with zero errors and are
+valid SLO-capacity numbers. The fo-64 SLO run is excluded because it overloaded. The limiter lost control on the
+heaviest arm, ran to a p50 of 2936 ms and 4.84% errors, and its 69 k throughput is queue-inflated rather than
+sustainable capacity, which is closer to 52 k. Server <code>read_iops</code> is shown as the run max here; the
+typical value is 2 per section 3.</p>
+<table>
+<tr><th>arm</th><th>ops/s</th><th>errors</th><th>lat avg/p50/p99 (ms)</th><th>VFS /op · KB/op</th><th>device /op · KB/op</th><th>CPU busy (usr/sys/iowait/idle)</th><th>iostat %util · r/s · rMB/s · await · aqu</th><th>cache · Index.db</th></tr>
+<tr class="base"><td>legacy 64</td><td>61,627</td><td>0%</td><td>2.5 / 0.38 / 48.5</td><td>1.55 · 23.3</td><td>0.46 · 25.9</td><td>92.6 (40.0/26.4/12.1/7.4)</td><td>55.9 · 27913 · 1530 · 0.18 · 5.17</td><td>71.1% · 99.0%</td></tr>
+<tr><td>fo-16</td><td>57,429</td><td>0%</td><td>5.5 / 0.32 / 94.4</td><td>1.58 · 17.0</td><td class="win">0.45 · 11.0</td><td>89.2 (35.8/22.7/17.2/10.8)</td><td>53.5 · 25417 · 606 · 0.14 · 3.91</td><td>84.4% · 98.9%</td></tr>
+<tr><td>fo-32</td><td>57,384</td><td>0%</td><td>32.1 / 0.37 / 358.6</td><td>1.55 · 25.0</td><td class="win">0.41 · 17.6</td><td>89.6 (37.8/23.1/16.0/10.4)</td><td>54.0 · 22868 · 972 · 0.14 · 3.46</td><td>75.4% · 98.9%</td></tr>
+<tr><td>fo-48</td><td>52,430</td><td>0%</td><td>14.9 / 0.35 / 216.0</td><td>1.55 · 32.9</td><td>0.39 · 24.4</td><td>87.9 (36.8/22.4/16.6/12.1)</td><td>53.8 · 20272 · 1226 · 0.15 · 3.04</td><td>66.9% · 98.8%</td></tr>
+<tr><td>fo-64</td><td class="cost">69,157 overloaded</td><td class="cost">4.84%</td><td class="cost">2533 / 2936 / 7114</td><td>1.54 · 40.7</td><td>0.39 · 30.8</td><td>93.6 (50.0/24.1/9.4/6.4)</td><td>54.2 · 26625 · 2050 · 0.16 · 4.40</td><td>64.6% · 99.0%</td></tr>
+</table>
+
+<h2>5. Warm under saturation</h2>
+<p>Fixed 140 k offered rate at 64 threads. This is a deliberate over-push against a completion ceiling near 104
+to 112 k, so throughput is usable as a ceiling but the latency is invalid wherever errors are elevated. Error
+rate rises with chunk size, which is the headroom effect: the smaller-S arms move less device data per op and
+stay clean, while the large-S arms tip into overload.</p>
+<table>
+<tr><th>arm</th><th>ops/s ceiling</th><th>errors</th><th>lat avg/p50/p99 (ms)</th><th>VFS /op · KB/op</th><th>device /op · KB/op</th><th>CPU busy (usr/sys/iowait/idle)</th><th>iostat %util · r/s · rMB/s · await · aqu</th><th>cache · Index.db</th></tr>
+<tr class="base"><td>legacy 64</td><td>109,672</td><td>1.48%</td><td>1261 / 1493 / 3137</td><td>1.08 · 14.2</td><td>0.24 · 13.2</td><td>93.9 (52.0/23.5/8.1/6.1)</td><td>50.8 · 25854 · 1397 · 0.17 · 4.81</td><td>73.3% · 99.3%</td></tr>
+<tr><td>fo-16</td><td>111,833</td><td class="win">0.00%</td><td>36.9 / 1.9 / 254.8</td><td>1.08 · 10.9</td><td class="win">0.23 · 5.5</td><td>93.9 (49.7/24.0/9.1/6.1)</td><td>52.8 · 24949 · 593 · 0.14 · 3.59</td><td>85.9% · 99.3%</td></tr>
+<tr><td>fo-32</td><td>110,596</td><td>0.69%</td><td>814 / 830 / 2550</td><td>1.08 · 15.0</td><td class="win">0.21 · 9.0</td><td>94.0 (52.5/23.9/7.7/6.0)</td><td>52.3 · 23041 · 956 · 0.14 · 3.33</td><td>78.2% · 99.3%</td></tr>
+<tr><td>fo-48</td><td>107,535</td><td class="cost">3.11%</td><td>1753 / 1921 / 4966</td><td>1.07 · 18.8</td><td>0.21 · 12.3</td><td>94.7 (54.4/22.7/8.2/5.3)</td><td>47.9 · 22023 · 1280 · 0.15 · 3.47</td><td>72.2% · 99.3%</td></tr>
+<tr><td>fo-64</td><td>104,169</td><td class="cost">6.18%</td><td>2585 / 2517 / 7852</td><td>1.07 · 23.1</td><td>0.20 · 15.7</td><td>95.6 (56.5/23.2/6.6/4.4)</td><td>47.4 · 20191 · 1536 · 0.16 · 3.29</td><td>66.7% · 99.2%</td></tr>
+</table>
+
+<h2>6. Device bytes per read</h2>
+<p>This is the core result and it is monotonic in both modes. The curve crosses legacy between S=48 and S=64,
+so a fixed 64 KB block over-fetches more than legacy's roughly 29 KB compressed chunk.</p>
+<table>
+<tr><th>device KB/op</th><th>legacy</th><th>fo-16</th><th>fo-32</th><th>fo-48</th><th>fo-64</th></tr>
+<tr><td>SLO</td><td class="base">25.9</td><td class="win">11.0 (−57%)</td><td class="win">17.6 (−32%)</td><td class="win">24.4 (−6%)</td><td class="cost">30.8 (+19%)</td></tr>
+<tr><td>SAT</td><td class="base">13.2</td><td class="win">5.5 (−58%)</td><td class="win">9.0 (−32%)</td><td class="win">12.3 (−7%)</td><td class="cost">15.7 (+19%)</td></tr>
+</table>
+
+<h2>Interpretation</h2>
+<p>The win is bytes per read, not read-op count. Device reads per request near 2 to 3, the Data.db 1 plus
+Index.db 2 split, and server <code>read_iops</code> at p50 2 are all S-independent. Every arm issues the same
+handful of reads. Fixed-output changes the bytes each read moves. Device KB/op falls 57% at S=16.</p>
+<p>Throughput is limited by CPU and is equal across arms on this machine. The client and server share 10 cores.
+SAT throughput is flat within noise from 104 to 112 k while CPU sits at 88 to 96% and device utilization is only
+47 to 56%, so the device is half idle. Byte savings would convert to throughput on a device-bound machine, not
+here. What they buy here is headroom. The SAT error rate rises with chunk size from 0% at fo-16 to 6.2% at fo-64.
+Throughput is also run-variable: legacy SLO measured 61.6 k here and 52.4 k in an aborted earlier run at the same
+config.</p>
+
+<h2>Recommendation</h2>
+<div class="rec">
+<p>S=32 is the balanced default. It costs 0.7% more on disk and cuts device bytes per op by 32% with clean
+errors. S=16 is the choice when maximizing the read-byte reduction, at 57% fewer device bytes and 7.6% more on
+disk; pairing it with a Zstd dictionary would recover most of that on-disk cost. S=48 is a modest free point that
+is smaller on disk than legacy by 1.8% and still 6% fewer device bytes. S=64 should be avoided for point reads.
+It over-fetches 19% more than legacy and has the worst error profile under load.</p>
+</div>
+
+<h2>Caveats and method</h2>
+<ul>
+<li>The typical per-query read count is 2, measured as <code>read_iops</code> p50. An earlier draft reported the
+histogram max of 10 as if it were the typical value. That was wrong and is corrected in section 3.</li>
+<li><code>read_iops</code> counts pread syscalls, which is a different metric from device reads. Device reads are
+about 2 to 3. Preads are greater than or equal to device reads because cache-served preads do not reach the disk.</li>
+<li>The <code>bytes_decompressed</code> p50 is a reservoir or recording artifact and is not trusted. It is not
+fixed-output-specific, since legacy shows the same zero p50 under warm load.</li>
+<li>The fo-64 warm SLO run is excluded as capacity because it overloaded at 4.84% errors. SAT latency is invalid
+wherever errors are elevated.</li>
+<li>Cold device KB is read-ahead-inflated and quantized to 16 KB pages. The clean cold signal is VFS KB per
+request, which equals S plus 16.</li>
+<li>Throughput and latency are CPU-bound and run-variable. The robust signals are device bytes per op, on-disk
+ratio, and read counts.</li>
+<li>The client and server share one 10-core machine, so byte savings would show as throughput on a device-bound
+machine, not on this one.</li>
+<li>The chunk_cache_hits_per_read and chunk_cache_misses_per_read histograms are excluded. They have no producer
+call site and the chunk cache is disabled in this configuration, so they always read 0.</li>
+<li>Per-component page-cache hit-rate figures went negative in places, for example Data.db at −22%. Those are
+mm_filemap sampling artifacts and are not quoted as rates.</li>
+</ul>
+
+</body></html>

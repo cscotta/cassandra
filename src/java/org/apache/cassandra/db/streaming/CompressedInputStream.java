@@ -61,6 +61,13 @@ public class CompressedInputStream extends RebufferingInputStream implements Aut
     private final ChecksumType checksumType;
     private final DoubleSupplier validateChecksumChance;
 
+    // Fixed-output (block-aligned) streaming: uncompressed chunk sizes vary, so the receiver cannot
+    // derive a chunk's uncompressed base by masking; the per-chunk uncompressed offsets are streamed
+    // alongside the chunks and consumed in order. index into them for the currently-loaded chunk.
+    private final boolean fixedOutput;
+    private final long[] uncompressedChunkOffsets;
+    private int chunkIndex = -1;
+
     /**
      * The base offset of the current {@link #buffer} into the original sstable as if it were uncompressed.
      */
@@ -75,7 +82,9 @@ public class CompressedInputStream extends RebufferingInputStream implements Aut
                                  ChecksumType checksumType,
                                  DoubleSupplier validateChecksumChance)
     {
-        super(ByteBuffer.allocateDirect(compressionInfo.parameters().chunkLength()));
+        super(ByteBuffer.allocateDirect(compressionInfo.parameters().usesFixedOutputChunks()
+                                        ? compressionInfo.parameters().maxUncompressedChunkLength()
+                                        : compressionInfo.parameters().chunkLength()));
         buffer.limit(0);
 
         this.input = input;
@@ -84,7 +93,11 @@ public class CompressedInputStream extends RebufferingInputStream implements Aut
 
         compressionParams = compressionInfo.parameters();
         compressedChunks = Iterators.forArray(compressionInfo.chunks());
-        compressedChunk = ByteBuffer.allocateDirect(compressionParams.chunkLength());
+        this.fixedOutput = compressionParams.usesFixedOutputChunks();
+        this.uncompressedChunkOffsets = compressionInfo.uncompressedChunkOffsets();
+        // fixed-output: read the whole S-byte block; legacy: at most a chunkLength-sized compressed chunk
+        compressedChunk = ByteBuffer.allocateDirect(fixedOutput ? compressionParams.compressedChunkLength()
+                                                                : compressionParams.chunkLength());
     }
 
     /**
@@ -100,8 +113,12 @@ public class CompressedInputStream extends RebufferingInputStream implements Aut
         if (position >= uncompressedChunkPosition + buffer.limit())
         {
             loadNextChunk();
-            // uncompressedChunkPosition = position - (position % compressionParams.chunkLength())
-            uncompressedChunkPosition = position & -compressionParams.chunkLength();
+            if (fixedOutput)
+                // variable uncompressed chunk sizes: the loaded chunk's base is the streamed offset
+                uncompressedChunkPosition = uncompressedChunkOffsets[chunkIndex];
+            else
+                // uncompressedChunkPosition = position - (position % compressionParams.chunkLength())
+                uncompressedChunkPosition = position & -compressionParams.chunkLength();
         }
 
         buffer.position(Ints.checkedCast(position - uncompressedChunkPosition));
@@ -115,11 +132,15 @@ public class CompressedInputStream extends RebufferingInputStream implements Aut
 
         /*
          * reBuffer() will only be called if a partition range spanning multiple (adjacent) compressed chunks
-         * has consumed the current uncompressed buffer, and needs to move to the next adjacent chunk;
-         * uncompressedChunkPosition in this scenario *always* increases by the fixed chunk length.
+         * has consumed the current uncompressed buffer, and needs to move to the next adjacent chunk.
          */
         loadNextChunk();
-        uncompressedChunkPosition += compressionParams.chunkLength();
+        if (fixedOutput)
+            // adjacent chunks are contiguous in uncompressed space; the streamed offset is authoritative
+            uncompressedChunkPosition = uncompressedChunkOffsets[chunkIndex];
+        else
+            // uncompressedChunkPosition in the legacy case *always* increases by the fixed chunk length
+            uncompressedChunkPosition += compressionParams.chunkLength();
     }
 
     /**
@@ -133,6 +154,14 @@ public class CompressedInputStream extends RebufferingInputStream implements Aut
             throw new EOFException();
 
         int chunkLength = compressedChunks.next().length;
+        chunkIndex++;
+
+        if (fixedOutput)
+        {
+            loadNextFixedOutputChunk(chunkLength);
+            return;
+        }
+
         chunkBytesRead += (chunkLength + 4); // chunk length + checksum or CRC length
 
         /*
@@ -168,6 +197,40 @@ public class CompressedInputStream extends RebufferingInputStream implements Aut
 
             maybeValidateChecksum(buffer, input.readInt());
         }
+    }
+
+    /**
+     * Fixed-output chunk: read the whole {@code S}-byte block (chunk.length == S; no trailing CRC in
+     * the stream), parse [int payloadLen][payload][int CRC32][pad], verify the embedded CRC over the
+     * payload, and decompress the payload into {@link #buffer}.
+     */
+    private void loadNextFixedOutputChunk(int blockSize) throws IOException
+    {
+        chunkBytesRead += blockSize; // CRC + padding are inside the fixed block
+
+        if (compressedChunk.capacity() < blockSize)
+        {
+            MemoryUtil.clean(compressedChunk);
+            compressedChunk = ByteBuffer.allocateDirect(blockSize);
+        }
+        compressedChunk.position(0).limit(blockSize);
+        readChunk(compressedChunk);
+
+        int payloadLen = compressedChunk.getInt(0);
+        int header = CompressionMetadata.FIXED_BLOCK_HEADER_BYTES;
+        if (payloadLen < 0 || header + payloadLen + CompressionMetadata.FIXED_BLOCK_CRC_BYTES > blockSize)
+            throw new IOException(format("Corrupt fixed-output block: payloadLen=%d, blockSize=%d", payloadLen, blockSize));
+
+        ByteBuffer payload = compressedChunk.duplicate();
+        payload.position(header).limit(header + payloadLen);
+        payload = payload.slice();
+
+        maybeValidateChecksum(payload, compressedChunk.getInt(header + payloadLen));
+        payload.position(0).limit(payloadLen);
+
+        buffer.clear();
+        compressionParams.getSstableCompressor().uncompress(payload, buffer);
+        buffer.flip();
     }
     private ByteBuffer compressedChunk;
 

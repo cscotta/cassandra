@@ -1,0 +1,17 @@
+Attached 5 probes
+# vfs_reads.bt pid=109706 tracing pread64 + preadv + preadv2
+# pread bytes are exact (args->count); preadv* are call-counted only
+
+SUMMARY pread_count=1 pread_bytes=15827 preadv_count=0 preadv2_count=0
+
+
+@pread_bytes: 15827
+@pread_bytes_by_fd[180]: 15827
+@pread_cnt_by_comm[Native-Transpor]: 1
+@pread_cnt_by_fd[180]: 1
+@pread_count: 1
+@pread_req_bytes:
+[8K, 16K)              1 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+
+@preadv2_count: 0
+@preadv_count: 0

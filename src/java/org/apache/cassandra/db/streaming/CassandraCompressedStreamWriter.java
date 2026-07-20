@@ -115,8 +115,13 @@ public class CassandraCompressedStreamWriter extends CassandraStreamWriter
         if (chunks.length == 0)
             return Collections.emptyList();
 
+        // Fixed-output chunks carry their CRC inside the fixed on-disk block (chunk.length == S),
+        // so their on-disk footprint is chunk.length with no trailing CRC; legacy chunks are
+        // chunk.length compressed bytes followed by a 4-byte CRC.
+        int crc = compressionInfo.parameters().usesFixedOutputChunks() ? 0 : CRC_LENGTH;
+
         long start = chunks[0].offset;
-        long end = start + chunks[0].length + CRC_LENGTH;
+        long end = start + chunks[0].length + crc;
 
         List<Section> sections = new ArrayList<>();
 
@@ -126,14 +131,14 @@ public class CassandraCompressedStreamWriter extends CassandraStreamWriter
 
             if (chunk.offset == end)
             {
-                end += (chunk.length + CRC_LENGTH);
+                end += (chunk.length + crc);
             }
             else
             {
                 sections.add(new Section(start, end));
 
                 start = chunk.offset;
-                end = start + chunk.length + CRC_LENGTH;
+                end = start + chunk.length + crc;
             }
         }
         sections.add(new Section(start, end));

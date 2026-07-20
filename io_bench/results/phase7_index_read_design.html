@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Phase 7 — reducing the partition-index read IOP</title>
+<style>
+body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem;line-height:1.5;color:#1a1a1a}
+h1{border-bottom:2px solid #ccc;padding-bottom:.3em}
+h2{margin-top:1.8em;border-bottom:1px solid #eee}
+h3{margin-top:1.2em}
+table{border-collapse:collapse;width:100%;margin:1em 0}
+th,td{border:1px solid #ccc;padding:.45em .7em;text-align:right}
+th:first-child,td:first-child{text-align:left}
+tr:nth-child(even){background:#fafafa}
+ol{padding-left:1.4em}
+.win{color:#0a7d28;font-weight:600}.cost{color:#b04a00;font-weight:600}
+.cap{color:#666;font-size:.9em}
+.note{background:#f7f7f9;border:1px solid #e0e0e0;border-radius:6px;padding:.5em 1em;font-size:.92em}
+code{background:#f0f0f0;padding:.1em .3em;border-radius:3px}
+.rec{background:#eef7ee;border:1px solid #cfe6cf;border-radius:6px;padding:.5em 1em}
+</style></head><body>
+
+<h1>Phase 7 &mdash; reducing the partition-index read (the second IOP)</h1>
+<p class="cap">Context: after fixed-output compression, a cold point read on <code>iouring_bench.readbench</code>
+still issues <b>two</b> device reads &mdash; the data chunk (now one aligned page) and the partition-index
+lookup. Phase 7 targets the index read. Grounded in this cluster: BIG format (<code>pa</code>), only
+<code>Data.db</code> is compressed; <code>Index.db</code> = 1.26&nbsp;GB (uncompressed primary index),
+<code>Summary.db</code> = 14&nbsp;MB (samples), <code>Filter.db</code> = 43&nbsp;MB (bloom); and both
+<code>key_cache_size</code> and <code>row_cache_size</code> are <b>0&nbsp;MiB</b> &mdash; so every read
+measured takes the full index-miss path.</p>
+
+<h2>The two IOPs today, and which one Phase 7 targets</h2>
+<p>A cold point read on BIG does, in order:</p>
+<ol>
+<li><b>Bloom filter</b> (<code>Filter.db</code>) &mdash; in memory, no device read.</li>
+<li><b>Index summary</b> (<code>Summary.db</code>) &mdash; in memory; a binary search gives an
+<i>approximate</i> offset into <code>Index.db</code> plus the sampling interval. (This is the
+<code>AsymmetricOrdering.binarySearchAsymmetric</code> the JFR showed &mdash; it is in-memory.)</li>
+<li><b>Primary index read</b> (<code>Index.db</code>) &mdash; seek to the summary's offset and read forward,
+deserializing entries until the exact key is found, yielding a <code>RowIndexEntry</code> (the data-file
+position). <b>&larr; device read #1, the index IOP Phase 7 targets.</b></li>
+<li><b>Data chunk</b> (<code>Data.db</code>) at that position. <b>&larr; device read #2, now one aligned
+page after fixed-output.</b></li>
+</ol>
+<p class="note">The index read costs a full page (~16&nbsp;KB in the standard-mode measurement) to locate a
+~tens-of-bytes entry: <code>Index.db</code> is <b>uncompressed</b> and read through a buffered/mmap reader
+that fetches a page/buffer covering up to <code>min_index_interval</code> (default 128) entries, then scans.
+So it over-fetches &mdash; the same shape as the data-chunk straddle we already fixed, but caused by
+read-buffer/page granularity, not compression.</p>
+
+<h2>How the index reads would change under Phase 7</h2>
+
+<h3>(a) Key cache &mdash; eliminate the index read on hits</h3>
+<p>The key cache maps <code>(sstable, key) &rarr; RowIndexEntry</code> (the data position) in heap. On a hit,
+step 3 is <b>skipped entirely</b> and the read goes straight to <code>Data.db</code>, so a cold-but-cached
+read drops from <b>2 IOPs &rarr; 1 IOP</b>. This is a config lever (re-enable/size the key cache; it is 0 here)
+plus minor code to ensure fixed-output sstables populate/consult it normally.
+<b>Caveat:</b> it only helps the working set &mdash; a uniform-random scan over 64&nbsp;M keys will not fit,
+so the miss path is unchanged. This is the biggest win for real (skewed) workloads.</p>
+
+<h3>(b) Right-size / align the miss-path index read</h3>
+<p>Even on a cache miss, the ~16&nbsp;KB fetched for a small entry is over-fetch. Two ways to shrink it:</p>
+<ul>
+<li><b>Denser index summary</b> (lower <code>min_index_interval</code>): the summary points closer to the
+exact entry, so the scan window &mdash; and the read &mdash; is smaller. Trades <code>Summary.db</code>
+memory (14&nbsp;MB now) for a smaller <code>Index.db</code> read.</li>
+<li><b>Aligned / right-sized index read</b>: read only the needed region, block-aligned (e.g. 4&nbsp;KB under
+O_DIRECT, or a smaller index reader buffer) instead of a 16&nbsp;KB page &mdash; the same alignment idea as
+the data chunk, applied to the index reader.</li>
+</ul>
+<p class="note">Effect: the index device read shrinks from ~16&nbsp;KB toward ~4&nbsp;KB, so a cold miss goes
+from <b>32&nbsp;KB &rarr; ~20&nbsp;KB device bytes</b> (data 16&nbsp;KB + index ~4&nbsp;KB) &mdash; still
+2&nbsp;IOPs, but fewer bytes.</p>
+
+<h3>(c) Structural options (larger changes, on-theme with fixed-output)</h3>
+<ul>
+<li><b>Compress + fixed-output-align <code>Index.db</code>.</b> It is uncompressed today; giving it the
+block-aligned treatment would make index reads single aligned blocks like the data. Bigger change (a new
+compressed index component).</li>
+<li><b>BTI format</b> (trie-indexed sstables): replaces <code>Index.db</code> + <code>Summary.db</code> with a
+page-aligned trie (<code>-Partitions.db</code>/<code>-Rows.db</code>) walked with page-aligned reads &mdash;
+designed for fewer, smaller index reads. A format migration (BIG &rarr; BTI), orthogonal to compression; the
+branch could combine BTI indexing with fixed-output data.</li>
+</ul>
+
+<h2>Why this matters most under io_uring / mmap</h2>
+<p class="note">Phase 6 showed that under <code>io_uring</code> mode the index is served by <b>mmap</b>, and a
+cold fault pulled <b>~1&nbsp;MB</b> of readahead &mdash; dwarfing the 16&nbsp;KB data chunk. So on the
+branch's target (O_DIRECT data) path, the index is the dominant cold cost, and Phase 7's index work
+(align/right-size the index read, route the index through the aligned reader instead of mmap-with-readahead,
+or the key cache) is where the next large reduction is.</p>
+
+<h2>Expected outcome</h2>
+<table>
+<tr><th>scenario</th><th>IOPs / cold read</th><th>device bytes / cold read</th></tr>
+<tr><td>today (fixed-output data, no index change)</td><td>2</td><td>~32&nbsp;KB (16 data + 16 index)</td></tr>
+<tr><td>(a) key-cache hit</td><td class="win">1</td><td class="win">~16&nbsp;KB (data only)</td></tr>
+<tr><td>(b) miss, index right-sized/aligned</td><td>2</td><td class="win">~20&nbsp;KB (16 data + ~4 index)</td></tr>
+<tr><td>(c) aligned/compressed index or BTI</td><td>2</td><td>data + one small aligned index block</td></tr>
+</table>
+
+<div class="rec">
+<b>Recommendation for this uniform-random cold benchmark:</b> start with <b>(b)</b> &mdash; right-size/align
+the index read and, on the io_uring path, avoid the mmap readahead by routing the index through the aligned
+reader &mdash; since that moves the measured cold bytes without depending on a cacheable working set. Then
+evaluate <b>BTI</b> as the structural option, and <b>key cache (a)</b> for realistic skewed workloads.
+</div>
+
+</body></html>

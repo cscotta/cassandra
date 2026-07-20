@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Legacy 64 KB vs fixed-output 64 KB (packer fix) — IO & IOPS</title>
+<style>
+body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:1000px;margin:2rem auto;padding:0 1rem;line-height:1.5;color:#1a1a1a}
+h1{border-bottom:2px solid #ccc;padding-bottom:.3em}h2{margin-top:1.8em;border-bottom:1px solid #eee}
+table{border-collapse:collapse;width:100%;margin:1em 0}th,td{border:1px solid #ccc;padding:.45em .7em;text-align:right}
+th:first-child,td:first-child{text-align:left}tr:nth-child(even){background:#fafafa}
+.win{color:#0a7d28;font-weight:600}.cost{color:#b04a00;font-weight:600}.neu{color:#666}
+.cap{color:#666;font-size:.9em}
+.note{background:#f7f7f9;border:1px solid #e0e0e0;border-radius:6px;padding:.5em 1em;font-size:.92em}
+.rec{background:#eef7ee;border:1px solid #cfe6cf;border-radius:6px;padding:.5em 1em}
+code{background:#f0f0f0;padding:.1em .3em;border-radius:3px}
+</style></head><body>
+
+<h1>Legacy 64 KB vs fixed-output 64 KB (packer fix) &mdash; disk IO & IOPS</h1>
+<p class="cap">Same table <code>iouring_bench.readbench</code> (~203&nbsp;GB logical, 64&nbsp;M single-row
+partitions, ~0.45-compressible), both arms rewritten and measured on the <b>same build and node</b> back to
+back: BIG format, LCS (leveled), Zstd@8, raw XFS, <code>disk_access_mode=standard</code> (buffered), key/row
+caches off, 16&nbsp;GB heap, autocompaction off. Legacy = <code>chunk_length_in_kb=64</code>; fixed-output =
+<code>compressed_chunk_length_in_kb=64</code> with the tightened packer (accept threshold 63/64, 16&nbsp;MiB
+flush buffer). This holds the compression <b>context equal</b> on both sides, so the differences are
+fixed-output's own structural properties, not a chunk-size effect.</p>
+
+<h2>On-disk</h2>
+<table>
+<tr><th>metric</th><th>legacy 64 KB</th><th>fixed-output 64 KB</th><th>delta</th></tr>
+<tr><td>compression ratio</td><td>0.450</td><td>0.440</td><td class="win">&minus;2.2%</td></tr>
+<tr><td>space used (live)</td><td>91.4&nbsp;GB</td><td>89.5&nbsp;GB</td><td class="win">&minus;1.9&nbsp;GB</td></tr>
+<tr><td>avg block fill (padding)</td><td>n/a</td><td>98.6% (1.45% pad)</td><td class="neu">&mdash;</td></tr>
+</table>
+<p class="note">With padding cut from ~6.4% to 1.45%, fixed-output at equal context is now <b>smaller</b> than
+legacy &mdash; each 64&nbsp;KB block packs ~140&nbsp;KB of input, a larger Zstd window than legacy's 64&nbsp;KB
+chunk. The on-disk penalty seen earlier was padding + small-chunk context loss, not fixed-output itself.</p>
+
+<h2>Cold per request <span class="cap">(cold_readbench.py, 20 isolated reads, caches dropped before each; device = block_io, VFS = app-level preads)</span></h2>
+<table>
+<tr><th>metric</th><th>legacy 64 KB</th><th>fixed-output 64 KB</th><th>delta</th></tr>
+<tr><td><b>device reads / req</b> (IOPS)</td><td>3.0</td><td>2.5</td><td class="win">&minus;17%</td></tr>
+<tr><td>device KB / req</td><td>80.0</td><td>88.0</td><td class="cost">+10%</td></tr>
+<tr><td><b>VFS KB / req</b> (bytes the DB read)</td><td>44.7</td><td>80.0</td><td class="cost">+79%</td></tr>
+<tr><td>VFS preads / req</td><td>3.0</td><td>3.0</td><td class="neu">&asymp;</td></tr>
+</table>
+
+<h2>Warm under load <span class="cap">(warm_readbench.py, 120&nbsp;s, 32 threads, adaptive --maxrlat 50)</span></h2>
+<table>
+<tr><th>metric</th><th>legacy 64 KB</th><th>fixed-output 64 KB</th><th>delta</th></tr>
+<tr><td>throughput (ops/s)</td><td>57,393</td><td>52,416</td><td class="cost">&minus;8.7%</td></tr>
+<tr><td>errors</td><td>0</td><td>0</td><td class="neu">&mdash;</td></tr>
+<tr><td><b>device reads / op</b> (IOPS)</td><td>0.47</td><td>0.38</td><td class="win">&minus;19%</td></tr>
+<tr><td>device KB / op</td><td>24.9</td><td>30.7</td><td class="cost">+23%</td></tr>
+<tr><td><b>VFS KB / op</b></td><td>23.4</td><td>40.9</td><td class="cost">+75%</td></tr>
+<tr><td>VFS preads / op</td><td>1.56</td><td>1.54</td><td class="neu">&asymp;</td></tr>
+<tr><td>page-cache hit rate (cachestat)</td><td>71.9%</td><td>60.4%</td><td class="cost">lower</td></tr>
+<tr><td>read latency p50 (ms)</td><td>0.35</td><td>0.40</td><td class="neu">&asymp;</td></tr>
+<tr><td>read latency avg / p99 (ms)</td><td>24.6 / 317</td><td>62.7 / 545</td><td class="cost">worse</td></tr>
+</table>
+
+<h2>Reading the results &mdash; IOPS down, bytes up</h2>
+<p><b>Fixed-output cuts the device read <i>count</i> but raises the bytes per read.</b> The two metrics move in
+opposite directions, and the reason is the same in both: fixed-output makes every read one <b>aligned 64&nbsp;KB
+block</b>, whereas legacy reads a <b>variable ~29&nbsp;KB compressed chunk</b> at an unaligned offset.</p>
+<ul>
+<li><b>IOPS (device reads): fixed-output wins</b> &mdash; &minus;17% cold, &minus;19% warm. Alignment turns
+legacy's straddled/multi-read chunk fetch into a single aligned block read.</li>
+<li><b>Bytes moved: fixed-output loses</b> &mdash; VFS +75&ndash;79%, device +10&ndash;23%. A 64&nbsp;KB block
+is more than twice legacy's ~29&nbsp;KB compressed chunk, so serving one 3.1&nbsp;KB value over-fetches more.
+Bigger blocks also cache less densely for random reads (hit rate 60.4% vs 71.9%), so more misses reach disk,
+which is why warm device bytes and the latency tail are worse and throughput is ~9% lower.</li>
+<li><b>On-disk: fixed-output wins</b> (&minus;2.2%), now that padding is fixed.</li>
+</ul>
+
+<p class="note"><b>Why this happens at S = 64&nbsp;KB, and where the byte win actually is.</b> Fixed-output
+reduces device <i>bytes</i> only when the block size S is <b>smaller</b> than legacy's compressed chunk. At
+S&nbsp;=&nbsp;64&nbsp;KB the block is larger than legacy's ~29&nbsp;KB chunk, so bytes go up even though the read
+is aligned. On the same dataset at <b>S&nbsp;=&nbsp;16&nbsp;KB</b>, fixed-output measured cold ~40&nbsp;KB/req
+and warm ~11&nbsp;KB/op device &mdash; roughly <b>half to a third</b> of legacy's bytes. That is where the
+project's device-byte goal is met; the cost there is on-disk size (small-chunk context loss), recoverable with
+a shared dictionary. So S is the dial: small S trades on-disk size for a large byte reduction; large S trades
+byte reduction for a small on-disk win.</p>
+
+<div class="rec">
+<b>Conclusion.</b> With the packer fix, fixed-output at equal 64&nbsp;KB context is <b>smaller on disk than
+legacy (&minus;2%)</b> and issues <b>fewer device reads per lookup (&minus;17&ndash;19% IOPS)</b>, but it moves
+<b>more bytes per read</b> because a fixed 64&nbsp;KB block over-fetches versus legacy's ~29&nbsp;KB compressed
+chunk &mdash; so throughput and tail latency are worse at this S. S&nbsp;=&nbsp;64&nbsp;KB is the
+&ldquo;on-disk-optimal, byte-neutral-to-worse&rdquo; end of the curve; the device-byte win that motivates
+fixed-output lives at small S (16&ndash;32&nbsp;KB), where an S-sweep + a dictionary for the ratio is the next
+step. Throughput/tail figures carry normal warm run-to-run variance; the structural bytes-per-op and
+reads-per-op differences are the robust signal.
+</div>
+
+</body></html>

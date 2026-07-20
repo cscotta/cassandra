@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>BIG vs BTI (both fixed-output) — read comparison</title>
+<style>
+body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:980px;margin:2rem auto;padding:0 1rem;line-height:1.5;color:#1a1a1a}
+h1{border-bottom:2px solid #ccc;padding-bottom:.3em}h2{margin-top:1.8em;border-bottom:1px solid #eee}
+table{border-collapse:collapse;width:100%;margin:1em 0}th,td{border:1px solid #ccc;padding:.45em .7em;text-align:right}
+th:first-child,td:first-child{text-align:left}tr:nth-child(even){background:#fafafa}
+.win{color:#0a7d28;font-weight:600}.cost{color:#b04a00;font-weight:600}
+.cap{color:#666;font-size:.9em}
+.note{background:#f7f7f9;border:1px solid #e0e0e0;border-radius:6px;padding:.5em 1em;font-size:.92em}
+.rec{background:#eef7ee;border:1px solid #cfe6cf;border-radius:6px;padding:.5em 1em}
+code{background:#f0f0f0;padding:.1em .3em;border-radius:3px}
+</style></head><body>
+
+<h1>BIG vs BTI SSTable format &mdash; read comparison (both fixed-output)</h1>
+<p class="cap">Same table <code>iouring_bench.readbench</code> (~200&nbsp;GB, 64&nbsp;M single-row partitions,
+incompressible), <b>fixed-output S=16&nbsp;KB data compression on both</b> (Data.db identical), Zstd@8, LCS,
+raw XFS, <code>disk_access_mode=standard</code> (buffered), caches off, 16&nbsp;GB heap. Only the SSTable
+<b>index format</b> differs: BIG (<code>Index.db</code> + in-memory <code>Summary.db</code>) vs BTI (a
+page-aligned trie in <code>Partitions.db</code>). Rewrote BIG&rarr;BTI via <code>upgradesstables -a</code>;
+BTI+fixed-output reads verified correct (5/5 across the key range).</p>
+
+<h2>On-disk / index size</h2>
+<table>
+<tr><th>metric</th><th>BIG + fixed-output</th><th>BTI + fixed-output</th></tr>
+<tr><td>Data.db (fixed-output, S=16&nbsp;KB)</td><td>200.0&nbsp;GB</td><td>200.0&nbsp;GB (identical)</td></tr>
+<tr><td>partition index</td><td>Index.db 1258&nbsp;MB + Summary.db 14&nbsp;MB = <b>1272&nbsp;MB</b></td><td>Partitions.db <b>578&nbsp;MB</b> (Rows.db empty)</td></tr>
+<tr><td>index size</td><td>1272&nbsp;MB</td><td class="win">578&nbsp;MB (&minus;55%)</td></tr>
+<tr><td>compression ratio</td><td>1.023</td><td>1.023</td></tr>
+<tr><td>space used (live)</td><td>206.3&nbsp;GB</td><td>205.6&nbsp;GB</td></tr>
+</table>
+
+<h2>Cold per-request read <span class="cap">(cold_readbench.py, isolated single reads, caches dropped before each)</span></h2>
+<table>
+<tr><th>metric</th><th>BIG + fixed-output</th><th>BTI + fixed-output</th></tr>
+<tr><td>device reads / request</td><td>2</td><td class="cost">4</td></tr>
+<tr><td>device KB / request</td><td>32</td><td class="cost">52</td></tr>
+<tr><td>per-completion sizes</td><td>2 &times; [16K,32K) (16&nbsp;KB data + 16&nbsp;KB index)</td><td>1 &times; [4K,8K) + 3 &times; [16K,32K) (data + trie walk)</td></tr>
+</table>
+<p class="note"><b>BTI is worse cold.</b> A fully-cold point lookup walks the trie root &rarr; internal &rarr;
+leaf on <code>Partitions.db</code> &mdash; several page reads &mdash; plus the data chunk (4 device reads,
+52&nbsp;KB). BIG resolves the position with an in-memory <code>Summary.db</code> binary search and a
+<b>single</b> <code>Index.db</code> read, then the data chunk (2 reads, 32&nbsp;KB). Because
+<code>cold_readbench</code> drops caches before every read, the entire trie path is cold every time &mdash;
+the trie's worst case.</p>
+
+<h2>Warm under load <span class="cap">(warm_readbench.py, 120&nbsp;s, 32 threads, adaptive --maxrlat 50)</span></h2>
+<table>
+<tr><th>metric</th><th>BIG + fixed-output</th><th>BTI + fixed-output</th></tr>
+<tr><td>throughput (ops/s)</td><td>67,399</td><td>67,404</td></tr>
+<tr><td>errors</td><td>0</td><td>0</td></tr>
+<tr><td>read latency p50 (ms)</td><td>0.41</td><td>0.39</td></tr>
+<tr><td>read latency avg (ms)</td><td>9.29</td><td class="cost">15.88</td></tr>
+<tr><td>read latency p99 (ms)</td><td>176</td><td class="cost">440</td></tr>
+<tr><td>VFS preads / op</td><td>1.26 (15.0 KB/op)</td><td class="cost">2.71 (24.1 KB/op)</td></tr>
+<tr><td>device reads / op</td><td>0.55</td><td>0.53</td></tr>
+<tr><td>device KB / op</td><td>15.6</td><td class="win">14.4 (&minus;8%)</td></tr>
+</table>
+<p class="note"><b>Warm is a trade, not a win.</b> Same throughput (~67.4k, 0 errors) and same median latency
+(cache-hit fast path). BTI reads ~8% fewer <b>device bytes</b> (its 55%-smaller index caches better, so fewer
+index misses reach disk) &mdash; but it issues <b>~2&times; the preads</b> (2.71 vs 1.26/op: the trie walk is
+several node reads, mostly served from page cache) and pays for that in CPU: avg latency 15.9&nbsp;ms vs
+9.3&nbsp;ms and p99 440&nbsp;ms vs 176&nbsp;ms. BTI shifts index cost from disk bytes onto syscalls/CPU.</p>
+
+<h2>Interpretation &mdash; this corrects the Phase 7 hypothesis</h2>
+<p>The Phase 7 premise was that BTI would <i>reduce</i> the index IOP. For this workload it does the opposite:
+BTI reduces index <b>size</b> (&minus;55%) but <b>increases index read count</b> for cold point lookups (a
+multi-level trie walk vs one summary-guided read), and adds per-op CPU/latency warm. The data-chunk win from
+fixed-output is unchanged (Data.db is identical). Net for a <b>uniform-random, single-row-partition, cold
+point-read</b> profile: <b>BIG + fixed-output is better than BTI + fixed-output.</b></p>
+<p class="note">What this microbenchmark does <i>not</i> exercise &mdash; and where BTI is designed to win:
+range scans (trie walks amortize over many rows), wide partitions (the <code>Rows.db</code> row-trie, empty
+here), memory-constrained nodes and hot working sets (the 55%-smaller index caches far better), and workloads
+where the upper trie stays resident so lookups touch only a leaf + data. Our p50 (0.39&nbsp;ms) already shows
+that when the trie is hot the fast path is equal to BIG; the penalty is on the cold/tail reads that a
+uniform-random scan over 64&nbsp;M keys keeps producing.</p>
+
+<div class="rec">
+<b>Conclusion:</b> Fixed-output composes cleanly with BTI (correct, ratio retained, index halved), but BTI does
+not help &mdash; and slightly hurts &mdash; this cold uniform-random point-read benchmark, because the trie
+walk costs more read IOPs than BIG's summary + single index read. Keep BIG + fixed-output for this profile;
+choose BTI for scan-heavy, wide-partition, or memory-constrained workloads. The remaining index-IOP lever for
+<i>point reads</i> is caching (key cache to skip the lookup on hot keys) or right-sizing/aligning the index
+read &mdash; not the index format.
+</div>
+
+</body></html>

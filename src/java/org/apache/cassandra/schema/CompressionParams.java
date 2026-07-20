@@ -62,6 +62,34 @@ public final class CompressionParams
     public static final String ENABLED = "enabled";
     public static final String MIN_COMPRESS_RATIO = "min_compress_ratio";
 
+    // Fixed-output (block-aligned) compression mode. When present, each compressed chunk is
+    // written to a fixed, block-aligned on-disk size (COMPRESSED_CHUNK_LENGTH_IN_KB) by packing a
+    // variable amount of uncompressed input until the compressed output fills the target. The
+    // uncompressed size per chunk therefore varies, capped by MAX_UNCOMPRESSED_CHUNK_LENGTH_IN_KB
+    // (which bounds the decompression buffer). Absence of COMPRESSED_CHUNK_LENGTH_IN_KB selects the
+    // legacy fixed-uncompressed-input mode.
+    public static final String COMPRESSED_CHUNK_LENGTH_IN_KB = "compressed_chunk_length_in_kb";
+    public static final String MAX_UNCOMPRESSED_CHUNK_LENGTH_IN_KB = "max_uncompressed_chunk_length_in_kb";
+
+    // The fixed-output target must be a multiple of this floor so it is a whole number of device
+    // blocks (typical block size 512 or 4096). Buffered reads additionally benefit when it is a
+    // multiple of the OS page size; that is an operator choice (this class validates only the block
+    // floor, since the runtime page size is not known at schema-parse time).
+    public static final int FIXED_OUTPUT_ALIGNMENT_FLOOR = 4096;
+    // Upper bound on the fixed-output target and the uncompressed cap. Both size direct buffers held
+    // per writer and per read thread, so bound them well below the ~2 GB int-parse ceiling.
+    public static final int MAX_FIXED_OUTPUT_LENGTH = 256 * 1024 * 1024;
+    // Default cap on the uncompressed bytes packed into one fixed-output chunk, as a multiple of the
+    // compressed target, used when MAX_UNCOMPRESSED_CHUNK_LENGTH_IN_KB is not given.
+    public static final int DEFAULT_MAX_UNCOMPRESSED_MULTIPLE = 8;
+
+    // Reserved keys used ONLY inside the -CompressionInfo.db option map to record fixed-output
+    // parameters without a format-version bump (the option map is self-delimiting and read before
+    // the chunk-offset table, so the mode is known in time to interpret the offsets). These are
+    // never exposed to compressors or to the schema map. Both values are byte counts.
+    public static final String FIXED_OUTPUT_LENGTH_MARKER = "org.apache.cassandra.fixed_output_chunk_length";
+    public static final String FIXED_OUTPUT_MAX_UNCOMPRESSED_MARKER = "org.apache.cassandra.fixed_output_max_uncompressed";
+
     private static final CompressorRegistry registry = CompressorRegistry.instance;
     public static final CompressionParams DEFAULT = !CassandraRelevantProperties.DETERMINISM_SSTABLE_COMPRESSION_DEFAULT.getBoolean()
                                                     ? noCompression()
@@ -84,6 +112,11 @@ public final class CompressionParams
     private final double minCompressRatio;  // In configuration we store min ratio, the input parameter.
     private final ImmutableMap<String, String> otherOptions; // Unrecognized options, can be used by the compressor
 
+    // Fixed-output mode (0 = disabled/legacy). When > 0, the block-aligned on-disk size of every
+    // compressed chunk, and maxUncompressedChunkLength caps the uncompressed bytes packed into one.
+    private final int compressedChunkLength;
+    private final int maxUncompressedChunkLength;
+
     public static CompressionParams fromMap(Map<String, String> opts)
     {
         Map<String, String> options = copyOptions(opts);
@@ -100,8 +133,11 @@ public final class CompressionParams
 
         int chunkLength = removeChunkLength(options);
         double minCompressRatio = removeMinCompressRatio(options);
+        int compressedChunkLength = removeCompressedChunkLength(options);
+        int maxUncompressedChunkLength = removeMaxUncompressedChunkLength(options, compressedChunkLength);
 
-        CompressionParams cp = new CompressionParams(sstableCompressionClass, options, chunkLength, minCompressRatio);
+        CompressionParams cp = new CompressionParams(sstableCompressionClass, options, chunkLength, minCompressRatio,
+                                                     compressedChunkLength, maxUncompressedChunkLength);
         cp.validate();
 
         return cp;
@@ -210,7 +246,12 @@ public final class CompressionParams
 
     public CompressionParams(String sstableCompressorClass, Map<String, String> otherOptions, int chunkLength, double minCompressRatio) throws ConfigurationException
     {
-        this(createCompressor(parseCompressorClass(sstableCompressorClass), otherOptions), chunkLength, calcMaxCompressedLength(chunkLength, minCompressRatio), minCompressRatio, otherOptions);
+        this(sstableCompressorClass, otherOptions, chunkLength, minCompressRatio, 0, 0);
+    }
+
+    public CompressionParams(String sstableCompressorClass, Map<String, String> otherOptions, int chunkLength, double minCompressRatio, int compressedChunkLength, int maxUncompressedChunkLength) throws ConfigurationException
+    {
+        this(createCompressor(parseCompressorClass(sstableCompressorClass), otherOptions), chunkLength, calcMaxCompressedLength(chunkLength, minCompressRatio), minCompressRatio, otherOptions, compressedChunkLength, maxUncompressedChunkLength);
     }
 
     static int calcMaxCompressedLength(int chunkLength, double minCompressRatio)
@@ -220,7 +261,12 @@ public final class CompressionParams
 
     public CompressionParams(String sstableCompressorClass, int chunkLength, int maxCompressedLength, Map<String, String> otherOptions) throws ConfigurationException
     {
-        this(createCompressor(parseCompressorClass(sstableCompressorClass), otherOptions), chunkLength, maxCompressedLength, calcMinCompressRatio(chunkLength, maxCompressedLength), otherOptions);
+        this(sstableCompressorClass, chunkLength, maxCompressedLength, otherOptions, 0, 0);
+    }
+
+    public CompressionParams(String sstableCompressorClass, int chunkLength, int maxCompressedLength, Map<String, String> otherOptions, int compressedChunkLength, int maxUncompressedChunkLength) throws ConfigurationException
+    {
+        this(createCompressor(parseCompressorClass(sstableCompressorClass), otherOptions), chunkLength, maxCompressedLength, calcMinCompressRatio(chunkLength, maxCompressedLength), otherOptions, compressedChunkLength, maxUncompressedChunkLength);
     }
 
     static double calcMinCompressRatio(int chunkLength, int maxCompressedLength)
@@ -232,16 +278,23 @@ public final class CompressionParams
 
     private CompressionParams(ICompressor sstableCompressor, int chunkLength, int maxCompressedLength, double minCompressRatio, Map<String, String> otherOptions) throws ConfigurationException
     {
+        this(sstableCompressor, chunkLength, maxCompressedLength, minCompressRatio, otherOptions, 0, 0);
+    }
+
+    private CompressionParams(ICompressor sstableCompressor, int chunkLength, int maxCompressedLength, double minCompressRatio, Map<String, String> otherOptions, int compressedChunkLength, int maxUncompressedChunkLength) throws ConfigurationException
+    {
         this.sstableCompressor = sstableCompressor;
         this.chunkLength = chunkLength;
         this.otherOptions = ImmutableMap.copyOf(otherOptions);
         this.minCompressRatio = minCompressRatio;
         this.maxCompressedLength = maxCompressedLength;
+        this.compressedChunkLength = compressedChunkLength;
+        this.maxUncompressedChunkLength = maxUncompressedChunkLength;
     }
 
     public CompressionParams copy()
     {
-        return new CompressionParams(sstableCompressor, chunkLength, maxCompressedLength, minCompressRatio, otherOptions);
+        return new CompressionParams(sstableCompressor, chunkLength, maxCompressedLength, minCompressRatio, otherOptions, compressedChunkLength, maxUncompressedChunkLength);
     }
 
     /**
@@ -300,6 +353,31 @@ public final class CompressionParams
     public int maxCompressedLength()
     {
         return maxCompressedLength;
+    }
+
+    /**
+     * @return {@code true} if this configuration uses the fixed-output (block-aligned) chunk mode.
+     */
+    public boolean usesFixedOutputChunks()
+    {
+        return compressedChunkLength > 0;
+    }
+
+    /**
+     * @return the fixed, block-aligned on-disk size of each compressed chunk, or 0 in legacy mode.
+     */
+    public int compressedChunkLength()
+    {
+        return compressedChunkLength;
+    }
+
+    /**
+     * @return the cap on uncompressed bytes packed into a single fixed-output chunk (sizes the
+     * decompression buffer), or 0 in legacy mode.
+     */
+    public int maxUncompressedChunkLength()
+    {
+        return maxUncompressedChunkLength;
     }
 
     private static Class<?> parseCompressorClass(String className) throws ConfigurationException
@@ -388,6 +466,60 @@ public final class CompressionParams
     }
 
     /**
+     * Removes and parses the fixed-output compressed-chunk length option (in KiB), returning the
+     * target on-disk chunk size in bytes, or 0 when the option is absent (legacy mode).
+     */
+    private static int removeCompressedChunkLength(Map<String, String> options) throws ConfigurationException
+    {
+        String value = options.remove(COMPRESSED_CHUNK_LENGTH_IN_KB);
+        if (value == null)
+            return 0;
+
+        try
+        {
+            int parsed = Integer.parseInt(value);
+            if (parsed > Integer.MAX_VALUE / 1024)
+                throw new ConfigurationException(format("Value of %s is too large (%s)", COMPRESSED_CHUNK_LENGTH_IN_KB, parsed));
+            return 1024 * parsed;
+        }
+        catch (NumberFormatException e)
+        {
+            throw new ConfigurationException("Invalid value for " + COMPRESSED_CHUNK_LENGTH_IN_KB, e);
+        }
+    }
+
+    /**
+     * Removes and parses the max-uncompressed-chunk length option (in KiB) for fixed-output mode,
+     * returning the cap in bytes. Defaults to {@link #DEFAULT_MAX_UNCOMPRESSED_MULTIPLE} times the
+     * compressed target when absent. Returns 0 in legacy mode (compressedChunkLength == 0).
+     */
+    private static int removeMaxUncompressedChunkLength(Map<String, String> options, int compressedChunkLength) throws ConfigurationException
+    {
+        String value = options.remove(MAX_UNCOMPRESSED_CHUNK_LENGTH_IN_KB);
+        if (compressedChunkLength <= 0)
+        {
+            if (value != null)
+                throw new ConfigurationException(format("%s requires %s to be set", MAX_UNCOMPRESSED_CHUNK_LENGTH_IN_KB, COMPRESSED_CHUNK_LENGTH_IN_KB));
+            return 0;
+        }
+
+        if (value == null)
+            return (int) Math.min((long) compressedChunkLength * DEFAULT_MAX_UNCOMPRESSED_MULTIPLE, Integer.MAX_VALUE);
+
+        try
+        {
+            int parsed = Integer.parseInt(value);
+            if (parsed > Integer.MAX_VALUE / 1024)
+                throw new ConfigurationException(format("Value of %s is too large (%s)", MAX_UNCOMPRESSED_CHUNK_LENGTH_IN_KB, parsed));
+            return 1024 * parsed;
+        }
+        catch (NumberFormatException e)
+        {
+            throw new ConfigurationException("Invalid value for " + MAX_UNCOMPRESSED_CHUNK_LENGTH_IN_KB, e);
+        }
+    }
+
+    /**
      * Removes the min compress ratio option from the specified set of option.
      *
      * @param options the options
@@ -459,6 +591,27 @@ public final class CompressionParams
         if (chunkLength <= 0)
             throw new ConfigurationException("Invalid negative or null " + CHUNK_LENGTH_IN_KB);
 
+        if (usesFixedOutputChunks())
+        {
+            // Fixed-output mode: the compressed target must be a whole number of device blocks; the
+            // uncompressed size per chunk is variable and only capped. Chunk indexing is by a stored
+            // uncompressed-offset table (binary search), so chunkLength need not be a power of 2.
+            if (compressedChunkLength % FIXED_OUTPUT_ALIGNMENT_FLOOR != 0)
+                throw new ConfigurationException(format("%s must be a multiple of %d bytes (a whole number of device blocks)",
+                                                        COMPRESSED_CHUNK_LENGTH_IN_KB, FIXED_OUTPUT_ALIGNMENT_FLOOR));
+
+            if (compressedChunkLength > MAX_FIXED_OUTPUT_LENGTH)
+                throw new ConfigurationException(format("%s must not exceed %d bytes", COMPRESSED_CHUNK_LENGTH_IN_KB, MAX_FIXED_OUTPUT_LENGTH));
+
+            if (maxUncompressedChunkLength < compressedChunkLength)
+                throw new ConfigurationException(format("%s must be greater than or equal to %s",
+                                                        MAX_UNCOMPRESSED_CHUNK_LENGTH_IN_KB, COMPRESSED_CHUNK_LENGTH_IN_KB));
+
+            if (maxUncompressedChunkLength > MAX_FIXED_OUTPUT_LENGTH)
+                throw new ConfigurationException(format("%s must not exceed %d bytes", MAX_UNCOMPRESSED_CHUNK_LENGTH_IN_KB, MAX_FIXED_OUTPUT_LENGTH));
+            return;
+        }
+
         if ((chunkLength & (chunkLength - 1)) != 0)
             throw new ConfigurationException(CHUNK_LENGTH_IN_KB + " must be a power of 2");
 
@@ -480,6 +633,11 @@ public final class CompressionParams
         options.put(CHUNK_LENGTH_IN_KB, chunkLengthInKB());
         if (minCompressRatio != DEFAULT_MIN_COMPRESS_RATIO)
             options.put(MIN_COMPRESS_RATIO, String.valueOf(minCompressRatio));
+        if (usesFixedOutputChunks())
+        {
+            options.put(COMPRESSED_CHUNK_LENGTH_IN_KB, String.valueOf(compressedChunkLength / 1024));
+            options.put(MAX_UNCOMPRESSED_CHUNK_LENGTH_IN_KB, String.valueOf(maxUncompressedChunkLength / 1024));
+        }
 
         return options;
     }
@@ -503,7 +661,9 @@ public final class CompressionParams
         return Objects.equal(sstableCompressor, cp.sstableCompressor)
             && chunkLength == cp.chunkLength
             && otherOptions.equals(cp.otherOptions)
-            && minCompressRatio == cp.minCompressRatio;
+            && minCompressRatio == cp.minCompressRatio
+            && compressedChunkLength == cp.compressedChunkLength
+            && maxUncompressedChunkLength == cp.maxUncompressedChunkLength;
     }
 
     @Override
@@ -514,7 +674,25 @@ public final class CompressionParams
             .append(chunkLength)
             .append(otherOptions)
             .append(minCompressRatio)
+            .append(compressedChunkLength)
+            .append(maxUncompressedChunkLength)
             .toHashCode();
+    }
+
+    /**
+     * Options serialized to the messaging/streaming wire and to the -CompressionInfo.db header. In
+     * fixed-output mode the mode's parameters ride along as reserved marker keys (byte counts) so the
+     * mode is self-describing without a wire/format version bump; a peer that does not understand
+     * fixed-output rejects the unknown compressor options (fails loudly, does not misdecode).
+     */
+    Map<String, String> serializedOptions()
+    {
+        if (!usesFixedOutputChunks())
+            return otherOptions;
+        Map<String, String> opts = new HashMap<>(otherOptions);
+        opts.put(FIXED_OUTPUT_LENGTH_MARKER, Integer.toString(compressedChunkLength));
+        opts.put(FIXED_OUTPUT_MAX_UNCOMPRESSED_MARKER, Integer.toString(maxUncompressedChunkLength));
+        return opts;
     }
 
     static class Serializer implements IVersionedSerializer<CompressionParams>
@@ -523,8 +701,9 @@ public final class CompressionParams
         {
             assert version >= MessagingService.VERSION_40;
             out.writeUTF(parameters.sstableCompressor.serializedAs().getSimpleName());
-            out.writeInt(parameters.otherOptions.size());
-            for (Map.Entry<String, String> entry : parameters.otherOptions.entrySet())
+            Map<String, String> options = parameters.serializedOptions();
+            out.writeInt(options.size());
+            for (Map.Entry<String, String> entry : options.entrySet())
             {
                 out.writeUTF(entry.getKey());
                 out.writeUTF(entry.getValue());
@@ -546,12 +725,26 @@ public final class CompressionParams
                 options.put(key, value);
             }
             int chunkLength = in.readInt();
-            int minCompressRatio = in.readInt();
+            int maxCompressedLength = in.readInt();
+
+            // Fixed-output markers ride in the option map (byte counts); strip and apply them.
+            int compressedChunkLength = 0;
+            int maxUncompressedChunkLength = 0;
+            String fixedOutputMarker = options.remove(FIXED_OUTPUT_LENGTH_MARKER);
+            if (fixedOutputMarker != null)
+            {
+                compressedChunkLength = Integer.parseInt(fixedOutputMarker);
+                String capMarker = options.remove(FIXED_OUTPUT_MAX_UNCOMPRESSED_MARKER);
+                maxUncompressedChunkLength = capMarker != null
+                                             ? Integer.parseInt(capMarker)
+                                             : (int) Math.min((long) compressedChunkLength * DEFAULT_MAX_UNCOMPRESSED_MULTIPLE, Integer.MAX_VALUE);
+            }
 
             CompressionParams parameters;
             try
             {
-                parameters = new CompressionParams(compressorName, chunkLength, minCompressRatio, options);
+                parameters = new CompressionParams(compressorName, chunkLength, maxCompressedLength, options,
+                                                   compressedChunkLength, maxUncompressedChunkLength);
             }
             catch (ConfigurationException e)
             {
@@ -564,8 +757,9 @@ public final class CompressionParams
         {
             assert version >= MessagingService.VERSION_40;
             long size = TypeSizes.sizeof(parameters.sstableCompressor.serializedAs().getSimpleName());
-            size += TypeSizes.sizeof(parameters.otherOptions.size());
-            for (Map.Entry<String, String> entry : parameters.otherOptions.entrySet())
+            Map<String, String> options = parameters.serializedOptions();
+            size += TypeSizes.sizeof(options.size());
+            for (Map.Entry<String, String> entry : options.entrySet())
             {
                 size += TypeSizes.sizeof(entry.getKey());
                 size += TypeSizes.sizeof(entry.getValue());

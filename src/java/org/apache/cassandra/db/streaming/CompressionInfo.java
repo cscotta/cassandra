@@ -53,16 +53,30 @@ public abstract class CompressionInfo
     public abstract CompressionMetadata.Chunk[] chunks();
 
     /**
+     * Fixed-output (block-aligned) mode only: the uncompressed start offset of each chunk in
+     * {@link #chunks()} (same order/length). Compressed chunk geometry alone does not tell the
+     * receiver where a chunk lands in the uncompressed file (uncompressed chunk sizes vary), so these
+     * are streamed alongside. {@code null} in legacy mode.
+     */
+    public long[] uncompressedChunkOffsets()
+    {
+        return null;
+    }
+
+    /**
      * Computes the size of the file to transfer.
      *
      * @return the size of the file in bytes
      */
     public long getTotalSize()
     {
+        // Fixed-output blocks carry their CRC inside the fixed on-disk size (chunk.length == S), so
+        // their footprint is chunk.length; legacy chunks add a trailing 4-byte CRC.
+        int crc = parameters().usesFixedOutputChunks() ? 0 : 4;
         long size = 0;
         for (CompressionMetadata.Chunk chunk : chunks())
         {
-            size += chunk.length + 4; // 4 bytes for CRC
+            size += chunk.length + crc;
         }
         return size;
     }
@@ -96,6 +110,11 @@ public abstract class CompressionInfo
      */
     public static CompressionInfo newInstance(CompressionMetadata.Chunk[] chunks, CompressionParams parameters)
     {
+        return newInstance(chunks, null, parameters);
+    }
+
+    public static CompressionInfo newInstance(CompressionMetadata.Chunk[] chunks, long[] uncompressedChunkOffsets, CompressionParams parameters)
+    {
         assert chunks != null && parameters != null;
 
         return new CompressionInfo()
@@ -104,6 +123,12 @@ public abstract class CompressionInfo
             public Chunk[] chunks()
             {
                 return chunks;
+            }
+
+            @Override
+            public long[] uncompressedChunkOffsets()
+            {
+                return uncompressedChunkOffsets;
             }
 
             @Override
@@ -135,14 +160,37 @@ public abstract class CompressionInfo
         return new CompressionInfo()
         {
             private volatile Chunk[] chunks;
+            private volatile long[] uncompressedChunkOffsets;
 
             @Override
             public synchronized Chunk[] chunks()
             {
                 if (chunks == null)
-                    chunks = metadata.getChunksForSections(sections);
-
+                    computeChunks();
                 return chunks;
+            }
+
+            @Override
+            public synchronized long[] uncompressedChunkOffsets()
+            {
+                if (!metadata.parameters.usesFixedOutputChunks())
+                    return null;
+                if (chunks == null)
+                    computeChunks();
+                return uncompressedChunkOffsets;
+            }
+
+            private void computeChunks()
+            {
+                Chunk[] cs = metadata.getChunksForSections(sections);
+                if (metadata.parameters.usesFixedOutputChunks())
+                {
+                    long[] offsets = new long[cs.length];
+                    for (int i = 0; i < cs.length; i++)
+                        offsets[i] = metadata.getDataOffsetForChunkOffset(cs[i].offset);
+                    uncompressedChunkOffsets = offsets;
+                }
+                chunks = cs;
             }
 
             @Override
@@ -180,6 +228,13 @@ public abstract class CompressionInfo
                 CompressionMetadata.Chunk.serializer.serialize(chunks[i], out, version);
             // compression params
             CompressionParams.serializer.serialize(info.parameters(), out, version);
+            // fixed-output: per-chunk uncompressed start offsets (mode is self-describing via params)
+            if (info.parameters().usesFixedOutputChunks())
+            {
+                long[] uncompressedOffsets = info.uncompressedChunkOffsets();
+                for (int i = 0; i < chunkCount; i++)
+                    out.writeLong(uncompressedOffsets[i]);
+            }
         }
 
         public CompressionInfo deserialize(DataInputPlus in, int version) throws IOException
@@ -195,6 +250,14 @@ public abstract class CompressionInfo
 
             // compression params
             CompressionParams parameters = CompressionParams.serializer.deserialize(in, version);
+
+            if (parameters.usesFixedOutputChunks())
+            {
+                long[] uncompressedOffsets = new long[chunkCount];
+                for (int i = 0; i < chunkCount; i++)
+                    uncompressedOffsets[i] = in.readLong();
+                return CompressionInfo.newInstance(chunks, uncompressedOffsets, parameters);
+            }
             return CompressionInfo.newInstance(chunks, parameters);
         }
 
@@ -211,6 +274,8 @@ public abstract class CompressionInfo
                 size += CompressionMetadata.Chunk.serializer.serializedSize(chunks[i], version);
             // compression params
             size += CompressionParams.serializer.serializedSize(info.parameters(), version);
+            if (info.parameters().usesFixedOutputChunks())
+                size += (long) chunkCount * TypeSizes.sizeof(0L);
             return size;
         }
     }

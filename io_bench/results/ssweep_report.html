@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Fixed-output S-sweep (16/32/48/64 KB) vs legacy 64 KB</title>
+<style>
+body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:1040px;margin:2rem auto;padding:0 1rem;line-height:1.5;color:#1a1a1a}
+h1{border-bottom:2px solid #ccc;padding-bottom:.3em}h2{margin-top:1.8em;border-bottom:1px solid #eee}
+h3{margin-top:1.3em}
+table{border-collapse:collapse;width:100%;margin:1em 0}th,td{border:1px solid #ccc;padding:.45em .6em;text-align:right}
+th:first-child,td:first-child{text-align:left}tr:nth-child(even){background:#fafafa}
+.win{color:#0a7d28;font-weight:600}.cost{color:#b04a00;font-weight:600}.neu{color:#666}
+.base{background:#eef3f8}
+.cap{color:#666;font-size:.9em}
+.note{background:#f7f7f9;border:1px solid #e0e0e0;border-radius:6px;padding:.5em 1em;font-size:.92em}
+.warn{background:#fdf6ec;border:1px solid #e6d8b8;border-radius:6px;padding:.5em 1em;font-size:.92em}
+.rec{background:#eef7ee;border:1px solid #cfe6cf;border-radius:6px;padding:.6em 1em}
+code{background:#f0f0f0;padding:.1em .3em;border-radius:3px}
+</style></head><body>
+
+<h1>Fixed-output S-sweep &mdash; 16 / 32 / 48 / 64 KB vs legacy 64 KB</h1>
+<p class="cap">Same table <code>iouring_bench.readbench</code> (~203&nbsp;GB logical, 64&nbsp;M single-row
+partitions, ~0.45-compressible), all points rewritten and measured on the <b>same build and node</b>: BIG
+format, LCS, Zstd@8, raw XFS, <code>disk_access_mode=standard</code> (buffered, <b>16&nbsp;KB pages</b>),
+key/row caches off, 16&nbsp;GB heap, autocompaction off. Fixed-output uses the tightened packer (accept
+threshold 63/64, 16&nbsp;MiB flush buffer). S values are all whole 16&nbsp;KB pages (24&nbsp;KB is excluded &mdash;
+1.5 pages would straddle and reintroduce the over-fetch the feature removes). Legacy = plain
+<code>chunk_length_in_kb=64</code>. Findings were adversarially verified against the raw traces before
+publication; robust vs confounded metrics are separated below.</p>
+
+<h2>1. On-disk &mdash; robust (deterministic full rewrite)</h2>
+<table>
+<tr><th>config</th><th>space</th><th>ratio</th><th>vs legacy</th></tr>
+<tr class="base"><td>legacy 64 KB</td><td>91.4&nbsp;GB</td><td>0.450</td><td>&mdash;</td></tr>
+<tr><td>fixed-output 16 KB</td><td>97.7&nbsp;GB</td><td>~0.481</td><td class="cost">+6.9%</td></tr>
+<tr><td>fixed-output 32 KB</td><td>92.3&nbsp;GB</td><td>~0.454</td><td class="cost">+1.0%</td></tr>
+<tr><td>fixed-output 48 KB</td><td>90.0&nbsp;GB</td><td>~0.443</td><td class="win">&minus;1.5%</td></tr>
+<tr><td>fixed-output 64 KB</td><td>89.5&nbsp;GB</td><td>0.440</td><td class="win">&minus;2.0%</td></tr>
+</table>
+<p class="note">Overhead falls monotonically as S grows &mdash; larger blocks pack more uncompressed input
+(a bigger Zstd window), so ratio improves. Padding is ~1.5% at every S with the tight packer, so this axis is
+pure compression context, not framing. <b>On-disk overhead crosses +2% at S&nbsp;&asymp;&nbsp;29&nbsp;KB</b>:
+any S&nbsp;&ge;&nbsp;32&nbsp;KB stays within 2% of legacy, and S&nbsp;&ge;&nbsp;48&nbsp;KB is smaller than legacy.</p>
+
+<h2>2. Read efficiency &mdash; robust (aggregates over millions of reads)</h2>
+<table>
+<tr><th>config</th><th>warm device KB/op</th><th>vs legacy</th><th>warm device reads/op (IOPS)</th><th>cold VFS KB/req</th></tr>
+<tr class="base"><td>legacy 64 KB</td><td>24.9</td><td>&mdash;</td><td>0.47</td><td>44.7</td></tr>
+<tr><td>fixed-output 16 KB</td><td>10.9</td><td class="win">&minus;56%</td><td>0.44</td><td>32.0</td></tr>
+<tr><td>fixed-output 32 KB</td><td>17.5</td><td class="win">&minus;30%</td><td>0.40</td><td>48.0</td></tr>
+<tr><td>fixed-output 48 KB</td><td>24.2</td><td class="win">&minus;3%</td><td>0.39</td><td>64.0</td></tr>
+<tr><td>fixed-output 64 KB</td><td>30.7</td><td class="cost">+23%</td><td>0.38</td><td>80.0</td></tr>
+</table>
+<p class="note"><b>Device bytes/op</b> (what actually reaches the disk) is the primary efficiency signal: it
+falls monotonically as S shrinks and <b>beats legacy for every S&nbsp;&le;&nbsp;48&nbsp;KB</b>, crossing the
+legacy 24.9&nbsp;KB line at S&nbsp;&asymp;&nbsp;50&nbsp;KB. <b>Device reads/op (IOPS)</b> is below legacy at
+<i>every</i> S (0.38&ndash;0.44 vs 0.47) &mdash; alignment turns legacy's straddled chunk fetch into one
+aligned block read regardless of S. <b>Cold VFS KB/req = S + 16&nbsp;KB exactly</b> (one data block + one
+index page), the clean cold read-size measure.</p>
+<p class="warn"><b>Caveat on absolute device bytes.</b> The absolute KB/op level inherits the page-cache state
+of the run (see &sect;3) &mdash; a hotter or colder cache shifts it. Read it as a <i>relative cross-S trend</i>,
+not a fixed device budget. Also note VFS KB/op (bytes the DB reads, cache-served included) beats legacy
+(23.4) only at S=16 (17.0); it is higher for S&nbsp;&ge;&nbsp;32. Device is what reaches disk, so device is
+the metric to headline.</p>
+
+<h2>3. Throughput, latency, cache hit &mdash; CONFOUNDED, not comparable across S</h2>
+<p class="warn">These are shown for completeness but <b>must not be read as cross-S efficiency results.</b> The
+adaptive <code>--maxrlat 50</code> limiter settled at different offered rates driven by the page-cache hit
+fraction, which itself moves only because larger blocks enlarge the working set. If the runs were
+device-bandwidth-bound, ops/s &times; KB/op would be constant &mdash; instead implied device throughput rises
+718&rarr;981&rarr;1239&nbsp;MB/s across S16/32/48, and S16 ops/s even exceeds legacy, which is impossible under
+a fixed device ceiling. p99 also overshoots the 50&nbsp;ms target 2&ndash;4&times; (bimodal: ~0.3&nbsp;ms cache
+hits vs tens-of-ms misses), so latency figures are tail/limiter statistics, not steady service times.</p>
+<table>
+<tr><th>config</th><th>warm ops/s <span class="cap">(limiter)</span></th><th>avg / p99 ms <span class="cap">(tail)</span></th><th>cache hit <span class="cap">(working-set)</span></th></tr>
+<tr class="base"><td>legacy 64 KB</td><td>57,393</td><td>24.6 / 317</td><td>71.9%</td></tr>
+<tr><td>fixed-output 16 KB</td><td>67,410</td><td>11.5 / 192</td><td>84.9%</td></tr>
+<tr><td>fixed-output 32 KB</td><td>57,414</td><td>8.4 / 155</td><td>75.5%</td></tr>
+<tr><td>fixed-output 48 KB</td><td>52,433</td><td>4.9 / 85</td><td>67.4%</td></tr>
+<tr><td>fixed-output 64 KB</td><td>52,416</td><td>62.7 / 545</td><td>60.4%</td></tr>
+</table>
+<p class="cap">0 errors on every run; no active compaction during any cold measurement (verified). The cache-hit
+column declines mechanically with S (bigger blocks = larger working set under identical drop-caches warm-up),
+which is itself the mechanism behind the smaller-S device-byte win &mdash; but it is a working-set effect, not
+an independent efficiency result.</p>
+
+<h2>4. The tradeoff and recommendation</h2>
+<p>S is a single dial trading <b>on-disk size</b> against <b>device bytes per read</b>, in opposite directions,
+with the alignment IOPS reduction holding at every S:</p>
+<table>
+<tr><th>S</th><th>on-disk vs legacy</th><th>warm device KB/op vs legacy</th><th>character</th></tr>
+<tr><td>16 KB</td><td class="cost">+6.9%</td><td class="win">&minus;56%</td><td>max read-byte win, storage cost</td></tr>
+<tr><td>32 KB</td><td class="cost">+1.0%</td><td class="win">&minus;30%</td><td><b>balanced sweet spot</b></td></tr>
+<tr><td>48 KB</td><td class="win">&minus;1.5%</td><td class="win">&minus;3%</td><td>space-positive, marginal read win</td></tr>
+<tr><td>64 KB</td><td class="win">&minus;2.0%</td><td class="cost">+23%</td><td>on-disk-optimal, read-negative</td></tr>
+</table>
+
+<div class="rec">
+<b>Recommendation by objective.</b>
+<ul>
+<li><b>Balanced (recommended default): S = 32 KB.</b> +1.0% on-disk (inside a 2% budget) for a <b>~30% cut in
+device bytes/op</b> and fewer device reads/op. Best overall trade for a ~0.45-compressible point-read workload.</li>
+<li><b>Maximum read reduction: S = 16 KB.</b> <b>&minus;56%</b> device bytes/op and the smallest cold read
+(32 KB), at <b>+6.9% on-disk</b>. Choose when read-amplification/latency matters more than ~7% storage &mdash;
+or pair with a Zstd dictionary to claw back most of that 7% (compress/decompress already compose; only the
+trainer needs the fixed-output fix).</li>
+<li><b>Storage-conservative: S = 48 KB.</b> Actually <b>smaller than legacy (&minus;1.5%)</b> while still
+edging below legacy on device bytes (24.2 vs 24.9) &mdash; but the read win is marginal.</li>
+<li><b>Avoid S = 64 KB for point reads:</b> best on-disk but a 64 KB block over-fetches vs legacy's ~29 KB
+compressed chunk, so device bytes go <i>up</i> +23%.</li>
+</ul>
+The useful space-neutral window is roughly <b>S &isin; [30, 48] KB</b>: below ~29 KB you pay storage for a
+larger read cut; above ~50 KB you lose the device advantage. Every S&nbsp;&le;&nbsp;48&nbsp;KB beats legacy on
+device traffic <i>and</i> on device-read count.
+</div>
+
+<h2>Caveats</h2>
+<ul>
+<li>Throughput, latency, and cache-hit are limiter/working-set confounded and excluded from cross-S efficiency claims (&sect;3).</li>
+<li>Warm device KB/op is robust as a relative trend; its absolute level depends on cache state.</li>
+<li>Cold <i>device</i> KB (n=20) is noisy with multi-block outliers and non-monotonic &mdash; cold <i>VFS</i> KB (= S+16) is used instead.</li>
+<li>Ratios for S=16/32/48 are computed from measured space over the fixed ~203&nbsp;GB logical size; S=64 and legacy are direct <code>tablestats</code> readings.</li>
+<li>Write cost rises at small S with the current multi-trial packer; the pending Zstd streaming override (Task #19) would restore ~1 compression/chunk.</li>
+</ul>
+
+</body></html>

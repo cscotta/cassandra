@@ -1,0 +1,697 @@
+{
+  "summary": {
+    "subtitle": "iouring_bench.readbench | duration=120s maxrlat=r140000ms threads=64 | disk_access_mode=standard, chunk cache off, Zstd@8 64KB, LCS, /dev/nvme0n1p8, working set ~188GB > 62GB RAM",
+    "rows": [
+      [
+        "chunk_length_in_kb",
+        "64"
+      ],
+      [
+        "compression ratio",
+        "0.4380"
+      ],
+      [
+        "read latency avg (ms)",
+        "2585.350"
+      ],
+      [
+        "read latency p50 (ms)",
+        "2516.580"
+      ],
+      [
+        "read latency p99 (ms)",
+        "7851.740"
+      ],
+      [
+        "ops served",
+        "12500303"
+      ],
+      [
+        "throughput",
+        "104169 ops/s"
+      ],
+      [
+        "errors",
+        "824047 (6.18%)"
+      ],
+      [
+        "page-cache hit rate (cachestat, mm)",
+        "66.7%"
+      ],
+      [
+        "page-cache hit rate (VFS-vs-device IOPS)",
+        "81.2%"
+      ],
+      [
+        "index (Index.db) page-cache hit rate",
+        "99.2%"
+      ],
+      [
+        "data (Data.db) page-cache hit rate",
+        "7.5%"
+      ],
+      [
+        "cachestat hits / misses",
+        "24594195 / 12264080"
+      ],
+      [
+        "device reads/op (p8, approx)",
+        "0.20"
+      ],
+      [
+        "device KB/op (p8, approx)",
+        "15.7"
+      ]
+    ]
+  },
+  "cachestat_series": [
+    {
+      "hits": 0,
+      "misses": 30036,
+      "hitratio": 0.0,
+      "cached_mb": 21131.0
+    },
+    {
+      "hits": 3869,
+      "misses": 43432,
+      "hitratio": 8.179531088137672,
+      "cached_mb": 21813.0
+    },
+    {
+      "hits": 3485,
+      "misses": 42688,
+      "hitratio": 7.5477010374028115,
+      "cached_mb": 22476.0
+    },
+    {
+      "hits": 4146,
+      "misses": 42451,
+      "hitratio": 8.897568512994399,
+      "cached_mb": 23132.0
+    },
+    {
+      "hits": 6481,
+      "misses": 39843,
+      "hitratio": 13.990588032121579,
+      "cached_mb": 23743.0
+    },
+    {
+      "hits": 18414,
+      "misses": 73928,
+      "hitratio": 19.941088562084424,
+      "cached_mb": 24875.0
+    },
+    {
+      "hits": 26465,
+      "misses": 67621,
+      "hitratio": 28.12852071509045,
+      "cached_mb": 25915.0
+    },
+    {
+      "hits": 37761,
+      "misses": 78570,
+      "hitratio": 32.45996338035433,
+      "cached_mb": 27131.0
+    },
+    {
+      "hits": 54513,
+      "misses": 91106,
+      "hitratio": 37.43536214367631,
+      "cached_mb": 28553.0
+    },
+    {
+      "hits": 52963,
+      "misses": 89503,
+      "hitratio": 37.175887580194576,
+      "cached_mb": 29952.0
+    },
+    {
+      "hits": 74068,
+      "misses": 117471,
+      "hitratio": 38.66993144999191,
+      "cached_mb": 31800.0
+    },
+    {
+      "hits": 76096,
+      "misses": 117015,
+      "hitratio": 39.40531611353056,
+      "cached_mb": 33644.0
+    },
+    {
+      "hits": 85622,
+      "misses": 127114,
+      "hitratio": 40.24800691937425,
+      "cached_mb": 35646.0
+    },
+    {
+      "hits": 95491,
+      "misses": 138394,
+      "hitratio": 40.82818479167112,
+      "cached_mb": 37829.0
+    },
+    {
+      "hits": 99093,
+      "misses": 135303,
+      "hitratio": 42.275892080069625,
+      "cached_mb": 39963.0
+    },
+    {
+      "hits": 124930,
+      "misses": 171245,
+      "hitratio": 42.18114290537689,
+      "cached_mb": 42670.0
+    },
+    {
+      "hits": 129240,
+      "misses": 170174,
+      "hitratio": 43.16431429392079,
+      "cached_mb": 45366.0
+    },
+    {
+      "hits": 132431,
+      "misses": 179423,
+      "hitratio": 42.46570510559428,
+      "cached_mb": 48203.0
+    },
+    {
+      "hits": 141141,
+      "misses": 186260,
+      "hitratio": 43.10952012974914,
+      "cached_mb": 51150.0
+    },
+    {
+      "hits": 144020,
+      "misses": 182820,
+      "hitratio": 44.064374005629666,
+      "cached_mb": 54036.0
+    },
+    {
+      "hits": 178595,
+      "misses": 217149,
+      "hitratio": 45.128921727177165,
+      "cached_mb": 55876.0
+    },
+    {
+      "hits": 323656,
+      "misses": 209637,
+      "hitratio": 60.69008968803266,
+      "cached_mb": 55486.0
+    },
+    {
+      "hits": 541324,
+      "misses": 210441,
+      "hitratio": 72.00707667954747,
+      "cached_mb": 55656.0
+    },
+    {
+      "hits": 562288,
+      "misses": 221624,
+      "hitratio": 71.7284593168621,
+      "cached_mb": 55093.0
+    },
+    {
+      "hits": 546824,
+      "misses": 223315,
+      "hitratio": 71.00328641972423,
+      "cached_mb": 54742.0
+    },
+    {
+      "hits": 522213,
+      "misses": 225837,
+      "hitratio": 69.8099057549629,
+      "cached_mb": 54611.0
+    },
+    {
+      "hits": 497784,
+      "misses": 204944,
+      "hitratio": 70.83594221377261,
+      "cached_mb": 54073.0
+    },
+    {
+      "hits": 508727,
+      "misses": 216344,
+      "hitratio": 70.16237030580453,
+      "cached_mb": 53578.0
+    },
+    {
+      "hits": 500388,
+      "misses": 215525,
+      "hitratio": 69.89508501731356,
+      "cached_mb": 52850.0
+    },
+    {
+      "hits": 513727,
+      "misses": 224062,
+      "hitratio": 69.63061254640554,
+      "cached_mb": 52283.0
+    },
+    {
+      "hits": 475129,
+      "misses": 207520,
+      "hitratio": 69.60077580132689,
+      "cached_mb": 51072.0
+    },
+    {
+      "hits": 505805,
+      "misses": 215175,
+      "hitratio": 70.155205414852,
+      "cached_mb": 50533.0
+    },
+    {
+      "hits": 578384,
+      "misses": 263885,
+      "hitratio": 68.66974802586822,
+      "cached_mb": 49400.0
+    },
+    {
+      "hits": 603378,
+      "misses": 266146,
+      "hitratio": 69.39175916938463,
+      "cached_mb": 48918.0
+    },
+    {
+      "hits": 549760,
+      "misses": 232352,
+      "hitratio": 70.29172292459393,
+      "cached_mb": 47370.0
+    },
+    {
+      "hits": 553371,
+      "misses": 232605,
+      "hitratio": 70.40558490335583,
+      "cached_mb": 46886.0
+    },
+    {
+      "hits": 568344,
+      "misses": 250323,
+      "hitratio": 69.4230987690966,
+      "cached_mb": 46146.0
+    },
+    {
+      "hits": 554733,
+      "misses": 236405,
+      "hitratio": 70.11836114559027,
+      "cached_mb": 45683.0
+    },
+    {
+      "hits": 584564,
+      "misses": 259744,
+      "hitratio": 69.23587126972622,
+      "cached_mb": 46682.0
+    },
+    {
+      "hits": 601365,
+      "misses": 262135,
+      "hitratio": 69.64273306311523,
+      "cached_mb": 47078.0
+    },
+    {
+      "hits": 598911,
+      "misses": 268014,
+      "hitratio": 69.0845228826023,
+      "cached_mb": 46633.0
+    },
+    {
+      "hits": 578006,
+      "misses": 252875,
+      "hitratio": 69.56543716849946,
+      "cached_mb": 46550.0
+    },
+    {
+      "hits": 574411,
+      "misses": 246644,
+      "hitratio": 69.96011229454787,
+      "cached_mb": 46721.0
+    },
+    {
+      "hits": 602257,
+      "misses": 263883,
+      "hitratio": 69.53344724871268,
+      "cached_mb": 46279.0
+    },
+    {
+      "hits": 570623,
+      "misses": 238495,
+      "hitratio": 70.52407683428127,
+      "cached_mb": 46329.0
+    },
+    {
+      "hits": 639188,
+      "misses": 273411,
+      "hitratio": 70.04040109620983,
+      "cached_mb": 45966.0
+    },
+    {
+      "hits": 586193,
+      "misses": 244246,
+      "hitratio": 70.58832737865153,
+      "cached_mb": 46103.0
+    },
+    {
+      "hits": 562129,
+      "misses": 240012,
+      "hitratio": 70.07857720774777,
+      "cached_mb": 45727.0
+    },
+    {
+      "hits": 595178,
+      "misses": 255466,
+      "hitratio": 69.96793017995778,
+      "cached_mb": 45602.0
+    },
+    {
+      "hits": 594126,
+      "misses": 250361,
+      "hitratio": 70.35348087063507,
+      "cached_mb": 44740.0
+    },
+    {
+      "hits": 594021,
+      "misses": 256774,
+      "hitratio": 69.81952174143008,
+      "cached_mb": 44258.0
+    },
+    {
+      "hits": 561339,
+      "misses": 229404,
+      "hitratio": 70.98880420060627,
+      "cached_mb": 43969.0
+    },
+    {
+      "hits": 547724,
+      "misses": 232201,
+      "hitratio": 70.22777831201718,
+      "cached_mb": 43463.0
+    },
+    {
+      "hits": 561711,
+      "misses": 239712,
+      "hitratio": 70.08920382868972,
+      "cached_mb": 42980.0
+    },
+    {
+      "hits": 638063,
+      "misses": 269432,
+      "hitratio": 70.31035983669331,
+      "cached_mb": 42444.0
+    },
+    {
+      "hits": 607423,
+      "misses": 271174,
+      "hitratio": 69.1355649973765,
+      "cached_mb": 42371.0
+    },
+    {
+      "hits": 631918,
+      "misses": 266282,
+      "hitratio": 70.35381874860833,
+      "cached_mb": 41866.0
+    },
+    {
+      "hits": 564800,
+      "misses": 236538,
+      "hitratio": 70.48211865654693,
+      "cached_mb": 41420.0
+    },
+    {
+      "hits": 580331,
+      "misses": 244917,
+      "hitratio": 70.32201229206251,
+      "cached_mb": 41109.0
+    },
+    {
+      "hits": 567013,
+      "misses": 235631,
+      "hitratio": 70.64314939126189,
+      "cached_mb": 40637.0
+    },
+    {
+      "hits": 633800,
+      "misses": 263168,
+      "hitratio": 70.6602688167248,
+      "cached_mb": 40624.0
+    },
+    {
+      "hits": 624440,
+      "misses": 265875,
+      "hitratio": 70.13697399235102,
+      "cached_mb": 41100.0
+    },
+    {
+      "hits": 2,
+      "misses": 0,
+      "hitratio": 100.0,
+      "cached_mb": 41100.0
+    }
+  ],
+  "es_series": [
+    {
+      "reads": 29154,
+      "p99_ms": 12.92,
+      "rate": 0.0
+    },
+    {
+      "reads": 71341,
+      "p99_ms": 8.65,
+      "rate": 11414.2
+    },
+    {
+      "reads": 113596,
+      "p99_ms": 5.91,
+      "rate": 11414.2
+    },
+    {
+      "reads": 184862,
+      "p99_ms": 2.31,
+      "rate": 11627.68
+    },
+    {
+      "reads": 270636,
+      "p99_ms": 0.83,
+      "rate": 12979.92
+    },
+    {
+      "reads": 401071,
+      "p99_ms": 1.5,
+      "rate": 12979.92
+    },
+    {
+      "reads": 546934,
+      "p99_ms": 1.47,
+      "rate": 15416.25
+    },
+    {
+      "reads": 723393,
+      "p99_ms": 1.08,
+      "rate": 15416.25
+    },
+    {
+      "reads": 925137,
+      "p99_ms": 0.85,
+      "rate": 18884.61
+    },
+    {
+      "reads": 1139550,
+      "p99_ms": 1.23,
+      "rate": 23084.15
+    },
+    {
+      "reads": 1412215,
+      "p99_ms": 1.82,
+      "rate": 23084.15
+    },
+    {
+      "reads": 1694067,
+      "p99_ms": 1.34,
+      "rate": 28503.73
+    },
+    {
+      "reads": 1994069,
+      "p99_ms": 1.64,
+      "rate": 28503.73
+    },
+    {
+      "reads": 2334374,
+      "p99_ms": 66.05,
+      "rate": 34218.5
+    },
+    {
+      "reads": 2695483,
+      "p99_ms": 190.73,
+      "rate": 41086.13
+    },
+    {
+      "reads": 3033145,
+      "p99_ms": 663.99,
+      "rate": 41086.13
+    },
+    {
+      "reads": 3364822,
+      "p99_ms": 1553.47,
+      "rate": 46828.08
+    },
+    {
+      "reads": 3720228,
+      "p99_ms": 1809.68,
+      "rate": 46828.08
+    },
+    {
+      "reads": 4021689,
+      "p99_ms": 2813.47,
+      "rate": 52131.47
+    },
+    {
+      "reads": 4413599,
+      "p99_ms": 3421.86,
+      "rate": 57397.0
+    },
+    {
+      "reads": 4843127,
+      "p99_ms": 4711.61,
+      "rate": 57397.0
+    },
+    {
+      "reads": 5220413,
+      "p99_ms": 4730.81,
+      "rate": 63529.56
+    },
+    {
+      "reads": 5603736,
+      "p99_ms": 4995.64,
+      "rate": 63529.56
+    },
+    {
+      "reads": 6002760,
+      "p99_ms": 5762.39,
+      "rate": 68836.92
+    },
+    {
+      "reads": 6384870,
+      "p99_ms": 5865.14,
+      "rate": 73650.3
+    },
+    {
+      "reads": 6732051,
+      "p99_ms": 5865.14,
+      "rate": 73650.3
+    },
+    {
+      "reads": 7074825,
+      "p99_ms": 5991.96,
+      "rate": 77059.22
+    },
+    {
+      "reads": 7374279,
+      "p99_ms": 6785.46,
+      "rate": 77059.22
+    },
+    {
+      "reads": 7805534,
+      "p99_ms": 7918.3,
+      "rate": 79607.0
+    },
+    {
+      "reads": 8244174,
+      "p99_ms": 7942.48,
+      "rate": 85049.11
+    },
+    {
+      "reads": 8619254,
+      "p99_ms": 7942.48,
+      "rate": 85049.11
+    },
+    {
+      "reads": 9025030,
+      "p99_ms": 7942.48,
+      "rate": 88286.04
+    },
+    {
+      "reads": 9406016,
+      "p99_ms": 7857.65,
+      "rate": 88286.04
+    },
+    {
+      "reads": 9745789,
+      "p99_ms": 7857.65,
+      "rate": 91124.7
+    },
+    {
+      "reads": 10144819,
+      "p99_ms": 8261.63,
+      "rate": 94271.66
+    },
+    {
+      "reads": 10512388,
+      "p99_ms": 7942.48,
+      "rate": 94271.66
+    },
+    {
+      "reads": 10837645,
+      "p99_ms": 8163.13,
+      "rate": 95685.82
+    },
+    {
+      "reads": 11181671,
+      "p99_ms": 8101.68,
+      "rate": 95685.82
+    },
+    {
+      "reads": 11630763,
+      "p99_ms": 7988.76,
+      "rate": 98560.06
+    },
+    {
+      "reads": 12011284,
+      "p99_ms": 7988.76,
+      "rate": 101029.72
+    },
+    {
+      "reads": 12421435,
+      "p99_ms": 8101.68,
+      "rate": 101029.72
+    },
+    {
+      "reads": 12499721,
+      "p99_ms": 8101.68,
+      "rate": 101029.72
+    },
+    {
+      "reads": 12500303,
+      "p99_ms": 8101.68,
+      "rate": 101029.72
+    }
+  ],
+  "block": {
+    "read_completions": 2520362,
+    "read_bytes": 200813678592,
+    "write_completions": 0,
+    "write_bytes": 0,
+    "other_completions": 0
+  },
+  "vfs": {
+    "pread_count": 13424681,
+    "pread_bytes": 295642424304,
+    "preadv_count": 0,
+    "preadv2_count": 0
+  },
+  "ops": 12500303,
+  "errors": 824047,
+  "hit_iops": 0.8122590771430621,
+  "component_hit_rates": {
+    "other": {
+      "acc_pages": 96,
+      "miss_pages": 42,
+      "hit_rate": 0.5625
+    },
+    "Index.db": {
+      "acc_pages": 10186792,
+      "miss_pages": 80358,
+      "hit_rate": 0.9921115499364275
+    },
+    "Data.db": {
+      "acc_pages": 12991050,
+      "miss_pages": 12019574,
+      "hit_rate": 0.07478040651063622
+    }
+  }
+}

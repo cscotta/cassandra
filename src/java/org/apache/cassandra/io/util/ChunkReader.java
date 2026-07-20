@@ -44,6 +44,17 @@ public interface ChunkReader extends RebuffererFactory
     int chunkSize();
 
     /**
+     * The file offset of the start of the chunk containing {@code position} — the value a
+     * buffer-managing rebufferer should pass to {@link #readChunk} and use as the buffer's file
+     * offset. The default assumes fixed power-of-two-sized chunks (mask); readers with variable
+     * chunk boundaries (fixed-output compression) override this with a lookup.
+     */
+    default long chunkBase(long position)
+    {
+        return position & -(long) chunkSize();
+    }
+
+    /**
      * Specifies type of buffer the caller should attempt to give.
      * This is not guaranteed to be fulfilled.
      */

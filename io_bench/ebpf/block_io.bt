@@ -1,0 +1,138 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+// ============================================================================
+// block_io.bt -- attribute block-device IO at the loop device that backs
+//                Cassandra's XFS data volume.
+//
+// Tracks tracepoint:block:block_rq_issue and tracepoint:block:block_rq_complete,
+// FILTERED to a single target device. Headline numbers are counted at COMPLETE
+// (device read IOPS = read completions; device read bytes = sum nr_sector*512).
+// Per-thread ("comm") attribution is counted at ISSUE, because block_rq_complete
+// runs in softirq/IRQ context where `comm` is not the submitting thread; the
+// issuing thread name (ReadStage-N, CompactionExecutor-N, ...) is only available
+// at block_rq_issue.
+//
+// ---------------------------------------------------------------------------
+// INVOCATION / substitution mechanism
+// ---------------------------------------------------------------------------
+//   sudo bpftrace io_bench/ebpf/block_io.bt <DEV_T> [<PART_START> <PART_SECTORS>]
+//
+// <DEV_T> is the KERNEL dev_t of the target block device, passed as bpftrace
+// positional parameter $1 and used directly as an integer inside the probe
+// filter (`/args->dev == $1/`). bpftrace substitutes an unprovided positional
+// parameter with 0, so a bare `--dry-run` still parses and attaches.
+//
+// PARTITIONS: block_rq_* tracepoints report a partition's IO under its PARENT
+// disk's dev_t with ABSOLUTE (whole-disk) sector numbers. So to attribute IO to
+// one partition you pass the PARENT disk's <DEV_T> plus the partition's sector
+// window: $2 = start sector (/sys/class/block/<part>/start), $3 = sector count
+// (/sys/class/block/<part>/size). Requests are then filtered to
+// [$2, $2+$3). When $2 == 0 no sector filter is applied (whole device, e.g. a
+// loop device that is its own gendisk).
+//
+// The kernel block tracepoints encode dev_t as:  (MAJOR << 20) | MINOR
+// This is NOT the glibc st_rdev encoding, so do not use `stat -c %t/%T`.
+// Read the DECIMAL major:minor from sysfs and compute it:
+//
+//   read MAJ MIN < <(tr ':' ' ' < /sys/class/block/nvme0n1/dev)
+//   DEV_T=$(( (MAJ << 20) | MIN ))          # /dev/nvme0n1 = 259:0 -> 271581184
+//   START=$(cat /sys/class/block/nvme0n1p8/start)   # 3268790272
+//   NSECT=$(cat /sys/class/block/nvme0n1p8/size)    # 629144256
+//   sudo bpftrace block_io.bt "$DEV_T" "$START" "$NSECT"
+//
+// (`lsblk -o NAME,MAJ:MIN` prints the same decimal major:minor.)
+//
+// ---------------------------------------------------------------------------
+// Tracepoint field names verified on this kernel (7.0.13 aarch64, bpftrace
+// v0.24.2) via `bpftrace -lv`:
+//   block_rq_issue:    dev, sector, nr_sector, bytes, ioprio, rwbs[10], comm[16]
+//   block_rq_complete: dev, sector, nr_sector, error, ioprio, rwbs[10]
+// block_rq_complete has NO `bytes` field, so bytes = nr_sector * 512.
+// `rwbs` is surfaced by bpftrace as a string; to read individual bytes it is
+// cast to (int8 *) and indexed. Read = first char 'R' (82); write = 'W' (87)
+// or preflush-write 'F''W' (70,87). Everything else (flush-only, discard) is
+// bucketed as "other". Character literals ('R') are NOT supported by this
+// bpftrace version, so ASCII codes are used.
+// ============================================================================
+
+BEGIN
+{
+    printf("# block_io.bt dev_t=%d major=%d minor=%d sector_window=[%d,%d)\n",
+           $1, $1 >> 20, $1 & 0xFFFFF, $2, $2 + $3);
+    printf("# reads/writes counted at block_rq_complete; per-comm at block_rq_issue\n");
+}
+
+// Record issue timestamp for issue->complete latency, keyed by (dev, sector).
+// Attribute read submissions to the issuing thread here (comm is valid at issue).
+// $2==0 => whole device; else restrict to the partition window [$2, $2+$3).
+tracepoint:block:block_rq_issue /args->dev == $1 && ($2 == 0 || (args->sector >= (uint64)$2 && args->sector < (uint64)($2 + $3)))/
+{
+    @start[args->dev, args->sector] = nsecs;
+
+    $op0 = ((int8 *)args->rwbs)[0];
+    if ($op0 == 82) {                        // 'R' -- read submission
+        @rd_issue_cnt_by_comm[args->comm]   = count();
+        @rd_issue_bytes_by_comm[args->comm] = sum(args->bytes);
+        @rd_issue_by_thread[args->comm, pid, tid] = count();
+    }
+}
+
+// Headline counting happens at completion.
+tracepoint:block:block_rq_complete /args->dev == $1 && ($2 == 0 || (args->sector >= (uint64)$2 && args->sector < (uint64)($2 + $3)))/
+{
+    $lat = (uint64)0;
+    if (@start[args->dev, args->sector] != 0) {
+        $lat = nsecs - @start[args->dev, args->sector];
+        delete(@start[args->dev, args->sector]);
+    }
+
+    $op0   = ((int8 *)args->rwbs)[0];
+    $op1   = ((int8 *)args->rwbs)[1];
+    $bytes = (uint64)args->nr_sector * 512;
+
+    if ($op0 == 82) {                        // read
+        @read_completions = count();
+        @read_bytes       = sum($bytes);
+        @read_req_bytes   = hist($bytes);    // per-request size distribution
+        if ($lat > 0) {
+            @read_lat_us  = hist($lat / 1000);
+        }
+    } else if ($op0 == 87 || ($op0 == 70 && $op1 == 87)) {   // write / preflush-write
+        @write_completions = count();
+        @write_bytes       = sum($bytes);
+    } else {                                 // flush-only, discard, etc.
+        @other_completions = count();
+    }
+}
+
+END
+{
+    // Drop the bookkeeping map so it does not print.
+    clear(@start);
+
+    printf("\nSUMMARY read_completions=%llu read_bytes=%llu write_completions=%llu write_bytes=%llu other_completions=%llu\n",
+           (uint64)@read_completions, (uint64)@read_bytes,
+           (uint64)@write_completions, (uint64)@write_bytes,
+           (uint64)@other_completions);
+
+    // The SUMMARY line above is the primary parse target. The scalar counters,
+    // the two histograms (@read_lat_us, @read_req_bytes) and the per-comm /
+    // per-thread breakdowns are then auto-dumped by bpftrace as `@name[key]: v`
+    // lines; the scalar values there are consistent with SUMMARY.
+}
