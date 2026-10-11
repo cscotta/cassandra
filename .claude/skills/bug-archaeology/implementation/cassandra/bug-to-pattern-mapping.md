@@ -1,0 +1,2050 @@
+# Generic Bug Detection Patterns
+
+2006 generic patterns derived from 2,350 analyzed bugs, grouped by 13 categories.
+331 Cassandra-specific entries dropped as non-generalizable.
+
+## Logic error in condition (587)
+
+- Any management interface method method that is expected to always return a value (rather than throw) must guard against disabled or uninitialized subsystems before delegating to the implementation. Review each @Override of a management-interface method and confirm it handles the "subsystem not available" case gracefully
+- In range/interval containment checks, verify that the field being compared is the one that actually defines the relevant ordering for the check. Using a related but different field (e.g., a timestamp vs. a transaction ID that carries epoch+flags+timestamp) silently passes the wrong boundary to the comparison, producing subtly incorrect GC eligibility decisions without any obvious error at runtime
+- When a comparator is used for binary search that compares two logically different types (a search key vs. an interval), treating the result as symmetric hides divergent semantics at the equality boundary. Review any binary search call where the comparator casts or switches on the runtime type of its arguments — that is a sign the comparator is asymmetric in intent but forced into a symmetric API, and equality may be resolved in the wrong direction
+- Every startup while(true) loop that waits for an external condition should have an explicit deadline or attempt limit, along with a diagnostic exception or forced-shutdown on expiry. Review any retry loop where only a warning is logged on timeout — if there is no escape hatch, the node can hang indefinitely on any upstream failure
+- When two data sources (journal + storage structure) must be merged with deduplication, the ownership of the "already-seen" set must reflect which source is authoritative. If the wrong source populates the visited set, records from the authoritative source get dropped instead of duplicates from the secondary source. Review any dual-source merge pattern to confirm the visited/dedup set is populated by the primary source and used to filter the secondary source, not the reverse
+- Whenever a metric is computed from an intermediate captured value instead of re-reading a clock at the point the measurement is taken, look for paths that add latency (sleeps, retries, waits) between the capture and the metric assignment. If any such path exists but the metric still uses the early capture, the reported duration will be systematically under-counted on those paths
+- When counting "distinct things" with a plain counter and iterating a collection that may contain duplicates, the counter will over-count. Any time a condition fires based on a threshold on such a counter, check whether the items iterated are guaranteed unique or whether duplicates must be deduplicated first (e.g. via a Set)
+- When a single timestamp field is used to gate a cooldown check, ask whether it always represents "work fully completed" or whether it can also reflect a partial or aborted attempt. Systems that persist both a start and a finish timestamp should expose and compare both; collapsing them into one creates an ambiguity where "recent start of a crashed job" is indistinguishable from "recent completion of a successful job", causing the scheduler to skip necessary work
+- When a single flag/enum is overloaded to control two independent orthogonal properties (here: JVM daemon bit and simulator phase-tracking), adding a new use case that needs different values for each property has no legal representation. Review factory methods that accept mixed-concern flags and split them if they need to be independently varied
+- Bootstrap and restart code that rebuilds distributed state by replaying a historical log should identify and apply only the *most recent consistent snapshot* rather than re-applying every intermediate entry. When the log is sorted, applying the last entry is sufficient; re-applying all entries can corrupt state if intermediate steps are not idempotent. Additionally, service components that depend on state being fully loaded must be started *after* that loading is complete to avoid processing callbacks against a partially initialized structure
+- When determining equality of routing keys that can be represented by multiple subtypes (TokenKey, MinTokenKey, SentinelKey), comparing the objects directly via equals is unsafe unless all subtypes define cross-type equality. Prefer extracting and comparing the underlying token value whenever the semantic question is about token position rather than object identity. The same pitfall applies to any hierarchy where a sentinel/min/max subtype is used as a boundary marker
+- Range construction code that translates partition-position bounds into routing keys must handle the degenerate case where the left and right token are identical. In that situation an exclusive left boundary produces an empty range; the correct behavior is to treat it as left-inclusive so that rows at that exact token are included. When reviewing token-range boundary translation, check all three-way branch conditions (minimum, inclusive/minKeyBound, default) for the missing equal-token case
+- When a time value is converted from one unit (nanoseconds) to another (milliseconds) via arithmetic, both overflow and unit-mismatch risks exist. During review, verify that: (a) the unit being passed to every timed-wait API matches the unit of the value, and (b) the conversion arithmetic cannot overflow for extreme input values (e.g., near Long.MAX_VALUE). Additionally, any switch over an enum should include a default: throw new UnhandledEnum(...) to make new unhandled states visible immediately
+- Whenever a boolean flag is passed to a general-purpose "read all" helper that controls order, review every call site to confirm the chosen direction matches the consumer's assumption about accumulation order. Diff-based or event-sourced structures are especially sensitive: applying the newest entry first and the oldest last yields results that are the inverse of correct
+- When a coordinator waits on a future that is itself gated on a notification the coordinator is responsible for sending, the result is a deadlock or infinite loop. During code review, trace every "wait until X" path and verify that the required precondition for X can be satisfied without the waiting thread taking further action
+- Shutdown sequences must mirror startup sequences in reverse. When auditing drain or shutdown methods, trace every component that can receive external messages or schedule new work and confirm it is torn down after its message source, not before. A component that checks isTerminated and always returns false is a red flag for missed lifecycle transitions
+- When an API is refactored to move a method or enum from an inner class to a top-level class, all call sites must be updated simultaneously. Any remaining call through the old path (Commands.Cleanup, Commands.shouldCleanup) will compile if the old symbols still exist as aliases or deprecated overloads, hiding the mismatch. Review imports and static imports after refactors; a stale import accord.local.Commands alongside a new import accord.local.Cleanup is a strong signal that call sites may be inconsistent
+- Whenever a compaction purger processes partial rows (rows that represent only a subset of columns because compaction inputs are randomly selected), returning null to discard a row is incorrect—it only discards what is present in this compaction run; columns in other storage structures remain. The safe operation is to emit a row-level tombstone timestamped at the row's own liveness timestamp, which will shadow all column cells in future reads and compactions. Review every return null in a compaction purger that operates on mutable, multi-column component state
+- Whenever a helper method computes an attribute whose sole purpose is to support caching, check every call site to verify that the statement will actually be cached. Call sites that create transient, non-cached objects should opt out of that measurement. A single unconditional computation path shared by both cached and uncached callers is a sign this logic should be parameterised or split
+- When a system accepts compound declarative predicates at definition time but only evaluates them individually at enforcement time, impossible or redundant combinations can slip through. During code review, ask: is there a cross-constraint satisfiability check at the point where all constraints for a column are assembled? If constraints are stored in a list and each is only validated in isolation, any pair whose conjunction is a tautology (e.g., v > 5 AND v >= 5) or contradiction (e.g., v > 10 AND v < 5) will be silently accepted
+- When a method returns a List that the caller is expected to mutate (e.g., by calling remove), every return site must return a mutable list. Returning Arrays.asList(...) or Collections.singletonList(...) for the "nothing to do" case is a common trap because those factory methods produce fixed-size or unmodifiable lists. During review, check that all code paths returning a list share the same mutability contract; if the caller performs structural mutations, every early-exit path must also return a mutable list (or an empty Collections.emptyList if no entries are needed)
+- When an iterator abstraction has two distinct orderings or key kinds (e.g. STATIC vs. WIDE) that interleave in a posting list, any "skip-to-target" logic must be checked for the case where a single skip lands between the two kinds at the same partition—i.e., it overshoots the static boundary but undershoots the intended wide position. Review all early-exit conditions after a skip to confirm the result still satisfies the original comparison invariant under every possible key kind combination
+- Shell scripts that use unfiltered globs to locate a single artifact are fragile: build systems often emit companion JARs (javadoc, sources, test) whose names match the same pattern. Any script that expects exactly one result from a glob should filter unintended variants and guard against zero or multiple matches with an explicit count check before using the result
+- Every place in CQL parsing and restriction building that performs type identity checks (instanceof collection type, isCollection, isMap, etc.) on a column metadata.type must first call type.unwrap. A DESC clustering column wraps its real type in decorated type, so direct type checks will silently mismatch. Grep for column.type instanceof and column.type.is patterns and verify each site unwraps first
+- Any code that interrogates type identity (especially instanceof checks or methods like isFrozenCollection) on a type that can be wrapped by a decorator such as decorated type is vulnerable to this pattern. Always unwrap decorator layers before structural type checks; relying solely on delegating methods is safe for boolean predicates but not for instanceof
+- Latency metrics must be recorded at the instant the condition being measured is satisfied, not at a later cleanup or timeout callback. Similarly, any code path that can prevent the ideal CL from being achieved (including explicit failure responses) must be wired to the same accounting logic as timeouts; omitting one path leaves the metric incomplete and can cause false-negative failure counters
+- Capability probes that rely on the presence of a directory or file must ensure the target exists before the probe, especially during initialization where the data directories may not yet have been created. Catching a broad RuntimeException and silently treating it as "feature unavailable" hides real errors (permission denied, misconfiguration) and also masks legitimate feature availability
+- Any code that enumerates token ownership or performs ring-based operations on column family stores must guard against non-standard partitioners, not just partitioner. When new partitioner types are introduced (such as custom partitioner), all existing partitioner-dispatch guards should be audited to ensure the new type is covered
+- When two parallel iterators are advanced in the same loop body, any hasNext call used to decide whether a separator is needed must reference the iterator that is currently being consumed. Using the wrong iterator produces an off-by-one in separator placement that only manifests when both iterators have remaining elements simultaneously, making the bug easy to miss in single-dropped-column tests
+- Any helper that derives a timezone offset from "the current time" rather than from the timestamp being converted will silently produce wrong results around DST boundaries. During review, look for patterns that call time.time or datetime.now purely to extract an offset and then apply that offset to a different datetime value; the correct pattern is to attach timezone information directly to the source datetime and let Python's astimezone handle the conversion
+- Using raw byte iteration to compare semantic values (floats, longs, composite types) is error-prone because it ignores type semantics, endianness, and codec representation. During review, any comparison of ByteBuffer contents for typed index values should use the type's own compare method rather than manual byte walks. Additionally, data structures parameterized by a comparator should have assertions or guards ensuring the comparator is compatible with the value type before insertion
+- CAS operations that return the existing row on failure must check whether the pre-existing row is already in the desired state before treating the failure as an error. Whenever [applied] = false from a LWT is immediately converted to an exception without inspecting the returned row, there is a risk of spurious failures under concurrent init. Review all callers of result.one.getBoolean("[applied]") to ensure they handle the idempotent-already-done case
+- Any log statement that formats a duration as currentTime - futureDeadline has the operands reversed; the duration should always be deadline - startTime. Reviewers should flag subtractions involving a pre-computed deadline timestamp on the left-hand side as a likely sign error
+- When a method wraps a low-level seek and has documented side effects (like clearing a deserializer state machine), callers must choose between the high-level wrapper and the raw seek based on whether those side effects are desired. Mixed use of the two in the same logical operation is a red flag; code review should ask "does every call to seekToPosition here intentionally reset the deserializer?"
+- When a virtual method controls whether a data-structure initialization step runs, and that method is called from the base-class constructor or from a method that can be invoked before the subclass finishes its own initialization, the check may return a stale/default value at construction time. Review every call-site of an overridable method in constructors or in helpers called from constructors to ensure the subclass invariant already holds at that point; add a comment or Javadoc warning that the method must not be called until initialization is complete
+- Shell version-string comparisons with \< / \> are lexicographic, not numeric: "17" sorts before "9" in lexicographic order, and Java version strings changed format across major releases. Whenever a startup script adds support for a new major Java version, verify that the detection logic uses numeric or prefix-based comparisons and that the option-file selection chain includes a branch for every supported version
+- Log statements that describe "the final configured state" should appear after all validation and normalisation steps have completed, not in the constructor. When reviewing initialisation code, check whether log messages are placed before or after validation calls, and whether the logged data could differ from the post-validation state
+- Corruption-detection logic should treat *any* invariant violation that cannot occur in a healthy file as an immediate signal, not just overflow conditions. When reviewing deserialization code, verify that: (a) all newly added assertions or precondition checks are guarded by corresponding try/catch blocks in the iteration layer so that AssertionError reaches markSuspect; and (b) combinations of fields that are logically impossible (e.g., localDeletionTime < ttl for a non-expired liveness) are explicitly handled rather than left to produce silently wrong results downstream
+- Widening a float to double before constructing a BigDecimal is a well-known precision pitfall: 5.2f becomes 5.199999809265137 as a double. When reviewing numeric type-conversion functions, ensure that float-to-decimal paths go through Float.toString or new BigDecimal(float) rather than via an intermediate double. The symptom is that CAST(floatCol AS decimal) returns values with spurious trailing digits
+- A size-only guard on a set or map is a weak substitute for a membership check: it catches too-many elements but not wrong elements. When validating that a user-supplied list of column names is a subset of an expected set, always perform an explicit set-difference (or containsAll) rather than comparing cardinalities; this both catches the right condition and enables a useful error message identifying the offending names
+- Whenever a collection is built by one code path and consumed by another using a .contains check, verify that both sides produce the same string representation. A mismatch between Object.toString and a domain-specific accessor like getHostAddressAndPort is a common source of false negatives in membership tests
+- Any code that casts or pattern-matches a column's AbstractType should first check for (and peel) decorated type wrappers. The pattern type instanceof XType will silently return false when the same logical type is stored as decorated type<XType>, making reversed clustering columns a systematic blind spot for type-dispatch logic
+- Any call to a SystemKeyspace helper inside a shared utility that is also used by CLI tools needs a guard on DatabaseDescriptor.isDaemonInitialized. Adding a supportsPreferredIp capability method to the factory interface lets the caller opt-out without coupling the shared streaming code to tool-specific checks. Reviewing usages of SystemKeyspace.getPreferredIP and confirming they are all guarded is the key review heuristic
+- Futures.getUnchecked is a convenience wrapper that converts both CancellationException and ExecutionException into UncheckedExecutionException, making them indistinguishable from true failures. Wherever a future may be intentionally cancelled, prefer explicit Future.get with a typed catch so that normal lifecycle events are not confused with errors. The fix also preserves the interrupted-thread contract by re-interrupting the current thread
+- Any loop that iterates over storage structureLister.list.entrySet without sorting is implicitly relying on filesystem traversal order, which is not guaranteed. When the operation is order-sensitive (upgrades, sequential processing), always sort by generation. Review all callers of storage structureLister.list to check whether they assume or require a particular order
+- When a "free" operation on a pool involves rounding or partial returns, accounting the freed amount before the operation completes will give the wrong value. The pattern to watch for is computing a delta from one field of a mutable object, then passing the object to a mutating call, and using the pre-mutation delta in a post-mutation accounting update. The delta must be captured around the mutation, not inferred from values before it
+- Any switch statement over an enum that has a die/kill/halt severity level should have a case label for that level — not just adjacent levels — unless the intent is to ignore it. When adding a new enum value or reviewing an existing handler, enumerate all enum constants and confirm each one maps to a case label or an explicit default. Missing cases on die-severity policies are particularly dangerous because the silent skip goes unnoticed until production
+- The "skip separator on first element" pattern is correct for *infix* separators (between items). When the separator is a *record terminator* (after each item), applying the skip-first logic produces a missing terminator on the first record. During review, distinguish between separators that belong *between* records and terminators that belong *after* each record; the former uses the skip-first pattern, the latter should not
+- Whenever directory-tree path parsing uses only a directory's own name to infer its semantic role, ask whether a user-controlled name (keyspace, table, snapshot tag) could collide with the special directory name. The fix pattern is to add an additional structural check — here, verifying that the sibling directory contains a dash (UUID) to confirm it really is a table directory — before ascending the path
+- Whenever a computed duration is added to or subtracted from a timestamp, verify both operands carry the same time unit. Mixed-unit arithmetic (microseconds added to a nanosecond clock) never triggers a compile error. Similarly, when computing "how long until a deadline", confirm the subtraction order is deadline - now, not now - deadline. Both classes of mistake produce silent near-zero or always-negative durations that are easy to miss without unit tests that verify actual sleep lengths
+- Any guard of the form if (localDCCondition && isInOurDC(node)) ignore; should be read as "ignore nodes in our DC", which is backwards for a local-consistency filter. When reviewing responses that count toward a datacenter-local quorum, the correct invariant is to ignore responses that are *not* in the local DC. A missing ! before a membership test is easy to overlook because the surrounding logic reads naturally in prose
+- Any iterator that chains multiple sub-iterators and advances with a single if instead of a while is susceptible to this bug: an empty sub-iterator causes early termination rather than continued advancement. Code review should require that "advance to next sub-iterator" logic keeps looping until a non-empty one is found or the chain is exhausted
+- When a system introduces a new property on an entity (here, the ephemeral flag on snapshots) every deletion path must be audited to ensure it consults that property. The old path bypassed the TableSnapshot abstraction entirely and operated on raw filesystem paths, making it impossible to enforce any snapshot-level policy. The review heuristic: if a new flag gates a behavioral constraint, grep for every delete/clear call site and confirm each one loads the full object before acting
+- When a navigation helper that advances a cursor can legitimately reach "no more data" but returns void, callers cannot distinguish "advanced successfully" from "nothing left to advance to". During review, any loop that calls such a method should be asked: what happens if the method silently fails to move the cursor? Returning a boolean or throwing a sentinel exception is the standard fix; the presence of a while loop whose termination depends on an advancing side effect is a reliable smell
+- Single-statement loop bodies without braces are a classic source of logic errors when lines are added or reordered during refactoring. In code review, any while/for without braces where the indented line below the loop header is not the intended sole body statement should be flagged. Here, the intent was clearly to set the target directory once (not per-record) and then iterate; moving setTargetDirectory before the loop and adding braces—or enforcing a brace-always style—would have prevented the bug
+- Guards of the form !isNormal that protect restart/stop operations are appropriate for full ring members but become false positives for any special operating mode (gossip-only, client mode, read-only mode) where NORMAL is never entered. During review, whenever a new node boot mode is introduced, audit every isNormal guard in StorageService to ensure the guard is combined with a mode-specific condition (&& joinRing, && !isClientMode, etc.) so that the new mode is not inadvertently blocked
+- Whenever toString (or any debug/logging method) calls a type-specific deserializer on a cell value, it must first check whether the cell is a tombstone before attempting deserialization, because tombstones carry no value payload. This pattern—calling a serializer without a tombstone guard—is a recurring risk in any diagnostic or logging path that handles the full lifecycle of storage cells
+- When validating operations on collection-typed columns, isCollection and isMultiCell are not equivalent. isCollection returns true for both frozen and non-frozen collections; isMultiCell returns true only for non-frozen collections and non-frozen UDTs that are actually stored as multiple cells. Any validation that intends to target only the multi-cell storage model must use isMultiCell rather than isCollection
+- Any blocking system call (select, poll, read, write, accept) can be interrupted by a signal and return EINTR / raise the equivalent exception. Code that wraps such calls without checking for EINTR and retrying will fail spuriously on any signal delivery, including the innocuous SIGWINCH. During review, look for unguarded select/poll calls in Python 2 code (Python 3 restarts them automatically for most signals, but Python 2 does not)
+- Shell scripts that use command substitution to capture multi-line output and then embed it unquoted into a colon-separated path variable are vulnerable to silent breakage when the command returns more than one line. The correct defensive pattern is to count results first and fail with an actionable error rather than silently constructing a malformed value
+- In any multi-hop request routing system, the reply target for failure callbacks must be resolved from the request origin (stored in a parameter), not from the transport-level from field, which only represents the immediately-previous hop. Review all doFailureCallback / error-reply paths to confirm they resolve the ultimate originator rather than the last forwarder
+- When a boolean flag guards whether a secondary collection is in use, any range or set membership check against that collection must first verify the collection is non-empty (or the feature is enabled). Calling needsCleanup(sstable, emptyRanges) silently returns true because every token is outside an empty set of ranges, so the short-circuit guard must come before the predicate call
+- Shell scripts that version-compare dotted version strings with < or > string operators are always fragile for multi-digit minor versions. Whenever a script does version gating, split the string into numeric major/minor components and use arithmetic (-ge, -lt) comparisons rather than lexicographic string comparisons
+- Any side-effecting operation (cache invalidation, version bump, sorted-list rebuild) that is triggered by a removal should first check whether the removal actually changed state. Unconditional post-removal invalidation is correct but wasteful and can cause spurious downstream reactions when callers use the version number as a change signal
+- Any call to RateLimiter.acquire(n) where n is derived from a collection size should guard against n == 0. More robustly, move the acquire to the innermost loop so permits are only consumed for work that actually happens, which also avoids over-acquiring when files are missing
+- Any time a Map.getOrDefault is used to control a type transformation, verify that the default does not silently change the semantics for keys that were intentionally absent. For CLUSTERING ORDER BY, absent means "inherit from the base table", not "use ASC"; treating them differently corrupts the stored column type
+- When deciding whether to emit an index entry for a primary key, code must not rely on the row's own LivenessInfo because that token can be expired even while individual cells are live. Any index code that checks liveness for a primary key column should derive its timestamp from the live cells in the row, not from the row-level marker. Also watch for accidental coupling of TTL to a timestamp comparison: updating ttl inside an if (newTimestamp > old) branch means the TTL belongs to the winning-timestamp cell, not the current cell
+- When writing a guard of the form if (!(x instanceof SomeException)), verify what happens in both branches: the "is not" branch runs the special case for the unwanted exception type, and the normal path falls through to re-throw. It is often clearer (and less error-prone) to invert the condition and handle the specific known exception first, letting the else branch handle the unexpected case
+- Boolean "completion" flags that are set at the end of a try block are fragile: any early return or exception leaves them at their initial value. Prefer a condition derived directly from a meaningful output artifact — such as "did we produce any output files?" — rather than a flag that must be manually set at exactly the right point
+- Version-comparison utilities that parse structured multi-segment labels (semver pre-release, Maven qualifiers, etc.) often handle the equal-length path correctly but break on the length-differs path; whenever a "suffix means lesser" rule (e.g. SNAPSHOT, alpha, beta) is encoded as special-case logic, review all branches of the length-comparison block and verify that the suffix ordering is preserved even when the two strings have different segment counts. Also check whether any string comparisons in identifier arrays are inadvertently case-sensitive
+- Boolean conditions that combine !isEmpty with && on a timestamp comparison are suspicious: the intent is usually "if the field is present, check its age", which requires the emptiness check on the *opposite* side of the short-circuit. When reviewing completeness/dominance predicates for storage structure merge logic, mentally walk through the "all cells are tombstones" case and the "liveness info is absent" case separately to verify the predicate is correct in both
+- When code inspects private/internal attributes of a standard library module (webbrowser._tryorder) to determine capability, verify the behavior of those attributes across Python versions. Lazy-initialized private state is a portability trap: behavior that works in Python 2 or early Python 3 may silently regress when the initialization contract changes in a later release
+- In any shared-counter accounting path, look for assert counter >= 0 guarding a value that could go negative due to a double-release or an incorrect size argument from an error path. Such asserts are silent in production (where assertions are disabled) and explosive in tests; they should be replaced by an exception that is routed through the existing stability/kill mechanism. Also check that logging occurs before, not after, state mutation so the log entry is not lost if the mutation throws
+- When metrics are aggregated eagerly at a planning/negotiation stage rather than at the actual I/O stage, they can drift from reality if the operation fails partway through or if the planned size differs from the wire size. During review, verify that throughput/byte metrics are updated at the point data crosses the wire, not at the point the plan is constructed
+- When two methods implement complementary predicates (includes vs. can-skip) with nearly-mirrored boolean guards, verify that every guard polarity matches: a condition that causes early-return true in one method should cause early-return false in the other. Asymmetry is a sign that at least one was written by copying and forgetting to flip the condition
+- Any topology check that aggregates node counts across all datacenters and then compares against an aggregate RF should be scrutinised for multi-DC clusters: the global sum can mask DC-level imbalances. Prefer per-DC comparisons when using NetworkTopologyStrategy
+- Unencrypted Connections Accepted When Encryption Required — Security-enforcement code is suspicious whenever a policy is checked on only one side of a connection (outbound) but not the other (inbound). Review any Incoming*Connection class that reads a peer identifier from the wire: after the identity is known, the server should immediately verify that the channel's transport properties (TLS, compression) match what the policy requires for that peer
+- Shell scripts that guard against duplicate JVM flags with grep -q "^-X..." are fragile: the ^ anchor matches start-of-line, which in a single-line echo only matches if the flag is first. During review, look for ^ anchors in option-detection greps and ask whether the option could ever appear mid-string
+- Conditions that treat a missing/empty optional field as a failure case are dangerous when the field is legitimately absent for a whole class of data. When reviewing "can we skip this storage structure?" logic, confirm that each field being tested is guaranteed to be present for all table types; if not, the absence must be handled as a distinct third case rather than as a negative answer
+- In any multi-phase consensus protocol, a "read-only" or "no-op" path that skips the commit phase must still advance a durable marker (ballot, epoch, or sequence number) that prevents older in-flight proposals from being resurrected. Reviewers should ask: after this code path completes, can a prior incomplete proposal still be completed by a different participant? If yes, linearizability may be broken
+- Any administrative operation that mutates cluster membership or communication state (gossip, native transport, drain) should be audited for a state-machine guard at the entry point. The pattern to look for: a method that calls Gossiper.instance.stop or start without first asserting operationMode == Mode.NORMAL. Similarly, look for decommission-style preconditions (operationMode != Mode.NORMAL) that compare against the raw field — these are candidates to be replaced with a shared isNormal helper to avoid drift
+- Whenever a for loop indexes into a collection using a counter that is incremented in tandem with consuming bytes from an external buffer, verify that the counter is also bounded by the collection's size. Mismatches arise naturally in schema-evolution scenarios where the serialized data may have fewer fields than the current in-memory type descriptor; any comparison or deserialization routine that relies solely on buffer exhaustion to stop iteration will misbehave with such mixed-generation data
+- When a filter's documented purpose is "passes if endpoint is acceptable as a data source — including the local node for accounting purposes", code that immediately uses a passing result for a fetch/stream action must also verify that the endpoint is actually remote. The isSelf / isLocal check needs to appear at the action site, not only in the filter
+- Shutdown sequences in distributed systems must follow an "outside-in" ordering: stop advertising availability (gossip / service discovery) last, not first. Any stopTransports-style method that silences gossip or deregisters from service discovery before closing client-facing sockets inverts the safe order and creates a window where peers think the node is down while clients are still being served (or vice versa)
+- Any code that casts or does instanceof on a column's AbstractType without first calling unwrap or isReversed is a candidate for this failure: clustering columns with DESC order always carry an invisible decorated type wrapper, so type comparisons against the raw collection class will silently fail or throw. Reviewers should look for direct casts to concrete type classes (ListType, SetType, MapType, etc.) in code paths that handle clustering columns or column specifications, and verify that the code handles the reversed-type wrapper
+- When a try block loads native libraries or performs class initialization, the catch clause should include LinkageError (or its subtypes NoClassDefFoundError, UnsatisfiedLinkError) alongside application-level exceptions. Catching only AssertionError works for internal library self-checks but misses JVM-level class-loading failures that surface as Error subtypes outside the AssertionError hierarchy
+- Bidirectional regex-based mode checks (a != b) are dangerous when the two modes have overlapping name spaces. Whenever a region/datacenter name can be valid in both old and new conventions, the detection heuristic must be asymmetric: only flag names that are exclusively in the old convention, and rely on an unambiguous signal (rack name format) as the authoritative differentiator for everything else
+- Whenever a boolean-returning method signals "continue" vs "stop" using true/false, review every early-return path carefully to confirm which signal it sends. Here, an early-return that was meant to say "nothing to do, keep going" was sending the wrong signal ("row is done"). Any addAtom-style accumulator that uses the return value as a termination sentinel is susceptible to this class of confusion when new skip/ignore branches are added
+- Any code that derives a row boundary from a tombstone bound whose values were originally associated with a sub-row element (collection column) needs to be stripped of that sub-row context and anchored cleanly to the row's start or end. When tombstone splitting is needed but the iterator only supports forward traversal, a priority-queue push-back mechanism is required to keep atoms in order; absence of such a mechanism is the deeper structural gap
+- JCommander (and most CLI parsing libraries) treat boxed Boolean / boolean fields as flags — the option name alone sets it to true and no value token is consumed. Whenever a nodetool option needs an explicit true/false argument rather than a presence flag, the field type must be String with manual validation. Review CLI options where Boolean is used as a field type and an explicit value argument is expected
+- When accumulating state that starts as null and is set on first encounter, guards of the form if (field != null && ...) incorrectly skip the first-encounter case. Review any accumulators on nullable fields where the initialisation and the update share the same conditional branch. Additionally, any deserialization path that accepts 2.x data should use a resolver-aware builder since 2.x format does not guarantee unique clusterings per partition
+- Paging loops that rely on an empty result to signal termination are fragile: if the underlying query re-issues a command that covers the same end-boundary, it may always produce an empty result without ever setting the exhausted flag. Review paging code for range-boundary conditions where nextPageReadCommand could legally return the same range twice. Also check that PagingState records the actual remainingInPartition rather than a sentinel like Integer.MAX_VALUE, which corrupts resumed sessions
+- Any shell script that stores multiple arguments in a single variable and later uses $variable (unquoted) in a command is vulnerable to word-splitting. Review wrapper scripts for pattern PARAMS="$PARAMS $1" followed by exec ... $PARAMS and replace with the "$@" accumulation idiom. Shellcheck would flag the unquoted variable expansion
+- When a long field is used to pack two int fields together (bit-packing), any arithmetic that mutates the combined value directly — instead of extracting, updating, and re-packing the individual fields — will silently overflow one field into the other. Reviewers should confirm that every update path calls the wrap/unwrap helpers rather than doing arithmetic on the raw packed value, and that any additive expression involving an int point or timestamp first widens to long before the addition to prevent signed-integer wrap-around
+- When an if/else branch differs only in string literals that should be structurally identical, that is a strong signal that one branch was accidentally edited. Reviewers should verify that formatting helpers produce structurally equivalent output across all code paths, and prefer extracting shared formatting logic to eliminate the duplication that makes this class of divergence possible
+- When the same tabular data is rendered across multiple logical groups (DCs, racks, regions), using a single TableBuilder or computing column widths per group independently will produce misaligned output unless widths are explicitly normalised across all groups before printing. The safe pattern is to collect all rows first, then perform a single width-normalisation pass before any output is emitted — exactly the SharedTable.complete approach introduced here
+- When a decompressor call does not supply the compressed-input length — only the expected output length — and uses an "unsafe" or "fast" variant, a reviewer should ask what happens when the declared length is wrong. Native decompressors that trust caller-supplied sizes without bounds checking will write out of bounds on corrupt or adversarially crafted input, crashing the JVM rather than throwing a Java exception. The safe rule is: if input comes from an untrusted or potentially corrupt source (network frames, sstable files), use a bounds-checking decompressor variant and supply both input length and maximum output length
+- Whenever a streaming abstraction maintains independent position state in both a "logical" (uncompressed) and a "physical" (compressed) layer, reviewers should verify that skipping forward in the logical layer is correctly reflected in the physical layer. Off-by-one or stale-state bugs are especially likely when a background producer thread and a consumer thread share mutable position variables without explicit synchronization, or when the "skip" code path is exercised only for partial transfers and not end-to-end tests
+- When JSON serialization has a guarded block that both opens a container (array/object) and records positional state, ask whether the guard can suppress the state-recording path even when data is present. If position tracking calls live inside a conditional that also controls structural JSON output, any false-negative from the condition silently produces a wrong position while still emitting partial output elsewhere
+- When a compaction strategy computes estimatedRemainingTasks in a separate method from the one that selects actual work, the two computations can diverge in what they count. Any time an estimation loop and a selection loop both iterate the same bucket set but with different early-exit semantics, check whether they are truly counting the same things
+- When serializing nullable binary columns to a text format, null and empty are semantically distinct. Any guard that short-circuits to a null literal on both a null reference and an empty buffer conflates these two states. Review JSON/CQL serialization paths for any == null || !hasRemaining pattern applied to ByteBuffer to ensure empty values are passed to the type serializer rather than emitted as null
+- File path containment checks written as pathString.startsWith(prefixString) are always incorrect unless a path separator is appended to the prefix, because /foo/bar and /foo/barbaz share the literal prefix /foo/bar. Code review should flag any getAbsolutePath.startsWith( or getCanonicalPath.startsWith( call — these should be replaced with java.nio.file.Path.startsWith
+- Look for exception throws in legacy compatibility code paths that handle schema mismatches — any time an unexpected-but-recoverable condition (unknown column in an old-format file) triggers a fatal exception rather than a warning-and-skip, it breaks backward compatibility. The tell is that 2.x never threw here; the stricter behavior was added during the 3.x translation layer without checking the original semantics
+- Whenever a compatibility layer silently skips a "bad" data item, ask whether that item's presence was semantically significant in the old version. Here the illegal cell was meaningless as data but meaningful as an existence indicator; dropping it without preserving its liveness info changed row visibility, a subtle behavioral regression reviewers can catch by tracing what each cell type contributed to row materialization in the old format
+- Gossip and other eventually-consistent state-merge paths should always use versioned values as idempotency guards: before updating local state and firing notifications, check that the incoming version is strictly greater than what is already stored. Any merge loop that applies and notifies without first comparing versions is susceptible to duplicate notifications, which can cascade into redundant work or incorrect state machine transitions in subscribers
+- Whenever a compatibility predicate takes two arguments that are not the same object, read it as a sentence — "can A read data written as B?" — and confirm that the receiver and the argument are assigned the correct roles. Type compatibility checks are especially prone to receiver/argument inversion because the method name alone does not indicate directionality; always map the semantic question ("can the new type decode old on-disk bytes?") to the concrete method call
+- When a ternary is used to vary only a label/prefix and a value is appended unconditionally after the closing parenthesis, check whether the same value also appears inside any branch of the ternary. The redundant copy is easy to miss because both occurrences are table.name and the string just looks like a formatted label at a glance
+- Look for native I/O call sites that return sentinel values (e.g., -1) or can throw FSError where the caller only logs and continues. Any place that calls trySync, appendAndSync, or directory-open helpers without either checking the return value or catching and re-throwing via FileUtils.handleFSErrorAndPropagate is a candidate for this class of bug
+- Any use of a sentinel negative value (such as -1 for "unlimited") inside arithmetic expressions that feed into loop counts or latch countdown values is dangerous. Reviewers should look for places where a field that is documented to be -1 when unbounded is multiplied or compared without a prior sign check. An early guard — if (iterations <= 0) return; — is a standard defensive pattern that makes such code robust against future changes to the sentinel value
+- When a method claims to handle all cases of a ring-topology data structure, check whether the "full ring" representation (where the token wraps all the way around, typically encoded as left == right) is tested explicitly. A missing branch for the full-ring case is a classic off-by-one or logic omission in token-range arithmetic. Subtracting any range from the full ring must yield a single complement arc, not empty, and subtracting the full ring from itself must yield the empty set
+- Any code path that iterates over a replica set and sends a message to each should include a self-check before dispatching through the messaging layer. Search for patterns where MessagingService.send* or similar is called in a loop over replicas without a preceding isSelf guard. The local-execution fast path is well-established in StorageProxy; read-repair code that was refactored away from StorageProxy can lose that guard if it is not explicitly re-added
+- Be cautious whenever a stateful iterator is accessed inside a lambda passed to forEach or a stream operation. The lambda captures the variable holding the iterator, not the current element; if there are multiple consumers or the lambda is called more than once, next will advance past unintended elements. The safe pattern is always to call next exactly once per loop iteration, store the result in a local variable, and pass that variable into downstream consumers
+- In Cassandra's row-iterator model, physical field layout can differ from logical meaning depending on the scan direction. Whenever a class has both raw fields (e.g., endDeletion, startDeletion) and direction-aware accessors (e.g., closeDeletionTime(reversed)), any method that accepts a reversed flag must use the accessors — never the raw fields — so the physical-to-logical mapping stays consistent. A code review heuristic: if a method takes boolean reversed as a parameter, grep its body for direct field accesses that have an orientation-aware accessor equivalent
+- In instanceof dispatch chains involving a type hierarchy, always check the most-derived types first. When a caught exception block is empty (ignored), failures are completely invisible — any class-cast that happens inside will prevent registration without any diagnostic, so type-hierarchy ordering bugs can persist silently for a long time
+- Any assertion that uses == on mutable or value-typed objects (rather than on enums or well-known singletons) should be suspect after a refactoring that makes those objects immutable or introduces copy semantics. When TableMetadata changed its lifecycle, all identity checks on it needed migration from == to .equals or id-based comparison
+- When a metric counter or a lag warning sits outside a conditional block that controls the expensive operation being measured, the counter is likely being incremented for cases it should not cover. Review every syncCount++ or totalDuration += to confirm it is inside the same guard as the operation it is supposed to measure
+- Any log call whose argument list contains a method call that builds a collection string, formats memory sizes, or constructs a String.format result should be checked for an enclosing isXxxEnabled guard. Static analysis rules (e.g., PMD's GuardLogStatement) catch this class of issue automatically
+- Any view-building loop that skips entries based on a set membership check where membership was computed before the loop is a candidate for this pattern. Reviewers should ask: "Can an element appear in *both* the 'remove' set and the 'keep' set?" — if yes, the remove set must be narrowed to the genuine removals (the set difference) before the loop executes. Iteration order also matters when a duplicate-detection map is involved: new entries must come first so they are not shadowed by stale ones
+- Progress fields named *Left or *Remaining are frequently misused as the completed argument in progress-reporting APIs that expect a monotonically increasing value. Any site passing a decreasing counter as "completed" deserves scrutiny. Separately, whenever a display formatter is gated only on a humanReadable flag without also checking the unit type, it will corrupt non-byte quantities
+- When refactoring a class that carries important context (command, consistency level) into a new constructor, grep for every call site that constructs the class and verify each one passes the required context. Regressions often arise when a "simple" constructor is left behind for convenience and existing logic is silently skipped rather than failing visibly
+- Whenever numeric conversions pass through floating-point as an intermediate step, check whether the source type can hold values that exceed the precision of double (53-bit mantissa). Any conversion chain that calls .doubleValue on an integer type is a candidate for silent truncation of large values
+- When a codebase transitions from InetAddress to an InetAddressAndPort wrapper, search all existing comparison sites; many will still dereference .address or call the old DatabaseDescriptor.getBroadcastAddress rather than the new port-aware equivalents. A reviewer should grep for .address.equals( and getBroadcastAddress to find leftover partial comparisons
+- When an equals comparison involves two objects of different types — here InetAddressAndPort vs. InetAddress — the call silently returns false rather than throwing, meaning the bug surfaces only as wrong runtime behavior. A reviewer should verify that both sides of any equals call carry the same type or that one is explicitly unwrapped to match the other
+- Type-mismatch equals calls are a classic silent bug: the JVM happily calls Object.equals, which compares references or delegates to the left-hand type's implementation, neither of which throws an exception. A reviewer should grep for equals(DatabaseDescriptor.get or similar patterns and verify the argument type matches the receiver type. IDE type-mismatch warnings or FindBugs/SpotBugs EC_UNRELATED_TYPES would catch this automatically
+- When two independent objects (here CompactionStrategyManager and DiskBoundaries) both encode the same mapping — which disk an storage structure belongs to — they can drift out of sync. Any code that queries one object to filter or group data that is logically owned by the other is a code smell. Reviewers should verify that operations on storage structure disk placement consistently use a single snapshot of DiskBoundaries captured at the start of the operation
+- Branching on a table-type flag (isCQLTable, isCompactTable) that can be changed by a schema operation, while storing index metadata that was written under the old type, creates inconsistency. Reviewers should look for code paths that distinguish between "CQL" and "thrift" table layouts and verify that those paths remain valid after schema alterations like DROP COMPACT STORAGE
+- Any time a version string is parsed by manually searching for delimiter characters (indexOf, substring) without checking for -1 or handling absent segments, the code will fail on non-conforming inputs such as early-access releases, release candidates, or major-version-only strings. Reviewers should look for chains of indexOf + substring without a guard on the separator index, and verify all known version-string formats (GA, EA, major-only) against the parser
+- When a method like isBootstrapMode is used as a guard to choose between two code paths, reviewers should enumerate all startup scenarios (normal bootstrap, same-address replacement, different-address replacement) and verify the guard produces the correct boolean in each. Any method that retrieves an optional configuration value and immediately calls a method on the result without a null check is a latent NPE waiting to surface
+- Any probability gate of the form threshold > RNG.random should use short-circuit evaluation to skip the RNG call for the boundary values 0.0 (never) and 1.0 (always), which are by far the most common configurations. Reviewers should ask: "Does this call a side-effecting or expensive method even in the trivially true or trivially false case?" If yes, a guarding pre-check on the boundary values belongs before the RNG invocation
+- When a special sentinel value (here Integer.MAX_VALUE as a TTL) is repurposed as a flag and fed into a comparison function that has no awareness of the flag, the comparison will treat the sentinel as a normal value and produce logically incorrect ordering. Reviewers should check every path that reads a TTL field for a guard that distinguishes real TTLs from sentinel-flag values before performing arithmetic or ordering comparisons
+- Any while (true) loop that retries an operation involving external state (lock acquisition, reference counting, lifecycle transactions) needs an explicit escape path for the case where the external state is transiently or permanently uncooperative. A reviewer should check that every iteration either makes observable progress toward success or has a maximum-retry / stable-candidate guard that returns or throws rather than looping forever
+- Whenever a compressed-vs-uncompressed decision uses a size threshold, the threshold must come from the compressor's maximum output size for a given input chunk, not the input chunk size itself. Mixing these two values is easy because both are related to "chunk length" in the API; reviewers should confirm which chunkLength method is appropriate for boundary detection vs. buffer alignment
+- Whenever a streaming deserializer relies on ordering guarantees (e.g., "the previous item must be fully consumed before the next is started"), it should enforce that invariant itself by draining, not by throwing. Throwing an IllegalStateException here is fragile because it breaks valid callers that short-circuit iteration. Review sites where an iterator is advanced inside a stream-position-sensitive deserializer and ask whether every exit path (early termination, limits, exceptions) leaves the stream in the expected position
+- When legacy table formats require translation between an exposed CQL schema and an internal storage layout, every code path that reconstructs or interprets column metadata must handle the legacy format explicitly. The failure mode is subtle: a partially-wired abstraction appears to work for normal CQL tables but silently misbehaves for the edge-case layout. Reviewers should check that any isSuper / isDense branch in schema reconstruction, comparator construction, and CQL statement preparation is consistent with the actual physical layout, and that virtual/derived columns needed by the CQL layer are reliably reconstructed after every schema reload
+- Whenever a method collects "extra" mutations/updates produced by a side-channel (triggers, interceptors, CDC) and then merges them, check that the original input is included in the merge. The pattern merge(transformedList) without the original item is a red flag. Unit tests for trigger execution should assert that columns written by the original client mutation still appear in the final stored row, not just the columns added by the trigger
+- Whenever a stream-processing pipeline chains MoreRows.extend with Transformation.apply, verify that the ordering matches the desired callback sequence: transformations applied before extend will not receive events from rows produced by the extension. Additionally, be suspicious of any metric-based retry formula that can produce values larger than the page size — a simple bounded constant is often safer
+- Logic that iterates "until there is no more data" must explicitly handle degenerate table shapes — in particular, tables with no clustering columns (skinny tables) where Clustering.EMPTY is a sentinel meaning "this is the only possible row". Any loop or recursive-fetch routine that does not test for Clustering.EMPTY before requesting additional rows is a candidate for this class of bug
+- In Cassandra's Transformation/MoreRows pipeline, any transformation added to an iterator before MoreRows.extend will not receive callbacks for rows produced by the extension. Review every applyToPartition that combines both MoreRows.extend and Transformation.apply to ensure that stateful transformations are chained after the extension, not before
+- Metrics that track resource usage (disk space, memory) are especially prone to double-counting when a resource transitions through a lifecycle framework that itself fires accounting callbacks. Reviewers should trace all the paths that increment/decrement a metric around a lifecycle event and confirm that no single real-world change is counted more than once. Pay particular attention to transactional commit hooks
+- When a pipeline has multiple dependent transformation stages, check whether each stage's assumptions about prior state can be violated by reordering. Here, short read protection math depended on the counter already having observed some rows, but the preceding step could produce an empty partition count of zero. Any formula that divides by a counter derived from iterator consumption is vulnerable to a zero-division if an earlier transformation discards all rows before the counter runs
+- Whenever a method branches on a type being a collection type, reviewers should also check whether the collection is multi-cell (non-frozen). Frozen collections are stored as opaque blobs — treating them like non-frozen ones by extracting an element comparator silently applies the wrong type, causing corrupt serialization or incorrect equality checks. A similar audit should be applied to any helper that dispatches on UserType
+- Whenever an error-handling path skips content from a checksummed stream, it must still advance past and verify the checksum. Any early return inserted inside a read loop that is guarded by a CRC suffix will silently desynchronise the reader. Reviewers should trace every exception/skip path in checksummed readers to confirm that the checksum bytes are always consumed
+- Any place that increments a metric counter before checking the result of an early-exit operation (bloom filter, key cache, predicate evaluation) is susceptible to over-counting. Review sites where incrementReadCount or a similar side-effecting call appears before conditional continue/return paths; if those paths skip the storage structure, the counter has already been inflated. The fix is to push the increment into the earliest definitive "we will read this" decision point
+- When a method declares a checked exception that its implementation never actually throws (because the underlying mechanism only throws unchecked exceptions), every caller must write boilerplate catch-and-re-wrap code. Review cache get wrappers to confirm whether the declared checked exception can actually reach the caller; if not, removing the declaration eliminates hidden double-wrapping that can change the exception type visible to upstream handlers
+- Whenever index-entry creation logic branches on the cell type to copy TTL metadata, check whether the indexed column is a primary key column. Primary key columns are immutable and cannot expire, so copying a TTL observed on a sibling cell in the same write batch into the index entry for the key column is always wrong. A reviewer should ask: "could the write that triggered this path carry a TTL from a non-key column that is being incorrectly applied to a key column's index entry?"
+- Any seek/rewind path in a format-aware file iterator must account for what was already consumed during iterator construction. When a reader is initialised by reading a leading special row (e.g., a static row in the legacy format), that consumption leaves the file cursor past that row. A seek back to position 0 of the same block must replicate that initial skip; failure to do so effectively re-reads data the caller believes was already processed
+- Init scripts that verify process termination by comparing human-readable status strings are fragile. The standard POSIX approach is to use status -p <pidfile> or similar and inspect the exit code; exit code 3 conventionally means "not running". A reviewer should replace any string comparison against $0 status output with a direct exit-code check on the pid-file-aware status utility
+- Look for index-rebuild logic that derives "already built" membership solely from which index objects were successfully loaded. If a legitimately-empty outcome produces no artifact at all (no file, no marker), the system cannot distinguish "never indexed" from "indexed and empty", causing spurious work on every restart or compaction cycle. Always ensure that a completed build leaves an observable side-effect even when the result set is empty
+- When two variables are introduced close together and one is immediately used as a divisor, verify that the zero-check guards the divisor, not a different variable that happens to share the same "could be zero" intuition. Here the names meanCellsPerPartition and columnsPerRow both sound like they could be zero, making it easy to swap the guard. Code review should confirm the guarded expression is the actual denominator
+- Any time a "preferred" or "translated" address is computed and immediately used as a key in a data structure that was populated with the original address, check that both maps share the same key space. Snitch address translation is purely a transport-layer concern; higher-level registries (token metadata, host IDs) always track the canonical broadcast address
+- Range tombstone boundaries require semantics-aware comparators, not enum ordinal comparators. Whenever Kind.compareTo (inherited from Enum) is used to order bound kinds, verify that the desired semantics match the enum declaration order. For slice boundary stop conditions, confirm whether the comparison should be strict (> 0) or non-strict (>= 0) by reasoning about what an item equal to the bound actually represents. Multi-block reverse readers are particularly risky when they inject synthetic boundary markers: trace through whether each marker is added once to the buffer and emitted exactly once to the caller for all combinations of hasPreviousBlock / hasNextBlock
+- Whenever a compareNextTo call guards slice termination, check whether the inequality should be strict (> 0) or non-strict (>= 0). A bound exactly equal to the slice end should generally be excluded from results because an EXCL_END(x) bound equals INCL_START(x) of the next slice and returning it would duplicate the range tombstone marker. For reversed iterators, whenever a synthetic open/close marker is injected at a block boundary, ensure the real duplicate from the adjacent block is suppressed; the pattern skipFirstIteratedItem / skipLastIteratedItem is the guard needed
+- Any code that dispatches a compaction-like operation over a set of storage structures without first filtering on repair status should be reviewed. The guard isRepaired exists precisely to distinguish data that has already been through a full repair cycle; passing repaired storage structures into an operation that modifies repairedAt metadata can corrupt the repaired/unrepaired classification and confuse future incremental repair decisions
+- Whenever a statement-level method like checkAccess uses a resource object that is also transformed in execute, verify that the transformation is applied consistently in both places (or factored into a shared pre-processing step). Partial application of name resolution — where one code path resolves and another does not — leads to permission checks against a different resource than the one actually operated on
+- Any path-prefix matching logic that compares numeric suffixes should include the delimiter that follows the number. In review, look for startsWith or contains calls on storage structure base paths and confirm a non-numeric terminator (separator, dot, or slash) is included in the pattern to prevent generation-number prefix collisions
+- When a type is declared NOT_COMPARABLE to block ordering, double-check that equality comparisons still work correctly. Also watch for type-check guards that use instanceof against a concrete type — they will miss the same type when it appears as a parameter of a collection, tuple, or UDT; prefer referencesDuration-style virtual methods that recurse through composite types
+- Stub/no-op replacements for callable attributes must exactly match the signature (including all keyword arguments) of the original callable. In review, compare the no-op lambda or function against every call site of the attribute to ensure no TypeError can arise from extra keyword arguments
+- Whenever a boolean flag is used to compare two objects that can independently carry an identity value (here a UUID), the check needs to compare the identity values themselves, not just the flag. When wrapping a closed interval in a Cassandra token type, reach for Bounds (closed-closed) rather than Range (open-closed); using Range here was a semantic mismatch that silently dropped the first token of every storage structure from intersection tests
+- Any metric reservoir that applies a time-varying weight to stored values must normalize those values to a common epoch before performing arithmetic across buckets. When a snapshot divides the sum of weighted values by the sum of weights without first cancelling the shared time factor, the ratios remain valid — but the mean is computed as sum(value_i * rawCount_i) / sum(rawCount_i) where rawCount_i values are from different atomic reads at slightly different times, making them incomparable and potentially producing a negative mean
+- Minimum-finding loops that start with a sentinel empty collection and compare sizes will silently keep the empty set as the "minimum" forever. The idiom if (best == null || current < best) is the correct initialization guard. Whenever expression or any accumulator can be null after a loop, either the initial condition is wrong or the loop can produce no iterations, both of which need explicit handling
+- Watch for early return/writeEndObject branches inside serialisation methods that are gated on one boolean condition when in reality two orthogonal conditions must each be checked. Any time a single if/else decides whether to emit *mutually exclusive* outputs for what should be *independent* fields, that is a red flag — especially when one branch omits flushing the object close tag
+- Any time a wrapper/value-object type is introduced around a primitive identifier (UUID, int, String), search every call-site that passes or compares raw primitives against the wrapper and ensure the comparison uses the appropriate accessor. IDE inspections or a type-safe comparator would have caught this immediately
+- When a comparator result is used in an assertion at a branch that handles the "overlap" case, verify that the inequality sign matches the semantic intent. > 0 means "strictly after" while <= 0 means "before or equal"; swapping them produces an assertion that fires exactly when the code path is legitimately reached
+- Any loop that shrinks a work set and then re-checks a capacity bound must recompute the capacity estimate from the reduced set on each iteration. Precomputing a bound outside the loop and referencing it unchanged inside is a classic "stale estimate" bug when the basis of the estimate can be mutated by the loop body
+- See bug-0765. Any loop that shrinks a work set and re-checks a capacity bound must recompute the bound from the shrunken set on every iteration, not use a value calculated before the loop
+- See bug-0765. Any loop that shrinks a work set and re-checks a capacity bound must recompute the bound from the shrunken set on every iteration, not use a value calculated before the loop
+- Any time a loop checks a resource constraint and also modifies the inputs that determine that constraint, verify that the constraint value is recomputed after each modification. Here, the disk-space estimate is a function of transaction.originals, which reduceScopeForLimitedSpace shrinks; lifting the computation outside the loop broke the invariant that the check always reflects the actual remaining work
+- Look for object constructors called before a guard that would have short-circuited the method anyway. The pattern is especially common in cache/index lookup paths where an expensive key object is built as an argument to a method that starts with an enabled-check. Moving the guard to the outermost callsite eliminates the allocation on the fast-reject path
+- When a Transformation needs to act at both the partition level and the row level, applyToPartition must call Transformation.apply(partition, this) to register itself for row callbacks as well — simply returning the partition unmodified skips all inner callbacks. Review every StoppingTransformation or Transformation subclass to confirm it re-applies itself to the partition iterator when per-row side-effects are required
+- In any "find minimum" loop that initialises both the best-value holder and its associated data to a sentinel (null/empty), the replacement condition must special-case the first iteration. The classic pattern is if (best == null || current < best). Whenever you see a raw size/count comparison without a null guard on the first iteration, the minimum-selection logic will silently skip all candidates if the initial sentinel already satisfies the comparison direction
+- In any regex character class, a - that is not the first or last character (or immediately after a [ or before a ]) creates a range. When reviewing grammar or parser regex literals, verify that every - inside […] is intentionally a range operator. If a character like + visually "surrounds" the -, the resulting range may silently include or exclude characters the author intended to handle explicitly
+- In any hand-written equals method, each field comparison must reference other.field (or the local variable name for the cast argument) on the right-hand side. A field appearing on both sides of .equals is always a bug. Code review or static analysis (e.g. SpotBugs EQ_COMPARING_PARAMETER_TO_ITSELF) catches this trivially
+- When building a chain of driver policies where each layer optionally wraps the previous one, use a single local variable updated in sequence rather than independent conditionals that can fall through to a null base. Also audit every policy-building path to confirm that all desired policy layers (e.g. TokenAwarePolicy) are always present in the chain regardless of option combinations
+- See bug-0787. The same self-comparison defect existed on multiple active maintenance branches and required separate backport commits
+- See bug-0787. When the same logical bug is present on multiple branches, each branch needs its own commit. Tracking such backports explicitly in CHANGES.txt entries (which were absent here) helps confirm full coverage across the release line
+- Helper methods named with "weight", "factor", or "decay" that return integer types should be questioned: if the underlying calculation is exponential or fractional, premature rounding discards precision that is significant to downstream consumers. Review every Math.round or cast-to-long that occurs inside a calculation rather than at the final integer-boundary write
+- Any place where validation of a compound object is split into independent checks on its parts is suspicious when those parts are semantically dependent. For UDTs the field type is encoded in the cell path, so the two cannot be checked in isolation. In review, look for validate* methods that receive only a ByteBuffer value without access to the cell's path and ask whether the type system ever needs both to determine validity
+- Any call to Socket.shutdownInput or Socket.shutdownOutput should be scrutinised for TLS compatibility. The JDK explicitly states that SSLSocket does not support half-close operations. Code that works in plaintext test environments can silently break when TLS is enabled in production. In review, ask: "Does this code path ever receive an SSLSocket?" If the answer is possibly yes, the half-close must be removed or guarded
+- Variables initialised to a sentinel value (0, null, empty string) before a method call that was supposed to fill them in, but where the return value or out-parameter is ignored or unused, are a classic stale-variable bug. In review, check that every variable appearing in a log format string is actually written somewhere between its declaration and its use in the log call
+- When reviewing multi-branch enum dispatch (especially for TruncateWhen-style enumerations), verify that every meaningful non-default enum value has an explicit handling path. A guard that only tests for one variant while silently skipping others is a classic silent-skip bug. Pay particular attention when a mode name like ALWAYS implies unconditional behavior—any condition that gates it should be immediately suspicious
+- When a boolean property of a message is computed at serialization/deserialization time and stored inside the message object, check whether the same property could be derived deterministically from other message fields (such as the sender address). Storing a derived truth in a mutable field creates divergence risk; prefer deriving it on demand from an authoritative source. Also look for cases where a constructor sets a boolean to a default value that is only updated on one code path—any code path that bypasses the update silently preserves the wrong default
+- Whenever code creates a clone of a mutable object partway through a method but passes the original to earlier helpers, the helpers and the clone may see an inconsistent ring state. During review, verify that any cloneOnlyTokenMap (or similar snapshot) call appears before — not after — the helpers that should operate on it
+- Depth formulas for binary tree structures must use log base-2. Using Math.log (natural log) in contexts where a power-of-two calculation is required is a classic mistake — review any formula that passes its result to a power-of-2 construction (new MerkleTree(... (int) Math.pow(2, depth))) and verify the log base matches
+- Any code path that operates on ring/token state should be guarded by isJoined or a null/empty token check. Review all callers that assume tokens are present after clientInitialization or early-startup — the join_ring=false case is a legitimate operating mode that must be handled gracefully throughout the gossip lifecycle
+- When a method transforms data for a downstream consumer (especially a scripting layer), watch for any case-sensitivity mismatch between the producer and the consumer. In graph/charting pipelines a single upper-case key silently produces no series on the chart without any error. Similarly, any method that appends to a collection inside a loop should guard against appending empty/default-valued entries when the loop exits normally
+- When a streaming JSON writer opens an object in a helper method and the caller is responsible for closing it, any conditional branch that calls the helper but lacks the matching writeEndObject call will corrupt the output. Review every call site of serializeDeletion (and similar helpers) to confirm each open is matched by a close. Integration tests that parse the complete JSON output of sstabledump against tables containing deleted partitions would catch this immediately
+- Boolean expressions that combine two independently-necessary conditions to test membership often require && not ||; when either check alone is sufficient to declare membership the result type is usually different from "selects statics". In paging code, any branch that encodes the last-returned position without inspecting whether the returned item is a row marker (no cells) versus a real cell is prone to encoding the wrong position. A test using a table with static columns and at least two pages of distinct-key results would expose both bugs
+- Whenever a regex enumerates version tokens that are actually a pattern (prefix letter + suffix letter), watch for hard-coded alternations that do not cover the full pattern space. The fix changes (la|ka) to ((?:l|k).) — a non-capturing group matching l or k followed by any single character — which correctly handles all existing and future minor-version format codes under each major format family
+- When a helper method that returns a floating-point value has Math.round baked into it, every caller receives a coarsened value even when full precision is needed. Review helper methods that return numeric types: rounding conversions belong at the write boundary (array store, serialization), not inside the computation itself
+- When a helper method that returns a floating-point value has Math.round baked into it, every caller receives a coarsened value even when full precision is needed. Rounding conversions belong at the write boundary (array store, serialization), not inside the computation itself. Also watch for branches of the same fix landing as separate commits when a bug spans multiple release lines
+- Whenever a tool wraps management/notification listeners and exits via a completion signal, check that error-event branches set the appropriate exit-state field before the completion path runs. A pattern like if (type == COMPLETE) { signal } with no corresponding if (type == ERROR) branch is a strong indicator that error events are silently discarded
+- When a rate limiter is forwarded deep into a helper class, verify that acquire is actually called and that the argument correctly reflects the resource being limited (compressed vs. uncompressed bytes, number of rows vs. bytes, etc.). Rate-limiting code is especially fragile across refactors because the limiter can be passed around without anyone noticing it is never used
+- In review, look for the containsKey + get pattern on the same map with the same key inside a hot loop. The correct idiom is a single get, null-check, and conditional put — storing the result of get (or the newly created value) in a local variable so the third operation (the add) uses the local reference. Any code that calls get twice — once to check and once to use — has this defect
+- When reviewing code that accumulates boolean state across partitions, check that the state is unconditionally reassigned (not just set to true) at each partition boundary. A flag that is only ever set true inside an if but never explicitly cleared becomes stale as soon as a partition that would yield false is encountered. The symptom is a LIMIT query returning fewer rows than expected when some partitions have been deleted
+- Whenever Collection.contains is called with a value whose static type differs from the collection's element type, the check will silently always return false (Java generics are erased, so no compile-time error). Review all contains/remove calls on typed collections and verify the argument type matches. The symptom is that the filter has no effect — here, disk-space calculations would include files that were supposed to be excluded
+- Multi-branch kind/type dispatch that handles only specific string values and falls through to a default is error-prone. Review all such switches or if-else chains to ensure every combination of (kind, isSuper) is covered correctly. In migration code that must handle legacy schema formats, test with non-UTF-8 comparators (e.g., LongType, TimeUUIDType) to catch assumptions that column names are always text
+- When migration code reads a boolean flag from legacy storage to make a structural decision, consider whether that flag could have been written incorrectly by an older version. A safe pattern is to cross-validate with an independent heuristic (calculateIsDense) rather than trusting the stored value unconditionally, especially when the stored value was known to be wrong for a class of tables. The symptom is a node that fails to come up (or produces corrupted reads) after a 2.x-to-3.0 upgrade when the cluster contains tables that were created through Thrift
+- When a logging or metric-recording call is placed inside a branch that exists for display purposes only, it silently produces no output even though the conceptual precondition (at least one operation ran) is satisfied. Review any metrics/logging call that is nested inside a count-or-size guard and ask whether the guard really applies to the recording, or only to the presentation
+- When iterating over map.keySet and calling map.get(key) anywhere inside the loop body — especially inside a nested loop — replace the iteration with map.entrySet to retrieve both key and value in a single operation. Static analysis tools such as FindBugs/SpotBugs flag this pattern as WMI_WRONG_MAP_ITERATOR
+- Look for callers of replicasMissingMostRecentCommit / loadPaxosState that supply a locally-derived timestamp (e.g. FBUtilities.nowInSeconds or System.currentTimeMillis) rather than one derived from the ballot being processed. Any place where expiry decisions can differ between replicas due to independent clocks is a candidate for this class of bug. Also watch for unbounded retry loops in Paxos prepare/propose paths that have no age-based circuit-breaker
+- Identical pattern to 0880 — look for Paxos paths that read state with a locally-derived clock and for missing TTL age-checks in the MRC-repair loop. The 2.1 API uses long microseconds while the 3.x version uses int seconds, so check the unit carefully when reviewing the comparison
+- When reviewing Netty pipeline handlers, any two consecutive calls to ctx.channel.attr(sameKey) in the same method should be collapsed into a single Attribute<T> reference. The pattern is especially suspicious when the first call is used for a null-check and the second for an unconditional set, since it suggests the reviewer mentally treated attr as a field access when it is actually a method call
+- Any timeout or staleness check that uses mutation.createdAt (or any other original write timestamp) must be gated on whether the current execution context is a replay. During replay, mutations are applied from historical commit log segments and their timestamps have no relation to the current wall clock. Review all paths in Keyspace.apply that compute elapsed time from mutation.createdAt and ensure each is protected by an !isClReplay guard
+- In daemon startup code, catch blocks that only log errors for critical infrastructure (management, storage directories, commit log) are dangerous: the process appears healthy from the outside while a core capability is missing. During review, ask whether each caught exception in a startup method represents a recoverable partial-feature loss or a hard requirement. If other components of the system (monitoring, management, repair) depend on the failed service, the right response is almost always to fail fast rather than continue silently
+- Any code that dispatches to separate pager implementations based on whether a query is a "names" vs "slice" query is a red flag. When two pagers share responsibility for the same command type but differ only in the filter style, they must remain strictly in sync; the easier fix is a single, unified pager. Also watch for assertions in pager constructors that constrain which command variants they accept — these assertions become landmines when the dispatch logic is incorrect
+- Whenever a query layer has two parallel code paths — one that physically reverses a bound (e.g., for DESC ordering) and another that checks a flag against the logical bound — they will diverge for reversed types. In review, look for any call to areRequestedBoundsInclusive(bound) that does not account for the fact that the physical evaluation of the same bound has already been flipped
+- Schema migration code that copies column definitions from an old table to a new one must re-evaluate the derived flags (isDense, isCompound) based on the new column set before deciding which old metadata entries to keep. If the density flag is derived inside rebuild after all definitions have already been assembled, earlier filtering decisions that depend on density will be made against stale state
+- In any serialization/dumping code that branches on a "has deletion" condition, verify that the non-deletion data (cells, columns) is written in both branches or unconditionally. A mutual-exclusion if/else between metadata and payload is almost always wrong for Cassandra rows, which can simultaneously carry deletion markers and live cell data
+- When a method that accesses private fields is made public purely as a convenience for subclasses or custom handlers, check whether the signature forces callers to re-supply data the class already owns. If callers always pass the same private field back, the method is leaking implementation details. Introduce a zero-extra-argument facade and make the raw version private
+- In any paging discard loop, verify what happens when liveCount == toDiscard (i.e., nothing to keep). If the loop's termination condition is expressed as liveCount - toDiscard and both quantities are zero, the counter never advances and the loop is infinite or vacuously correct only by accident. Always add a pre-loop guard for the degenerate case. COMPACT tables without clustering columns are especially prone to this because they produce pages that may contain only tombstones
+- Any code that catches FSWriteError to trigger disk-failure handling or to protect commit-log discard must ensure that all throw sites in the flush pipeline emit FSWriteError, not a base IOException, IOError, or RuntimeException. During review, verify every path that can fail due to disk fullness throws the correct typed error, and that commit-log advancement is gated on flush success
+- State-machine validators that use cascaded if / else if blocks without a final else before a fall-through assignment are prone to unintended state overwriting. During review, check that every path through a state-machine branch sets exactly one state and that no unconditional assignment follows a conditional one at the same indentation level
+- When a hashCode iterates a collection of items that each contribute their own hash, seeding the hash with a derived summary of those same items (like columns) double-counts the content in a type-dependent way and can violate the equals/hashCode contract if the summary uses identity rather than content equality. Always verify that every field contributing to hashCode uses value equality and that no field is counted twice
+- Look for any code that calls getNonSystemKeyspaces and then tries to carve out internal-but-replicated keyspaces (system_traces, system_auth) by name with a magic counter. Any such pattern is fragile — it will break as new replicated system keyspaces are added or as the set of replicated system keyspaces differs across versions. Prefer getUserKeyspaces which maintains the exclusion list centrally in Schema.replicatedSystemKeyspaceNames
+- Whenever a Multimap is used to represent a one-to-many relationship (e.g., rack → endpoints), calling .size on the multimap value (which is itself a collection) gives the number of all values, not the number of distinct keys. Look for .size calls on Multimap or Multimap.get return values where the intent is "how many distinct groups exist" — those calls should use .asMap.size instead. Additionally, boolean guard conditions of the form X >= Y near topology branching deserve careful scrutiny to confirm the comparison direction matches the natural-language intent
+- Whenever a Multimap is used to represent a one-to-many relationship (e.g., rack → endpoints), calling .size on the multimap value (which is itself a collection) gives the number of all values, not the number of distinct keys. Look for .size calls on Multimap or Multimap.get return values where the intent is "how many distinct groups exist" — those calls should use .asMap.size instead. Additionally, boolean guard conditions of the form X >= Y near topology branching deserve careful scrutiny to confirm the comparison direction matches the natural-language intent
+- Methods that delegate to an async keyspace operation and ignore the returned Future will silently fail to block. During review, search for calls to Keyspace.apply that are not followed by a get or Uninterruptibles.getUninterruptibly call on the returned future. Any applyUnsafe / "unsafe" write utility should be scrutinized to confirm "unsafe" means "no durable write" rather than "no wait"
+- When reviewing schema mutation paths, check whether any operation that adds a new table both calls an explicit init method and then also calls an update method that performs initialization internally. The pattern open(ks).initCf(...) followed immediately by update(ks, ks -> ks.withSwapped(ks.tables.with(cfm))) is the tell: if the update path already triggers CF setup, the preceding initCf is redundant and potentially harmful
+- Any loop or iteration that advances by a computed step derived from integer division should guard against a zero divisor result. The pattern BigInteger step = total.divide(count); loop using step is hazardous when total < count is possible at runtime. Reviews should ask: what happens when the step is zero? If the answer is "infinite loop", a zero-guard is mandatory
+- Local boolean flags that track multi-step cluster-join state are prone to being set at the wrong step in the sequence. Whenever a node-lifecycle guard like isJoined or isBootstrapping is implemented as a plain field rather than as a query against the authoritative data structure (token metadata, gossip state), check whether the field assignment happens before or after the node is externally observable as joined. Prefer querying the canonical source of truth over maintaining a separate flag
+- After a merge of long-lived branches, always compile the result before committing. Import sections in large classes like StorageService are a common victim of merge conflicts that get resolved by accidentally dropping lines. A clean git diff on imports after resolving conflicts is a quick safety check
+- When a variable is used in multiple branches of an if/else chain, it must be declared and initialised before the chain, not inside one of its branches. Code review should flag any variable that appears in an if branch but is only assigned in a later else if branch. The compile-time "variable might not have been initialized" warning would normally catch this, but is suppressed when the variable was declared in an outer scope and left uninitialised
+- Whenever multiple temporal metadata fields (TTL, timestamp, deletion time) are combined using the same aggregation function, verify that each field's semantics match the chosen operator. TTL represents expiry duration (want minimum), timestamp represents write time (want maximum), and deletion time represents coverage (want maximum)
+- In gossip onChange callbacks, expensive lookups (hash-map reads, lock acquisitions, management operations) should always be guarded by a cheap state == comparison first. Review every IEndpointStateChangeSubscriber.onChange implementation and confirm the ApplicationState filter comes before any non-trivial side effects
+- Any code that calls SocketChannel.open(SocketAddress) (the convenience overload that connects immediately) and then attempts to bind the resulting socket is logically wrong. Use the no-argument SocketChannel.open form when you need explicit control over the local bind address
+- When a flag guards the use of an expensive or logically conditional operation, verify the flag is checked *before* the operation rather than inside its result handler. Regex matching in a tight loop is a common place to find this pattern: the match is performed on every iteration but the result is conditionally ignored, meaning both the performance cost and any side effects of the match are paid unnecessarily
+- Two-phase initialization patterns (an isInit flag + deferred init call) are fragile when the conditions that make initialization safe change between the flag-set point and the actual first use. When reading static columns changes the file position before a reader object is even created, any assumption that the reader will see a "clean" partition start becomes invalid. Look for assert statements guarding index or position state in iterator internals—they often reveal that the code assumes an initialization sequence that not all callers follow
+- Whenever a mutable object inherits a toString (or any read method) from a base class that performs iteration or lazy materialization, check whether that materialization has irreversible side effects. In Cassandra's partition model, building the BTree is a one-way transition; any code path that reads the full row set before the update is finalized—including log statements—can corrupt write pipelines. Review all subclasses of AbstractBTreePartition that have a distinct mutable phase to ensure toString is safe to call at any lifecycle stage
+- When an archiving task throws, the executor wraps the original IOException inside a RuntimeException before placing it in the ExecutionException. Any instanceof check against e.getCause must mirror the full wrapping chain — checking only one level misses the real cause. Similarly, whenever a feature flag guards a behaviour, every code path that performs that behaviour must query the flag; scanning all callers of recycleSegment during review would reveal the missing guard
+- Dimensional analysis: whenever a split-count formula multiplies meanPartitionSize (bytes) by partitionCount and divides by a constant that was documented as a partition count, the units don't cancel. Review the javadoc for setInputSplitSize — it says "number of partitions" — so dividing byte-sized quantities by it is wrong. When two configuration keys control the same logical parameter, both code paths should be exercised in tests
+- Any shell-script option parser that calls getopt and then breaks unconditionally after -- will silently swallow non-option arguments. Look for a shift; break inside the -- arm of a while/case loop without a guard on $*. Similarly, scripts that launch long-running daemons should always check id -u / id -g or equivalent to reject root execution by default
+- Whenever a read path has multiple early-exit branches (cache hit, short-circuit, empty result), audit each branch to ensure all relevant metrics are updated before returning. Histogram metrics are especially easy to miss because the default "0 count" path is invisible — the bug only surfaces as a statistical anomaly in the histogram rather than a crash
+- FilenameFilter lambdas receive (File dir, String name) — the first parameter is the *parent* directory, not the child being tested. Any lambda of the form (d, n) -> d.isXxx or (d, n) -> d.something that ignores n is almost certainly wrong. The correct pattern is (d, n) -> new File(d, n).isXxx
+- Signal / callback calls that are placed inside a conditional block rather than after it are prone to being silently skipped. When reviewing streaming or state-machine completion paths, check that progress signals are unconditionally reached for all non-error paths. Misplaced closing braces are a classic source of this error and are hard to spot in deeply indented code without examining brace alignment carefully
+- Converting filesystem paths to URIs via string concatenation fails on platforms with distinct path separators; always use platform-native URI conversion methods.
+- Token range boundary semantics differ between inclusive and exclusive endpoints; when comparing against boundaries use direct comparisons rather than high-level containment checks that silently handle endpoints inconsistently.
+- When guard conditions and mutating side effects are combined in a single expression, verify the mutation leaves in-memory state consistent if the guard fails; perform I/O after updating in-memory state, not before.
+- Any coarse admission filter followed by fine-grained processing must re-validate each item against the fine filter before passing to downstream processors; verify result objects are not empty before use.
+- Using transient external state as a proxy for "not yet initialized" is fragile; prefer explicit state queries on authoritative objects when distinguishing bootstrap stages.
+- Validation rules that are correct for user input must be relaxed for internal representations when a stored format encodes constructs that would be rejected by the validator; internal callers need bypass paths.
+- Counting items in partitioned structures requires explicit accounting of all structural parts; static-row-like features are easy to overlook because they parallel other structural elements rather than appearing in the obvious collection.
+- Guards that test for absence of a category of operations are suspect when that category can be empty for multiple distinct reasons; verify all conceptually distinct modification types are explicitly handled.
+- When a configuration loader distinguishes multiple cases, test the most-specific case first; omitting or testing "both set" conditions last causes fully-specified configurations to be misclassified as partial ones.
+- Assertions containing side effects are broken when assertions are disabled because the JVM skips the entire statement; hoist side-effecting calls before the assertion.
+- When using min/max to select the "best" item, verify the intended ordering; confirm that the comparator's direction and the terminal operation together produce the intended winner.
+- Wildcard imports missing their closing semicolon are a rare syntax error that compilers report immediately; check import blocks carefully during rebases or cherry-picks.
+- In nested loops with early-exit and collection removal, verify the exit decision considers all inner elements, not just the first match.
+- The read contract specifies three distinct outcomes for streaming I/O: positive (data), zero (no data yet), and negative (end-of-stream); code conflating the latter two silently ignores closed connections.
+- When a collector accumulates state but no code consumes the result, the accumulation is dead code; verify every accumulated field is read in the finalizing method.
+- When LWW semantics are needed, implementing custom ordering bypasses canonical reconciliation; any ordering without calling the reconciliation method is a candidate for wrong winner selection.
+- When computing derived values from potentially empty sets and comparing against stored references, always check whether the set is empty before treating a mismatch as an error.
+- Comparing collection sizes should use logical size methods, not raw backing array lengths; raw array length is implementation-dependent and may not equal the number of elements.
+- Using optional.orElse(sideEffect) is a bug when the intent is conditional side-effect execution; orElse eagerly evaluates, orElseGet lazily evaluates.
+- Void helper methods in dispatch or retry loops are a red flag; if operations can signal failure, that information must flow back to the loop controller or the loop will spin forever.
+- When a flag summarizes a property of an accumulated collection, the condition setting the flag must check both existing state and new items; missing either check misses items already satisfying the property.
+- Guards comparing position against a sorted collection must account for all query modes; order-sensitive guards cannot correctly cover both forward and reversed orderings with a single comparator.
+- When a flag's getter reads derived state from child objects, calling it when those children are transient null returns wrong values; prefer reading authoritative backing fields over computed derivatives.
+- Platform-specific format workarounds based on hard-coded output assumptions are fragile; verify actual platform output empirically rather than accepting speculative branch conditions.
+- Boolean guards used to suppress actions "for safety" when legitimate use cases exist represent incomplete logic; look for TODO/FIXME markers indicating known holes.
+- Type-hierarchy compatibility checks can be too conservative when subsets have different semantics; when a new variant of a type is introduced, existing checks may need discriminators for the variant.
+- When data structures store logically related fields in parallel arrays, every mutation operation touching one array must touch all related arrays; incomplete mutation helpers are common sources of bugs.
+- When map keys are pruned in selection logic, verify the keep/remove decision accounts for both the entry property and whether the query mode actually uses the mechanism.
+- In loop bodies handling multiple independent concerns, guards applied to one concern silently suppress unrelated work in the same iteration; scope guards narrowly to only the code they protect.
+- When comparing or ordering items of a type with special semantics, bypass library methods that implement the semantics; custom ordering logic duplicates reconciliation at the source of correctness bugs.
+- In scripts or tools that split on single-character delimiters, account for those characters legally appearing inside values; split on the full key-value separator, not just the structural character.
+- When a function fetches a value into a new variable and immediately guards against a sentinel, verify the guard checks the new variable, not an outer variable from a previous fetch.
+- Iteration-order boolean flags against sorted collections are fragile; record the identity of special elements at creation time rather than relying on position in a subsequent traversal.
+- Checking ByteBuffer emptiness should use .isEmpty rather than equals-to-constant comparison; logically empty ByteBuffers with different backing arrays or offsets are not equal.
+- Any setter delegating to another object's same setter must guard against the case where the two objects are identical; mutual references enable unbounded recursion without identity checks.
+- When merging two collections with a filter on one branch but not the other, verify the predicate should apply universally; asymmetric filters on union branches indicate incomplete coverage.
+- When code paths acquire external connections or resources, verify acquisition happens only when the resource is needed; unconditional pre-branch acquisition causes spurious failures when the resource is unnecessary.
+- Guards requiring peer state equality before network-topology adjustments silently misbehave during topology changes; verify version checks are truly prerequisites rather than already handled by lower layers.
+- Getter-named methods must only read, not mutate atomic variables; mutating operations belong in code paths that mark work done, not observers.
+- Thread pool executors without custom RejectedExecutionHandlers use AbortPolicy by default and throw unconditionally; in systems with known shutdown sequences, handlers must distinguish orderly shutdown from rejection.
+- Broad catch blocks triggering retries must distinguish between transient errors (retry-worthy) and fatal connection-level errors (will always fail); retrying on EOF or broken-pipe will hang.
+- Assertions enforcing object-identity equality on cached references are fragile in systems that replace rather than mutate objects; prefer structural equality or allow reassignment of non-owning references.
+- When multiple event handlers share similar guards, review each handler's parameter list independently; copy-paste transfers parameter names that may not exist in the target signature.
+- When writing persistent state on partial or in-progress distributed events, verify cleanup events fire reliably; gate writes on committed membership predicates, not on partial gossip activity.
+- Responding to distributed lifecycle events with persistent writes requires confirming terminal state; writing on the first partial signal leaves orphaned records when operations fail partway through.
+- Negated predicate calls on boolean-returning methods are a source of inverted-logic bugs; read conditions aloud to verify they match the stated intent.
+- When narrowing a polymorphic type via instanceof or cast, verify all concrete subtypes at the call site have been considered; collection operations must handle nested frozen types through abstract APIs.
+- Feature flags that disable a subsystem must be checked consistently at all code sites touching that subsystem; inconsistent guards leave some paths enabled when they should be disabled.
+- Off-by-one errors around chunk-boundary alignment checks are common in variable-length chunked formats; verify partial chunks are handled correctly when length falls mid-chunk.
+- Getter-named methods must be pure reads; any mutating atomic operations inside a getter is a code smell that belongs in command paths, not queries.
+- Ratio and rate calculations must use dimensional analysis; verify numerator and denominator units combine to produce the declared variable's units.
+- Methods named close that are called mid-operation must verify the call is safe; splitting into guarded public entry points and internal raw release methods prevents accidental double-processing.
+- Static initializers querying lazily initialized singletons risk initialization ordering issues; prefer plain static booleans set before any class loading begins.
+- Offline tools reusing classes designed for live clusters must account for runtime state assumptions; calls that mutate in-memory cluster state are suspect in offline contexts.
+- Methods decomposing scalar positions into per-level counts used as both limits and expected counts need off-by-one verification; functions extracting single booleans indicate unnecessary coupling.
+- Integer ceiling division without parentheses silently computes wrong values due to left-to-right operator precedence; expressions mixing addition and division in quorum calculations are especially prone to this.
+- Logging frameworks defer string concatenation but not argument evaluation; method calls inside logging arguments must be guarded with enabled-level checks in performance-critical code.
+- Grammar rules that accept names must reach all alternatives (bare vs quoted); names matching only one alternative will always be transformed, diverging from other paths that honor quoting.
+- Static initializers that mutate shared JVM-wide state are reliability hazards; fires at class-load time from surprising call sites. Prefer constructor or explicit setup methods.
+- Validation gates encoding internal layout knowledge must account for every independent structural property; missing disjuncts cause systems to accept invalid states that fail at query execution instead.
+- Recursive iterator implementations are at stack-overflow risk on large inputs; replace self-calls with iterative loops over all transitions.
+- Boolean predicates with "is" or "has" in their names are easy to invert accidentally; read the logic aloud to verify the method body matches the name semantically.
+- Restrictions inspected by value count rather than type predicates are fragile when a single-value restriction can exist for multiple restriction kinds.
+- String class names in configuration validation should be compared using string form, not Class objects, to avoid classloader-dependent inequality and compiler warnings.
+- JVMStabilityInspector is for genuinely unexpected exceptions; routing caught exceptions from intentional try/fallback patterns through inspectors is incorrect.
+- Empty collections should be short-circuited before downstream operations; operations have no way to distinguish intentional-empty from accidentally-empty, leading to spurious log messages.
+- Fixes backported to multiple branches should be structurally equivalent; verify context lines align and no additional side effects were introduced during the port.
+- In catch blocks with both side-effects and throws, the throw must always be last; merge conflicts often invert this ordering in catch block cleanup logic.
+- String prefix stripping followed by re-prefixing silently drops any prefix that doesn't match the hardcoded string; prefer prefix-agnostic forwarding and guards against unhandled argument families.
+- Schema diff-and-classify algorithms must explicitly handle all four quadrants: both empty, pre-empty post-non, pre-non post-empty, pre-non post-non; missing a quadrant leaves scenarios unhandled.
+- Sliding-window or chunked-iteration patterns must verify end indexes are expressed relative to the same origin as start indexes; off-by-one errors between absolute and relative offsets are invisible on first iteration.
+- Algorithms walking two sorted sequences in parallel with strict containment invariants risk assertion errors; safe patterns always advance the secondary pointer with comparison loops.
+- Methods temporarily unwrapping type wrappers for narrower operations must return the original wrapped value; rebinding variables intended to carry type information loses wrapper information.
+- Backward predecessor walks terminating on less-than comparisons fail for wrap-around cases; forward modular scans over fully sorted lists are the safe idiom for arbitrary begin/end inputs.
+- When validation loops consume a shared iterator across multiple inputs, the iterator exhausts mid-loop skipping later items; recreate the iterator per item or use cycles.
+- After type refactoring, verify all use sites (constructors, loops, accessors) match the new type; compile-time checks catch this but hand-rolled string matches can be missed.
+- After field renaming, search for all references to the old name across the codebase; IDE refactors miss hand-rolled matches and subtle aliased references.
+- In nested loops where an iterator removes elements that should not be processed further, add break or continue after removal to correctly terminate outer iteration.
+- Boolean predicate names starting with "is" or "has" are easy to invert; verify the method body semantically matches its name in all cases.
+- Loop-based checks that are the only guard before return-true must consider whether the positive result is also valid for empty collections.
+- Comparators handling objects with distinct kinds must short-circuit on kind mismatch before field-by-field comparison; missing this guard lets encoding artifacts produce incorrect ordering.
+- Heuristics inferring schema metadata from current column sets are fragile after removals; derive structural properties at creation time and store explicitly rather than inferring later.
+- Hard-coded fixed-width format strings for tabular output are fragile when field values can be arbitrarily long; compute column widths dynamically from actual data.
+- Boolean short-circuit direction in "does any element satisfy condition X" helpers is inverted compared to "all elements satisfy"; verify hasX implementations return true-in-loop, false-after.
+- Methods re-reading configuration at runtime and throwing on failure should fall back to cached values if available; runtime resource unavailability should not crash when startup cache exists.
+- instanceof branches with less-safe default fallbacks must explicitly cover all runtime types; new subtypes slipping through instanceof guards reach unsafe fallbacks.
+- Sequences of type transformations that can each expose new conditions must use separate if statements, not else-if; mutual exclusion silently skips later transformations.
+- When computing node/host counts, verify the source is node-based rather than token-based; with vnodes, token sources produce O(num_tokens x nodes) entries, not O(nodes).
+- Comparisons for "good enough to merge" should use <= rather than <; strict < rejects merges when both sides are identical, opposite of intended behavior.
+- Range or slice ordering must be explicitly checked for reversed queries before choosing comparators; reusing forward comparators for reversed logic is error category.
+- Grouping heterogeneous cell types by shared key requires type-identity checks in addition to key equality; structurally identical keys can suppress required group splits.
+- Optimisation variables updated inside conditionals must be re-verified after state-changing operations; prefer deriving tracking variables from results rather than from individual inputs.
+- Guards moved during refactors must be re-verified as reachable only in original contexts; low-level utility guards fire for all callers, not just intended ones.
+- Loops submitting to endpoint lists without filtering local node and checking eligibility may attempt self-submission and bypass eligibility checks; verify guards present.
+- Files open for writing on other threads or processes need OS-specific guards; Windows file-sharing semantics differ from POSIX for concurrent open-for-read of write-locked files.
+- In drain/flush loops using InputStream.skip, always check for -1 returns before subtracting; loop convergence requires variables to move closer to termination.
+- instanceof checks followed by casts must have the same type in both; mixing parent-class instanceof with subclass cast produces latent ClassCastException.
+- executeInternal(String query, Object... values) expects CQL bind markers (?), not format specifiers (%s); varargs without placeholders pass format args where bind parameters belong.
+- After merge or type-rename refactoring, search for remaining references to old type names and variables matching old naming conventions; same-type wrong-variable references need careful reading.
+- Comparators returning different values for the same pair depending on argument order are asymmetric; verify sentinels sort at correct range end.
+- Boundary comparisons guarding removal/cleanup must verify whether equality should trigger cleanup; off-by-one < vs <= in offset comparisons stick resource release.
+- Locale-aware tool output in shell scripts requires matching structural markers rather than translated strings; English-only patterns silently produce empty output on non-English systems.
+- Large refactors changing core type signatures often leave stale imports and field declarations; review import lists and field declarations after API migrations.
+- Error messages referencing multiple sources for resources should indicate the actual source in use, not hardcoded constants; review paths in "default vs. override" branching.
+- Factory methods choosing between subtype and supertype must always return the expected subtype; callers expecting a specific subtype will ClassCastException if supertype is returned.
+- When refactors split construction across two phases, verify derived values computed in phase one don't depend on phase two data; defer computations until all inputs present.
+- In loops over nested objects, null/bounds checks must reference loop-variable fields, not outer-container fields; outer checks evaluate identically every iteration.
+- When changing concrete return types from factories, update field types to the most specific interface callers need; using broadest supertypes hides list-specific operations.
+- Bridge methods delegating to typed overloads must cast the parameter variable, not this; self-comparisons are a code smell and flagged by static analysis.
+- Before committing merges, search for conflict markers; CI builds should reject files containing unresolved markers.
+- Error/exception messages with homoglyphs and transposition typos are caught by integrated spellcheckers; verify spelling before commit.
+- Comparing map.values.size to map.keySet.size on the same map is a tautology; use deduplicated structures on one side when comparing counts across different dimensions.
+- ByteBuffer values representing encoded data must use unsigned comparisons; review Comparable implementations to confirm unsigned semantics in composite prefix checks.
+- Secondary-index notifications added "just to be safe" must be verified as not already emitted; double notifications silently degrade throughput and corrupt index state.
+- Logger calls using runtime-constructed format patterns don't substitute correctly; pass literal patterns, not variables, as the first argument.
+- Sorted-array iterators caching position must handle all three comparator outcomes; equality-only handling and fall-through misbehaves when requested key is smaller than cached position.
+- After merging feature branches, check for duplicated logic blocks differing only in minor details; merge conflicts leave duplicate setup sequences running twice.
+- Duplicate case labels in switches are compile errors caught immediately; look for split logic where one case handles storage and another a follow-up for the same value.
+- Port merges with different composite-key APIs must guard each comparison with bounds checks against the correct list; cross-list index mismatches cause wrong comparisons.
+- CQL features with sub-element access must carry the selector through all paths: grammar, AST, evaluation, duplicate detection; maps missing selectors incorrectly merge conditions.
+- Objects carrying mutable state used from multiple call sites can have state overwritten by later calls; prefer value-object wrappers capturing state at creation time.
+- ByteBuffer.get(no-args) inside comparators/serializers is suspicious; always use index-based get(index) when the caller doesn't own the buffer.
+- Overload resolution silently binds to different methods after signature changes; always verify dispatch after altering overload sets.
+- After merge conflict resolution, verify type declarations match the target branch's type system; parent-type reassignments compile fine but lose subtype behavior.
+- Loops iterating over one collection with boundary checks against a different collection risk wrong variable usage; verify both are always the same size or use the intended one.
+- Methods accepting Collection parameters that then mutate them may receive unmodifiable collections; always copy into a new mutable collection before mutating.
+- String comparisons with == or != almost always indicate bugs unless strings are known interned constants; flag variables read from external sources.
+- Shared code paths serving distinct statement types require statement-type guards before side effects appropriate to only one type.
+- Methods declaring checked exceptions not actually thrown will cause compile errors at call sites; verify every declared checked exception is actually thrown.
+- Schema objects maintaining duplicated representations must update all copies atomically; missing updates to secondary copies cause assertion failures and corruption.
+- When building "all" sets by augmenting base sets, subsequent operations should use "all" consistently; verify base-set uses after augmentation are intentional.
+- Call statements with non-void return types but no assignment are red flags; merge conflicts often produce this pattern when one side adds assignment and another doesn't.
+- Hard-coded constant predicates should be computed from object fields accounting for all configurations; result comparisons need matching cardinality between result and expected columns.
+- Tiered/leveled structures requiring invariants per mutation must guard expansion loops against transitively pulled members violating invariants; level-skipping optimizations need concurrent-safety proof.
+- In hand-written equals methods, every field comparison must use consistent polarity; mixed if(equal)return-false and if(!equal)return-false patterns indicate copy-paste bugs.
+- Size-tracking accumulators only incremented for column writes miss delete markers; verify every mutation type contributes to size and operation count.
+- Copy/serialization methods must confirm target buffers are destinations, not sources; source writes in copyTo methods are almost always bugs.
+- Iterators advancing via pre-decrement must reference index+1 in remove; post-advance index removes the wrong element.
+- Reconciliation returning either input must consistently pass semantically-stable "old" and "new" to callbacks; downstream can't identify which argument won.
+- Loops sleeping on configurable intervals must check exit conditions before the sleep, not after; shutdown flags won't wake threads unless sleep is on waitable primitives.
+- Recursive AbstractIterator.computeNext on "skip" conditions causes stack overflow; always use iterative loops for skipping.
+- Unchecked downcast from interface to concrete subtype risks ClassCastException; verify the cast is the only possible implementation or add instanceof guard.
+- Raw unchecked collection construction with type-incompatible comparators is a red flag; verify element types match comparator expectations.
+- After merge introducing new return types into interfaces, verify implementing files have required imports; compilation errors catch this but review should verify all implementations.
+- Pagers maintaining "items remaining" by re-querying subordinate objects must verify subordinates eventually exhaust; tight loops where !isExhausted never becomes true indicate stale re-evaluation.
+- Factory/strategy methods returning interface types should not be cast to concrete subtypes; future implementation changes will produce ClassCastException.
+- After merges, grep for uses of interface types where surrounding code consistently passes concrete types; one-line signature changes are merge-artifact patterns.
+- Method parameters declared but never referenced while body references same-concept variables by different names signal merge artifacts; static analysis flags unused parameters.
+- Tracking "progress within level" must key on source level, not destination level; mixing input/output SSTables in bookkeeping loops causes wrong tracking.
+- In-place filtering removing columns must be checked for empty results before serialization; mutate-then-validate before I/O.
+- Pagers recording "last seen" positions must compute from query-order perspective; head/tail operations must account for direction if data can be returned reversed.
+- Hinting code paths must be audited against non-idempotent mutation types; new verb types need shouldHint review across all callers.
+- SLF4J parameterized logging and + concatenation cannot be mixed; lint rules catch this, verify {} count matches trailing arguments.
+- String.split with single-character patterns having regex meaning must be escaped with \\. or wrapped in Pattern.quote.
+- After refactoring method signatures, search all call sites across submodules before committing; compile-all steps catch this, verify optional modules included.
+- Structural property tests should delegate to single authoritative methods, not re-derive; duplicated derivation logic drifts as codebase evolves.
+- After refactoring wrapping primitives in richer types, audit equals calls and map lookups; if wrapper equals isn't symmetric, silently wrong comparisons remain.
+- Purge/drop decisions before consuming all contributing data must account for maximum tombstone timestamps across all sources; shouldPurge calls before full iteration are red flags.
+- Response-accumulation paths with deduplication must verify correctness under all valid delivery scenarios including speculative replicas; suppressed increments cause read timeouts.
+- Recursive index-advancing on large collections causes stack overflow; convert to iterative loops.
+- Schema change validation must distinguish ordering columns (clustering, index rows) from value columns; stricter isCompatibleWith on value columns blocks valid widening.
+- Conflict markers cause compile errors; search literal strings in pre-commit hooks.
+- Shell script syntax errors caught by bash -n; run as CI lint step.
+- Enum value assertions for single members break when new members added; cross-reference against all call sites.
+- Duplicate addColumn calls with same column-name literals signal copy-paste errors; verify every logical column written exactly once with distinct name.
+- Paired addCallback/sendOneWay calls prone to sync loss on API evolution; collapse into single sendRR method when possible.
+- Format string argument counts must match placeholder counts; constants from external classes require cross-codebase search.
+- Pre-commit hooks rejecting conflict markers prevent committed markers.
+- Process-detection regexes must match stable identifiers like fully-qualified class names, not conditional flags.
+- Speculative request construction indexing into one list with size of another must verify shared invariants; pre-compute all participants and expose via single accessor.
+- Offline tools splitting composite names must guard against out-of-range indexing; row markers and tombstones produce shorter composites.
+- Pre-flight capacity checks duplicate already-handled error paths; let OS report actual failures and handle in error path.
+- Size-calculation methods accumulating into locals must check every branch and conditional adds computed sub-sizes; bare method calls with no assignment are bugs.
+- Snapshot lifecycle scopes at different levels affect different column families; table-level operations can wipe per-CFS snapshots when called during per-CFS repair.
+- Consensus protocols tracking "latest X" must check whether latest and most-significant for action diverge; separate tracking required if they can differ.
+- Multi-phase commit protocols completing in-progress rounds must rebind proposals to current ballot before re-proposing; stale ballots violate protocol invariants.
+- Scheduling loops using return values as branch conditions must verify all paths re-arm next scheduled events; missing re-arm stops periodic tasks silently.
+- Safety guards ensuring isolation invariants must sit outside optional branches; guards inside conditionals become no-ops for certain code paths.
+- Validation choosing between maps (columns vs metadata) must use correct map; wrong map produces false negatives/positives for non-key columns.
+- Exception messages including duplicates of the noun being operated on indicate template-string errors; review for accidental word repetition.
+- Elapsed-time guards must compute now-start; start-now produces permanently negative satisfying any positive bound, creating infinite loops.
+- Assertions firing inside iterators on wrapping ranges are red flags; position/offset comparisons valid for linear scans violate intermediate wrap-transition states.
+- Validation error messages must precisely state structural elements causing restrictions; overly broad terms mislead users.
+- Request/reply protocols must implement both sides; senders wait for confirmation, receivers send it; partial reads require full stream consumption before reuse.
+- Methods accepting String names only to immediately look them up need overloads accepting pre-resolved objects; both avoids redundant lookups and surfaces bugs earlier.
+- Build failures from syntax errors are caught immediately; running builds before commit is only mitigation.
+- Validation returning only booleans when validated objects are immediately needed should return the object directly; both avoids second lookup and propagates metadata.
+- Assertions in base constructors enforcing constraints only for subset of callers belong in more restricted contexts.
+- Converting inclusive bounds to Range for intersection testing must verify equal endpoints don't silently produce full-ring ranges.
+- Multi-line boolean return expressions commonly miss terminators; compile-check before accepting merges.
+- Mutations changing shared networking state must guard with idempotency checks; redundant operations performed on every heartbeat cycle.
+- Error message string literals are rarely tested and easy to mis-type; spell-check string literals in lint steps.
+- Element-wise list merging must account for size differences; iterating to minSeen.size truncates when candidate is longer.
+- Computing type counts from comparators must account for special trailing types.
+- API objects with parallel mutually-exclusive fields must branch on intended primary field; guard conditions on secondary fields silently miss cases.
+- Factory methods for range endpoints must match field type being consumed; using getTokenFactory instead of getToken silently produces wrong endpoints.
+- Array sizing formulas dividing fixed capacity by configuration units must prove result > zero; large config values can collapse quotients to zero.
+- Array sizing formulas must protect against inputs reducing quotient below one; Math.log10 on values <= 1 produces zero or negative, zeroing allocations.
+- After merge resolution, review added methods and fields against intended API; methods appearing only in one branch with no callers are merge-artifact candidates.
+- Validation guards on raw parsed representation are preferable to checking derived object properties; compilation can collapse or transform original intent.
+- while (condition) { enqueue; } patterns with false-on-entry conditions and no external retry starve work forever; do-while needed when at least one iteration must occur.
+- Range conversion losing endpoint information requires explicit fallback check; left-inclusive Bounds converted to left-exclusive Range loses left endpoint.
+- Method throws clause listing unchecked exceptions not actually propagated causes compile errors at call sites; review throws clauses after refactoring.
+- Guards that must apply only in specific branches should live inside the branch; post-hoc checks are error-prone if the branch mutates guard dependencies.
+- Constructor visibility narrowing to package-private after merge breaks cross-package test usage; compilation errors occur when test classes build.
+- Numeric field comparisons with independent <= for "at most X" relationships must form proper lexicographic order; independent inequalities allow impossible combinations.
+- Duplicate field/variable declarations in same scope produce compile errors; compile before accepting merges.
+- Malformed constructor signatures produce compile errors if file is compiled; always compile merge results.
+- Heterogeneous collection iteration casting elements to specific subtypes without instanceof risks ClassCastException; occurs when new subtypes added to registration infrastructure.
+- Side-effect paths replicating parameter-encoded decisions are error-prone; prefer parameter path always exercised for consistency.
+- Transitions to "healthy" inferred from passive traffic without two-way probes risk false-positives in asymmetric networks; confirm two-way communication before marking healthy.
+- Extracting logical names by stripping extensions must account for additional suffixes; unstripped suffixes produce cache misses on name lookups.
+- After merges, verify parameter and variable types consistent with target branch; find-all-usages of old interface names catches survivors.
+- Fallback code paths mirroring primary paths using stateful resources must handle all stateful transitions; divergent paths around resources often miss seek, flush, or close calls.
+- Exception construction at call sites must cross-check argument order against constructor parameters; same-type arguments representing distinct concepts can be transposed.
+- After merges/cherry-picks, verify every referenced class has corresponding import; IDEs catch instantly but patch reviews need manual checks.
+- Consistency-level checks using hard-coded blockFor calls must factor in pending/bootstrap endpoints; missing accounting causes wrong consistency during topology changes.
+- Bootstrap-related consistency fixes affect all maintained versions; must backport consistently across branches.
+- Partitioner type instanceof checks break with new partitioners; prefer capability methods expressing property of interest.
+- Recursive algorithms incrementing bounded counters must have depth-limit guards; unbounded overflow on large inputs.
+- Merge conflicts in conditionals often flip comparisons silently; verify polarity matches surrounding comment intent when reviewing merge fixes.
+- Filter predicates described as "excluding system X" must explicitly code exclusion; absent exclusion clauses easily missed.
+- Filter predicates skipping system tables must have explicit exclusion condition; method names don't guarantee coded exclusion logic.
+- Inverted boolean guards are classic merge artifacts; check every comparison operator still matches stated intent.
+- Validation throwing on missing keys must account for every legitimate fallback path; explicit-or-default patterns need both checks before errors.
+- instanceof checks on interface types must sufficiently discriminate when multiple column family modes share the same comparator class.
+- Assertions expressing "never exceed X" near equality checks to X are suspicious if value can grow beyond bound in retry conditions; loosen both assertion and equality.
+- Tombstone removal timestamp guards use high-risk one-character operators; state intent in English and verify the operator matches.
+- Tombstone removal timestamp guards use high-risk one-character operators; state intent in English and verify the operator matches.
+- Swapped index ranges in conditional branches are a red flag; verify asymmetric-looking if/else blocks don't transpose logic.
+- Tools wrapping remote operations must communicate failure back to callers; log-and-return without throwing or setting flags silently succeeds when it should fail.
+- Merge conflicts often corrupt source via leftover markers and missing enum commas; grep for conflict markers and verify enum syntax before committing.
+- Primary key validation with multiple independent conditions must review the complete test matrix; missing disjuncts accept invalid DDL silently.
+- Path-based configuration comparisons must account for symlink resolution to prevent false negatives when comparing paths.
+- Multi-level version comparisons must enumerate all components to avoid false positives from versions differing only in omitted fields.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Parsers using shared AST node types for semantically distinct constructs must have explicit type-aware coercion.
+- File path construction must verify that all expected directory hierarchy levels are included.
+- Parsers using shared AST node types for semantically distinct constructs must have explicit type-aware coercion.
+- Multi-level version comparisons must enumerate all components to avoid false positives from versions differing only in omitted fields.
+- Avoid direct field access on public objects; use accessor methods to decouple callers from internal structure.
+- Grammar rule quantifiers must match semantic intent; distinguish between + (one or more) and * (zero or more).
+- Path comparisons must use consistent resolution semantics across the codebase.
+- CI builds must reject unresolved merge conflict markers in source code.
+- When state depends on multiple sources with ordering constraints, consult authoritative sources first.
+- Path comparisons must use consistent resolution semantics across the codebase.
+- Path comparisons must use consistent resolution semantics across the codebase.
+- Field refactors must be applied consistently across all references using IDE-level renaming.
+- Eligibility checks based on estimates need time-based or generation-based guards to prevent immediate re-selection.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Package declarations must match directory structure to prevent IDE alerts and runtime class-not-found failures.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Summary log/trace statements must be placed outside early-exit branches to fire unconditionally.
+- Field refactors must be applied consistently across all references using IDE-level renaming.
+- Enum initialization must account for empty cases with appropriate factory methods.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Eligibility checks based on estimates need time-based or generation-based guards to prevent immediate re-selection.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Parsers using shared AST node types for semantically distinct constructs must have explicit type-aware coercion.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Field refactors must be applied consistently across all references using IDE-level renaming.
+- Multi-step initialization must set state flags at the point where each step completes, not where it was in original code.
+- Grammar rule quantifiers must match semantic intent; distinguish between + (one or more) and * (zero or more).
+- Parsers using shared AST node types for semantically distinct constructs must have explicit type-aware coercion.
+- Summary log/trace statements must be placed outside early-exit branches to fire unconditionally.
+- Validation must occur at all code paths that can trigger the guarded behavior.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Summary log/trace statements must be placed outside early-exit branches to fire unconditionally.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Summary log/trace statements must be placed outside early-exit branches to fire unconditionally.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Parsers using shared AST node types for semantically distinct constructs must have explicit type-aware coercion.
+- Enum initialization must account for empty cases with appropriate factory methods.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Multi-level version comparisons must enumerate all components to avoid false positives from versions differing only in omitted fields.
+- Path comparisons must use consistent resolution semantics across the codebase.
+- Multi-level version comparisons must enumerate all components to avoid false positives from versions differing only in omitted fields.
+- Operation-type checks must handle all enum variants.
+- Multi-level version comparisons must enumerate all components to avoid false positives from versions differing only in omitted fields.
+- Path comparisons must use consistent resolution semantics across the codebase.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Multi-level version comparisons must enumerate all components to avoid false positives from versions differing only in omitted fields.
+- Summary log/trace statements must be placed outside early-exit branches to fire unconditionally.
+- Path comparisons must use consistent resolution semantics across the codebase.
+- Multi-step initialization must set state flags at the point where each step completes, not where it was in original code.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- File path construction must verify that all expected directory hierarchy levels are included.
+- Parsers using shared AST node types for semantically distinct constructs must have explicit type-aware coercion.
+- Multi-level version comparisons must enumerate all components to avoid false positives from versions differing only in omitted fields.
+- Field refactors must be applied consistently across all references using IDE-level renaming.
+- Grammar rule quantifiers must match semantic intent; distinguish between + (one or more) and * (zero or more).
+- Enum initialization must account for empty cases with appropriate factory methods.
+- Multi-level version comparisons must enumerate all components to avoid false positives from versions differing only in omitted fields.
+- Multi-step initialization must set state flags at the point where each step completes, not where it was in original code.
+- Path comparisons must use consistent resolution semantics across the codebase.
+- Field refactors must be applied consistently across all references using IDE-level renaming.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Path comparisons must use consistent resolution semantics across the codebase.
+- Path comparisons must use consistent resolution semantics across the codebase.
+- Read-before-write optimizations should collect only required columns rather than materializing entire rows.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Enum initialization must account for empty cases with appropriate factory methods.
+- Avoid direct field access on public objects; use accessor methods to decouple callers from internal structure.
+- Field refactors must be applied consistently across all references using IDE-level renaming.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Multi-step initialization must set state flags at the point where each step completes, not where it was in original code.
+- Parsers using shared AST node types for semantically distinct constructs must have explicit type-aware coercion.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Parsers using shared AST node types for semantically distinct constructs must have explicit type-aware coercion.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Multi-step initialization must set state flags at the point where each step completes, not where it was in original code.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Parsers using shared AST node types for semantically distinct constructs must have explicit type-aware coercion.
+- Enum initialization must account for empty cases with appropriate factory methods.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Eligibility checks based on estimates need time-based or generation-based guards to prevent immediate re-selection.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Summary log/trace statements must be placed outside early-exit branches to fire unconditionally.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Enum initialization must account for empty cases with appropriate factory methods.
+- Parsers using shared AST node types for semantically distinct constructs must have explicit type-aware coercion.
+- Path comparisons must use consistent resolution semantics across the codebase.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Path comparisons must use consistent resolution semantics across the codebase.
+- Summary log/trace statements must be placed outside early-exit branches to fire unconditionally.
+- Parsers using shared AST node types for semantically distinct constructs must have explicit type-aware coercion.
+- Field refactors must be applied consistently across all references using IDE-level renaming.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Parsers using shared AST node types for semantically distinct constructs must have explicit type-aware coercion.
+- Path comparisons must use consistent resolution semantics across the codebase.
+- Field refactors must be applied consistently across all references using IDE-level renaming.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Parsers using shared AST node types for semantically distinct constructs must have explicit type-aware coercion.
+- Summary log/trace statements must be placed outside early-exit branches to fire unconditionally.
+- Enum initialization must account for empty cases with appropriate factory methods.
+- Path comparisons must use consistent resolution semantics across the codebase.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Path comparisons must use consistent resolution semantics across the codebase.
+- Enum initialization must account for empty cases with appropriate factory methods.
+- Multi-level version comparisons must enumerate all components to avoid false positives from versions differing only in omitted fields.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+
+## Wrong constant / default value (331)
+
+- Parsers using shared AST node types for semantically distinct constructs must have explicit type-aware coercion.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Structural consistency must be verified across all related components.
+- Enum initialization must account for empty cases with appropriate factory methods.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Structural consistency must be verified across all related components.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Path comparisons must use consistent resolution semantics across the codebase.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Path comparisons must use consistent resolution semantics across the codebase.
+- Path comparisons must use consistent resolution semantics across the codebase.
+- Field refactors must be applied consistently across all references using IDE-level renaming.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Path comparisons must use consistent resolution semantics across the codebase.
+- Enum initialization must account for empty cases with appropriate factory methods.
+- Multi-level version comparisons must enumerate all components to avoid false positives from versions differing only in omitted fields.
+- Multi-level version comparisons must enumerate all components to avoid false positives from versions differing only in omitted fields.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Path comparisons must use consistent resolution semantics across the codebase.
+- Field refactors must be applied consistently across all references using IDE-level renaming.
+- Parsers using shared AST node types for semantically distinct constructs must have explicit type-aware coercion.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Field refactors must be applied consistently across all references using IDE-level renaming.
+- Path comparisons must use consistent resolution semantics across the codebase.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Enum initialization must account for empty cases with appropriate factory methods.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Path comparisons must use consistent resolution semantics across the codebase.
+- Enum initialization must account for empty cases with appropriate factory methods.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Path comparisons must use consistent resolution semantics across the codebase.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Path comparisons must use consistent resolution semantics across the codebase.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Path comparisons must use consistent resolution semantics across the codebase.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Operation-type checks must handle all enum variants.
+- Field refactors must be applied consistently across all references using IDE-level renaming.
+- Path comparisons must use consistent resolution semantics across the codebase.
+- Path comparisons must use consistent resolution semantics across the codebase.
+- Multi-level version comparisons must enumerate all components to avoid false positives from versions differing only in omitted fields.
+- Multi-level version comparisons must enumerate all components to avoid false positives from versions differing only in omitted fields.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Multi-level version comparisons must enumerate all components to avoid false positives from versions differing only in omitted fields.
+- Multi-level version comparisons must enumerate all components to avoid false positives from versions differing only in omitted fields.
+- Parsers using shared AST node types for semantically distinct constructs must have explicit type-aware coercion.
+- Parsers using shared AST node types for semantically distinct constructs must have explicit type-aware coercion.
+- Enum initialization must account for empty cases with appropriate factory methods.
+- Multi-level version comparisons must enumerate all components to avoid false positives from versions differing only in omitted fields.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Summary log/trace statements must be placed outside early-exit branches to fire unconditionally.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Structural consistency must be verified across all related components.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Field refactors must be applied consistently across all references using IDE-level renaming.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Parsers using shared AST node types for semantically distinct constructs must have explicit type-aware coercion.
+- Parsers using shared AST node types for semantically distinct constructs must have explicit type-aware coercion.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Parsers using shared AST node types for semantically distinct constructs must have explicit type-aware coercion.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Multi-level version comparisons must enumerate all components to avoid false positives from versions differing only in omitted fields.
+- Path comparisons must use consistent resolution semantics across the codebase.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Multi-level version comparisons must enumerate all components to avoid false positives from versions differing only in omitted fields.
+- Multi-level version comparisons must enumerate all components to avoid false positives from versions differing only in omitted fields.
+- Field refactors must be applied consistently across all references using IDE-level renaming.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Field refactors must be applied consistently across all references using IDE-level renaming.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Parsers using shared AST node types for semantically distinct constructs must have explicit type-aware coercion.
+- Field refactors must be applied consistently across all references using IDE-level renaming.
+- Field refactors must be applied consistently across all references using IDE-level renaming.
+- Path comparisons must use consistent resolution semantics across the codebase.
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- Path comparisons must use consistent resolution semantics across the codebase.
+- Summary log/trace statements must be placed outside early-exit branches to fire unconditionally.
+- This is a classic copy-paste mistake when creating a companion options or configuration class next to a primary strategy class. In any class that is split from a parent (e.g., `FooOptions` split from `Foo`), verify that the `LoggerFactory.getLogger(...)` argument matches the declaring class, not the class it was copied from. Static analysis tools or a simple convention of using `MethodHandles.lookup.lookupClass` would prevent this category of error entirely.
+- DROP
+- In any `[Class/Subsystem]` that works with numeric types, look for explicit casts to boxed types (`Integer`, `Double`, `Long`) before calling `compareTo`. The idiomatic replacements are `Integer.compare`, `Double.compare`, and `Long.compare`. Static analysis tools (FindBugs/SpotBugs rule `BX_BOXING_IMMEDIATELY_UNBOXED_TO_PERFORM_COERCION`) catch this pattern.
+- When constructing `[Class/Subsystem]` outside of an already-initialized `[Class/Subsystem]`, look for whether the two-argument constructor form is used. The single-argument constructor is a footgun in any path that must be consistent with the live CFS — its use is a signal that the code was written when only one data directory was expected or that the second parameter was overlooked. Review every maintenance path (scrub, cleanup, tools) to ensure they share the same directory enumeration as the main read/write path.
+- Whenever a metric is sourced from an `[Class/Subsystem]` and displayed in a human-facing tool, check what the histogram returns for empty input. The `-1` sentinel that `percentile` emits on an empty histogram is an internal "no data" marker; any display path that does not guard against it will print a nonsensical negative value. Look for raw `.getColumnFamilyMetric(...)` calls in [Class/Subsystem] commands that are not filtered before printing.
+- DROP
+- DROP
+- DROP
+- Any place in a shell or PowerShell script where an environment variable that may contain a path is interpolated directly into a command-line argument without quoting is a potential space-in-path bug. During review of launch scripts, search for `-X` JVM flags or file-path arguments that do not wrap the variable reference in quotes. This is especially important on Windows where `Program Files` and user home [Class/Subsystem] commonly contain spaces.
+- Any place that divides a count (keys) by a size (bytes) or vice versa to produce a meaningful estimate is a unit mismatch bug. During review, ensure that both operands of arithmetic used for resource sizing share the same unit. Also verify that bloom-filter sizing relies on correct [Class/Subsystem]-count estimates so that memory is not wasted and false-positive rates stay within bounds.
+- Whenever a socket timeout config option is introduced, verify that (a) the socket is read via the blocking `InputStream` path (not a raw `SocketChannel`), and (b) the timeout is applied on both sides of a bidirectional handshake. Also check that half-closed states properly close the dormant half so the peer does not block waiting on a channel that will never send more data.
+- When a code path reads table-descriptor columns from the schema tables, check whether all schema object types (base tables, materialized views, secondary-index backing tables) are present in the result set and whether the columns being read have the same semantics for every type. A missing `isView` guard before reading a column that only exists meaningfully for regular tables is a reliable signal of this class of bug.
+- Compare each tool script against the canonical `[Class/Subsystem].in.sh`-loading template used by `[Class/Subsystem]`, `[Class/Subsystem]`, and `[Class/Subsystem]`. Any script that has a different search order, is missing the Java-executable guard, or lacks a `MAX_HEAP_SIZE` default has drifted and should be aligned with the template.
+- Any time a tool constructs a `Config` object inline (rather than loading `[Class/Subsystem].yaml`) and later passes it to the streaming subsystem, check whether the default numeric fields match the semantically expected behaviour for that tool. A throughput field defaulting to a class-level constant may differ from the intended "unlimited" sentinel value of `0`. Review the no-config branch of `ExternalClient.init` / `BulkLoader.CmdLineOptions` path to verify both intra- and inter-DC throttle fields are set explicitly.
+- When overriding a method whose checked exception is tightly constrained by a supertype, verify that the declared `throws` clause matches the parent exactly. A mismatch will produce a build error, but in code review the risk is that a developer may mask the compile error by broadening the exception type rather than correcting it — which would compile but could swallow real failures or change error-handling semantics.
+- When a `Logger` is declared with a class literal that does not match the class containing the declaration, grep for `LoggerFactory.getLogger(` and verify that the argument matches the enclosing class. This is especially easy to miss when copy-pasting a logger declaration from a subclass into a superclass.
+- Any throttle or rate-limiting configuration field initialised to `0` where `0` means "disabled" should be cross-checked against its intra-equivalent. A conscious "unlimited by default" choice should be documented with a comment; an absent comment is a signal that the `0` is accidental.
+- DROP
+- Count `{}` occurrences in every SLF4J format string and compare against the number of additional arguments. Static analysis tools (e.g., SpotBugs SLF4J plugin) catch this automatically. Pay special attention to catch blocks where the exception is the last argument — if the format string ends with `": {}"` the exception is treated as a replacement value rather than as a Throwable cause.
+- Any code that constructs an `[Class/Subsystem]` using a size-only constructor merely to extract bucket offsets and then immediately builds a second histogram from those offsets plus external data is a red flag: the two-step process introduces a bucket-count discrepancy because the `n`-entry data array corresponds to `n-1` offset buckets. Review should verify that offset arrays and data arrays are always derived from the same source.
+- DROP
+- When a new [Class/Subsystem] sub-command or option is added, check that the corresponding `do_describe` / `help_describe` method's docstring or help block is updated in lock-step. Reviewing the help output against the actual command dispatch table after any CLI feature addition would surface such omissions immediately. A simple grep for all `DESCRIBE` handler branches against every `DESCRIBE` keyword mentioned in the help block is a lightweight review check.
+- When implementing `isValueCompatibleWithInternal` for a numeric type, cross-reference the on-disk encoding size with every candidate compatible type. `IntegerType` (varint) uses a length-prefixed variable encoding that is never binary-compatible with any fixed-width type. A quick review rule: `SimpleDateType` / `TimeType` are 4- and 8-byte fixed values respectively — only `Int32Type` (4 bytes) and `LongType` / `TimestampType` (8 bytes) share their wire layouts.
+- Whenever a file mixes a third-party wildcard import with internal types that share a simple name, the compiler may silently resolve the name to the wrong type. In review, treat any unqualified type name that also exists in a wildcard-imported package as a red flag and confirm which class the compiler will pick. Prefer explicit imports for internal nested types to avoid ambiguity.
+- When a third-party library's metadata API is updated and the client code accesses an attribute by name (rather than through an accessor method), any rename in the library silently breaks all callers at runtime rather than at compile time. In review, look for direct attribute access on objects returned by external libraries — especially in Python code — and verify the attribute names against the library version being targeted. A `COPY FROM` integration test covering basic import would have caught this immediately.
+- Logback's XML configuration is silently permissive: unknown attributes or misplaced elements are ignored without any warning. Whenever a Logback appender is supposed to write to `System.err`, verify that `<target>System.err</target>` appears as a child element of `<appender>`, not as an XML attribute. A quick smoke test — running a [Class/Subsystem] tool and checking that error output goes to stderr rather than stdout — would surface this class of misconfiguration.
+- When a service init/wrapper script and the application launcher both source the same environment-setup script, any variable that script appends to (rather than assigns) will accumulate duplicate values. Review any `export` of `JVM_OPTS` or similar accumulating variables in init scripts and verify there is exactly one point of assembly.
+- When a class has parallel tracking variables for conceptually different index sequences (here `simpleIdx` vs `complexIdx`), review every helper method that computes a position to confirm it references the intended variable. Copy-paste mistakes like this are especially easy to miss in symmetrical reversed/forward expressions where both variables have the same type and similar names. A code review heuristic: any method whose name contains a noun (`Complex`, `Simple`) should reference only the variable associated with that noun.
+- DROP
+- When new features are added to a query language, every place that enumerates "supported" operations becomes a potential staleness hazard. Reviewers should search for phrases like "only function supported," "supported operations are," or similar exhaustive lists whenever a feature-adding patch lands, and verify the documentation was updated alongside the implementation.
+- Anywhere a `columns` method is documented with a comment like "assume all columns" or "we don't really know," it is returning a safe over-approximation that may be incorrect in practice. Such methods should be audited to determine whether the true column set is available at construction time (via an `UnfilteredRowIterator` or `RowIterator`) and stored in the data holder. The symptom of returning too many columns is rarely an assertion failure; it usually manifests as unnecessary column fetches, wrong metadata in serialized frames, or incorrect behaviour in code that switches on column presence.
+- Whenever a shell or batch script embeds an environment variable that represents a filesystem path into a command line without surrounding quotes, it will break for any installation path that contains whitespace. Review every `%VAR%` or `$env:VAR` expansion used in a JVM argument or classpath assignment and ensure it is quoted. PowerShell double-quoting of an already-string variable is equally suspect: the extra quotes become part of the string value.
+- In security-sensitive code, a `catch` block that returns a "deny all" sentinel value on infrastructure failure conflates two distinct failure modes: explicit denial and system unavailability. Review every catch in an authorizer or authenticator that returns a permission constant or empty set — if the exception represents a transient I/O or availability problem rather than a deliberate denial, it should be rethrown (or wrapped) so the caller can apply appropriate retry or fail-open/fail-closed policy.
+- When a test asserts timing precision with a literal constant tolerance (e.g. `- 1` or `- 2` milliseconds), check whether the assumption holds across all supported platforms. Windows system clocks are notoriously coarse compared to Linux; any timing test that passes only on Linux should use platform-conditional tolerances or `FBUtilities.isWindows` guards. Also watch for cases where a variable used inside a monotonic guard (`Math.max`) has a different unit than the one being computed — mixing millis with nanos silently breaks the guard.
+- Any multiplication of an `int` configuration field by `1024` or similar constants that ultimately populates a `long` variable should use a long literal (`1024L`) on at least one operand to prevent silent overflow — this is especially important for file-size and offset calculations. For `getBytes` calls, a missing charset argument is always suspicious; enforce `StandardCharsets.UTF_8` as the standard. For guard conditions that precede a division, verify that the divisor is included in the non-zero check with `&&`, not `||`.
+- Any call to `String.getBytes` or `new String(bytes)` without an explicit charset argument is a latent portability bug. In checksum or signature verification code this becomes a correctness hazard: the same byte sequence produces different hashes on machines with different default charsets. Reviewers should flag all bare `getBytes` uses and insist on `StandardCharsets.UTF_8` (or another explicit constant) at every call site.
+- When a histogram or reservoir class exposes a no-argument constructor that hard-codes a bucket or capacity constant, verify that the constant is sized for the worst-case input the system can produce, not just the common case. For time-based histograms, compute the maximum representable nanosecond value at the chosen bucket count and compare it against realistic upper-bound latencies (minutes to hours for operations subject to GC, network, or disk stalls). An off-by-construction default that seems large enough in normal operation will throw or silently saturate under load.
+- Error-handling code that branches on a runtime-configurable policy should be audited for whether that policy is appropriate in all lifecycle phases. Startup is a distinct phase where "safe" policies such as `ignore` are semantically dangerous; the invariant "if we haven't finished initializing, any fatal error must abort" needs to be checked before policy dispatch. Anytime a `CommitFailurePolicy` (or similar) is consulted, verify there is a pre-check guarding the pre-startup case.
+- Class/Subsystem] fields that are logically type-level constants should always be `static`. A non-static [Class/Subsystem] on an abstract class creates one instance per object, wastes memory, and — critically — can be shadowed or confused with a supertype [Class/Subsystem] of a different generic parameter. When a merge or sort routine accepts a `[Class/Subsystem]<SubType>` but the only readily visible field is `[Class/Subsystem]<SuperType>`, verify which concrete type the merge actually operates on and that the correct, type-specific [Class/Subsystem] is supplied.
+- Any new `Verb` wired into serializer maps, stage routing, and droppable sets before the corresponding feature code exists is a hazard. Reviewers should check that a new verb is only registered once its handler, serializer, and stage are all implemented, and that any premature verb occupies an `UNUSED_N` placeholder so ordinals remain stable for in-flight upgrades.
+- Whenever a version-gated branch uses `== current_version` (equality) rather than `< VERSION_X` (comparison), the logic almost certainly mishandles both the mixed-version upgrade path and any future version. Reviewers should insist on `< VERSION_X` comparisons for all protocol version dispatch, and should trace both branches to confirm each sends a verb the receiver actually recognises.
+- Windows batch scripts that use `SETLOCAL`/`ENDLOCAL` must capture `%ERRORLEVEL%` into a plain variable before calling `ENDLOCAL`, because `ENDLOCAL` discards all local variable mutations. Any `.bat` script that calls `ENDLOCAL` as the last statement before exit without a prior `set RC=%ERRORLEVEL%` will always exit with the caller's original `ERRORLEVEL`. Reviewers should also verify that every error path explicitly `set ERRORLEVEL=<non-zero>` since Windows does not always propagate failures automatically.
+- Tests that compare time-derived fields (timestamps, deletion times, TTL expirations) are fragile when the value is drawn from the live clock inside the production helper rather than being injected. Whenever a test asserts exact equality on a value that silently uses `nowInSeconds` or similar, a flap is latent. Reviewers should look for `nowInSeconds` calls inside shared builder/helper methods that have no corresponding parameter for tests to control.
+- Default return values at the end of type-dispatch methods are a common source of silent misclassification. Whenever a method switches on a table or schema property and ends with a hardcoded fallback type, ask whether every possible structural variant is explicitly covered; an `assert` or `throw` is safer than returning a plausible-looking default that works for the common case but silently corrupts the uncommon one.
+- Mixed use of `String.format` placeholders (`%s`, `%d`) and SLF4J placeholders (`{}`) in the same codebase is a persistent hazard. When reviewing log statements, verify that every `logger.*` call uses `{}` for substitution, not `%s`. A simple grep for `logger\.\(debug\|info\|warn\|error\).*%[sdf]` will surface every occurrence.
+- Passing a `byte[]` directly to `String.format` with `%s` always produces a useless object reference. Whenever a diagnostic message (assertion, exception, or log) needs to display binary data, the array must be wrapped with `Arrays.toString`, `ByteBufferUtil.bytesToHex`, or a similar utility. Code review should flag any `%s` format argument whose static type is an array type.
+- When a map's key type is a wrapper around `ByteBuffer` (e.g., `ColumnIdentifier`, `DecoratedKey`), ensure every call site inserts and looks up using the same key type. Mixed-key lookups (inserting a `ColumnIdentifier` but querying with a `ByteBuffer`) always return null without any error, making the map appear empty. Prefer `ByteBuffer` as the canonical map key when the map must be queried from multiple contexts that may not all have access to the wrapper type.
+- When a method signature is extended with a new boolean parameter, grep for every call site and confirm none still pass a literal constant where the new parameter should be forwarded. Hardcoded `false` or `true` at a call site that previously matched the only value are classic signs the parameter was not fully plumbed through after a merge.
+- When a utility class that parses prefixed key=value options is reused to parse a bare default spec, ensure the prefix is stripped or set to empty before calling `accept`. Any `OptionXxx` or `SettingsXxx` class whose default-spec path instantiates a temporary helper object should pass `""` (or an analogous empty sentinel) rather than copying the live prefix, which contaminates the parse.
+- Error messages that end with a bare value concatenation (e.g., `"... " + someVar`) and lack a verbal description of the condition are often symptoms of incomplete merge resolutions. When reviewing merge commits, diff each changed file against both parents to verify that the intended message from both branches was preserved.
+- Format strings that contain multiple `%d` placeholders with semantically similar but distinct variable names are prone to copy-paste or transposition errors. When reviewing log/warning formatting code, verify each positional argument against the corresponding slot in the format string by name and type. Variables sharing a prefix (e.g., `dataStart` vs `dataStartFromIndex` vs `dataSizeFromIndex`) are particularly easy to confuse.
+- Any time a boolean JVM flag is prefixed with `-XX:` followed by `+` or `-`, verify that the sign matches the intent expressed in nearby comments or documentation. A flag named `Disable…` or `Suppress…` that is set with `-` (i.e. "disable the disabler") is an immediate red flag: the double-negative almost always means the sign was accidentally swapped. Code-review checklists for startup configuration files should include a pass where every `-XX:+/-` flag is read aloud as "enable/disable" against the flag's English description.
+- DROP
+- Version numbers embedded in user-facing strings are easy to leave stale during a rename or schedule change. Any deprecation, removal, or migration message that contains a version literal should be checked against the current roadmap whenever a release branch is cut or a removal date shifts.
+- In PowerShell scripts, local variables (`$foo`) and environment variables (`$env:foo`) are distinct namespaces. Any reference to a variable that is never assigned in the script itself should use `$env:` to read from the process environment. A reviewer can grep the script for bare `$VARIABLE_NAME` references and cross-check whether each one is assigned locally; if not, the `$env:` prefix is almost certainly missing.
+- After any rename refactoring that changes the type returned by a widely-used accessor, search for all call sites that wrap that accessor in a conversion constructor (like `new String(...)`) — these are almost certainly leftover from the old type and will silently produce wrong results or failed lookups.
+- Configuration file examples using deprecated or removed JVM flags will fail silently or loudly for operators on modern JDKs. Periodically audit commented example JVM options against the JVM version matrix the project supports, especially during JDK major-version bumps.
+- When two code paths perform the same logical operation (tracking write progress) but use different implementations, the divergence is a maintenance hazard and a likely source of subtle behavioral differences. In CLI tools, always look for duplicate progress-tracking patterns and ask whether the reported count actually matches the loop variable. Additionally, `\r`-terminated progress lines must be followed by `\n` in the final summary to avoid the summary message overwriting itself on the terminal.
+- When a command or class is renamed by introducing a new class that extends or replaces the old one, check that every registration list, factory map, or plugin manifest that referenced the old name is updated to also include (or replace with) the new name. A missing registration leaves the new name inaccessible at runtime while the old name continues to work, making the rename invisible to users.
+- Swap Present Reported as Absent — Diagnostic and health-check predicates named `isXEnabled` or `isXPresent` that read a size or count and return a boolean are highly susceptible to inversion bugs. Review them by mentally substituting extreme values: if `swapSize` is 1 GB, `isSwapEnabled` should return `true`. If the code returns `false` for a non-zero size, the logic is inverted. Pay special attention to methods that were converted from a "no swap is good" framing (`swapSize == 0 → good → return false` for "not degraded") to a straightforward enabled/disabled predicate without updating both branches.
+- Any assertion or calculation that mixes a "bytes scanned" progress counter with a "bytes on disk" size total is suspect when compression is involved. Always ask: is this size in compressed or uncompressed units? Introduce explicit method names (`getTotalUncompressedBytes` vs `getTotalBytes`) rather than relying on callers to remember which unit `getTotalBytes` uses. Also watch for test data that is all-zeros or all-same-value: compressors collapse such data aggressively, masking size mismatches.
+- Search for string literals like `"127.0.0.1"` or `"localhost"` used as network addresses in code that also handles `InetAddress` objects. These hardcoded strings are IPv4-specific and break transparently when the node runs in IPv6-only mode. Prefer the `InetAddress` API (`getLoopbackAddress`, `getByName("localhost")`) so the JVM handles address family selection.
+- Hardcoded IPv4 address literals (`"127.0.0.1"`, `"0.0.0.0"`) in networking code are a reliable indicator of IPv6 incompatibility. Reviewers should flag any literal IP address string and ask whether the system property `java.net.preferIPv6Addresses` or dual-stack configurations could change the expected address family. The standard Java idiom for the loopback is `InetAddress.getLoopbackAddress`, not a string constant.
+- DROP
+- Any time a network address string is embedded into a [Class/Subsystem] metric name, MBean ObjectName, or similar structured identifier, it must be sanitized. Colons, commas, equals signs, and asterisks are all reserved in [Class/Subsystem] ObjectName syntax. Search for `getHostAddress` or `toString` on `InetAddress` objects that feed directly into name factories, metric registries, or string-keyed maps used as identifiers.
+- After resolving a merge conflict that involves a factory method or strategy selection, verify that the chosen expression matches the established factory pattern used elsewhere in the file. A direct `new ConcreteClass` instantiation where every other callsite uses a factory is a strong indicator that a merge produced the wrong result.
+- Utility classes that are designed for offline or client-mode use but share code with server-side paths are prone to accidental server subsystem initialization. Reviewers should check whether any code path reachable from the utility calls `[Class/Subsystem].open`, `Schema.instance`, or other singletons that assume a running node. The absence of `Config.setClientMode(true)` at the entry point of an offline tool is the primary red flag.
+- Whenever a cardinality or distinct-count estimator (HLL, MinHash, etc.) is offered a mutable or value-based object, verify that the estimator is using content equality rather than reference equality for hashing. Any call to `hll.offer(obj)` where `obj` is a `ByteBuffer`, array, or other type that overrides `equals` but not `hashCode` in a content-aware way should be treated as suspect. The correct pattern is always to compute a stable hash of the logical key and call `offerHashed`.
+- Unit-conversion constants are highly error-prone. Whenever a constant name contains "bit" or "byte" alongside a multiplier, verify the conversion direction: bits-to-bytes divides by 8, bytes-to-bits multiplies by 8. A useful check is to dimensional-analyze the formula: `[Mb/s] * [bytes/Mb]` should produce `[bytes/s]`, so the conversion factor must be bytes-per-megabit (`1024*1024/8`), not bits-per-megabyte. Renaming the constant to `BYTES_PER_MEGABIT` makes the intended unit explicit and the error immediately visible.
+- CLI tools that catch error conditions and silently return without setting a non-zero exit code will mislead scripts and automation that check `$?`. During review, any `catch` block in a command-line entry point that prints an error and then returns (rather than exiting with a failure code) should be flagged. The convention for CLI tools is that any user-visible error message must be accompanied by a non-zero exit.
+- When computing a page size for a special-purpose internal table whose schema differs from the user table, double-check that the divisor reflects the actual cell-per-row ratio of that internal table, not the user table. Reusing `getMeanColumns` from one CFS to size queries against a different CFS (the index CFS) conflates two different data models. Reviewers should ask: "does the denominator in this page-size formula apply to the table actually being queried?"
+- When a class is renamed or superseded, a global search for the old name (as both a string literal and an import/reference) is necessary — string-typed class names are not caught by the compiler and can survive refactors indefinitely. Code reviews on deprecation or removal commits should explicitly audit all callers, including documentation and example files, for lingering references to the old identifier.
+- When a numeric value is threaded through several layers of abstraction, watch for unit mismatches at the call site. If a method is named `getWriteDirectory(long sizeInBytes)` but the argument expression is a quotient of two key-count values, the types are semantically wrong even if both are `long`. Code review should flag any division of a `keys` estimate being fed directly to a `bytes`-expecting parameter.
+- String-typed class names that are never resolved through `Class.forName` at compile time are invisible to the compiler when the target class is renamed or removed. Prefer `ClassName.class.getName` over string literals for class references stored in variables or configuration. When reviewing a class deletion, search the entire codebase for the fully qualified class name as a string, not just as an import or type reference.
+- Any place in a [Class/Subsystem] client or tool where a [Class/Subsystem] identifier is stored as a string literal should use the lowercase form unless the identifier is intentionally quoted. A reviewer should verify that hardcoded schema names round-trip through `toLowerCase` unchanged; if they don't, the tool will silently disagree with the server about what object it is operating on.
+- DROP
+- When a memory-measuring cache evicts entries much more aggressively than expected, suspect that the measurement is overcounting. Specifically look for deeply shared singleton objects (schema metadata, type instances, function registries) being counted multiple times by a `measureDeep` traversal that has no cycle or exclusion awareness. The presence of a hand-rolled `Measurable*` interface is a warning sign that the underlying measurement library lacked proper exclusion support.
+- Wherever `System.currentTimeMillis` is used as a [Class/Subsystem] column timestamp (rather than as a wall-clock value for display or TTL computation), the result is wrong by a factor of 1000. Reviewers should distinguish between two uses of time in [Class/Subsystem] code: wall-clock time in milliseconds (for external timestamps, `started_at` fields, etc.) and internal column timestamps in microseconds. Any call that passes `System.currentTimeMillis` into a column mutation, `ExpiringColumn`, or `[Class/Subsystem]` should be verified against `FBUtilities.timestampMicros` or `ClientState.getTimestamp`.
+- When a JVM or library upgrade changes how shared/singleton objects are traversed during deep object graph walks, any `MemoryMeter` (or similar reflective size estimator) without singleton guards becomes a crash risk. Review all `MemoryMeter` construction sites to ensure `ignoreKnownSingletons` is called, particularly after upgrading jamm or moving to a new JDK minor version.
+- Whenever a numeric field uses a magic sentinel value (−1, 0, Integer.MAX_VALUE) to represent "absent," check whether that value lies within the domain of valid inputs. For timestamps in particular, the entire signed 64-bit range is potentially valid, so only `Long.MIN_VALUE` (or a boxed `null`) is safe as an absent marker. Look for sentinel comparisons in downstream consumers (`if (timestamp == -1)`) to confirm which value the rest of the system actually checks against.
+- When a value is computed at object construction but consumed only at a later execution point, ask whether the value could change between those two moments. For disk-size metrics that feed into counters, any gap between measurement and use is a window for drift. The rule of thumb is: measure as close as possible to the action that depends on the measurement, especially when the action mutates the system state that the measurement reflects.
+- Passing a multi-value configuration as a single delimited string is fragile when individual values can themselves contain the delimiter (here, spaces in directory paths defeat the `" -"` → `";-"` substitution strategy). Reviewers should ask: "can any individual option value contain the chosen delimiter?" If yes, the options must be passed one at a time or properly quoted. Windows batch and PowerShell service-installation scripts are especially prone to this because the target tool (prunsrv) has its own parsing rules that differ from the shell.
+- DROP
+- When constructing a schema object that has a binary "mode" flag (dense vs. sparse, compact vs. non-compact, etc.), look for hardcoded type constructor calls that ignore the surrounding context. The heuristic is: if the type or mode is chosen before the relevant inputs (column list, options) have been inspected, the choice is likely wrong for at least one code path. Always derive structural flags from the actual schema inputs rather than assuming a default.
+- DROP
+- DROP
+- Any schema lookup that uses a raw [Class/Subsystem] descriptor or CF name without first checking whether the table is a secondary index is suspect, because secondary-index CF names follow the convention `parent.indexName`. Whenever `Schema.instance.getCFMetaData` is called inside [Class/Subsystem]-level code, verify that it handles the index-name format explicitly; a null return or unchecked cast downstream is the telltale symptom.
+- See bug-1453. The same pattern — a schema lookup using an unmodified [Class/Subsystem] descriptor without special-casing index CF names — exists in all branches carrying compressed secondary indexes. Any time a fix is applied to one branch of a multi-branch codebase, check whether the same vulnerable pattern exists in sibling branches.
+- Whenever a CLI tool or API exposes a numeric throughput or bandwidth value, verify that the unit string in the user-facing output matches the unit used by the underlying storage or computation. The distinction between `MB` (megabytes) and `Mb` (megabits) is a factor of eight and is easy to overlook; always cross-reference the unit string against the actual throttle implementation (`StreamManager`, `RateLimiter`, etc.) rather than trusting the display string alone.
+- DROP
+- Any `[Class/Subsystem]` that implements ordering via integer subtraction of two numeric values is susceptible to overflow if the values can differ by more than the range of the subtraction type. The safe idiom is always to use `Integer.compare` or `Long.compare` (or their static equivalents) instead of subtraction. Code review should flag any `(int)(a - b)` or `(int)(a.id - b.id)` pattern in a [Class/Subsystem] body.
+- DROP
+- Flag any assignment of `Integer.valueOf(String)` to a primitive `int` variable or parameter, and `Boolean.valueOf(String)` to a primitive `boolean`. Static analysis tools (FindBugs/SpotBugs rule `BX_UNBOXING_IMMEDIATELY_REBOXED` or similar) catch this pattern automatically.
+- In format strings that incorporate domain objects, always use a specific field (`.name`, `.id`, etc.) rather than relying on the implicit `toString`. Review all `String.format` / `%s` usages where the argument is a multi-field object — the output may include far more than intended.
+- When adding new `Verb` enum constants, all switch statements that dispatch on `Verb` must be updated. A missing case silently falls to `default`; if `default` throws, the failure only surfaces at runtime when those messages are in flight.
+- Calling `super.afterExecute` in a thread-pool subclass inherits all of the parent's exception-logging behavior. When the subclass needs custom severity handling for specific exception types, it should not delegate to the parent's error logger. Look for `super.afterExecute` calls in executor subclasses that handle known benign exceptions downstream — the parent log call will fire before those checks are reached.
+- Wrong [Class/Subsystem] Timestamp Accessors — After a merge, grep for method calls on domain objects that do not exist in the current API. Symmetric min/max patterns using different method names on the same object are a red flag for a copy-paste or merge error.
+- When a `Runnable` subclass is constructed with a `Verb` that identifies the operation type for tracing, verify the verb matches the actual command being run. Also check that executor `execute` calls that should participate in tracing pass the current `TraceState` as the second argument.
+- When implementing drop/update/create schema operations, ensure the notification method called precisely matches the operation type. Copy-paste errors between `notifyUpdate*` and `notifyDrop*` are easy to miss since both compile and run without errors, but produce wrong schema events on the wire.
+- When implementing drop/update/create schema operations, ensure the notification method called precisely matches the operation type. Copy-paste errors between `notifyUpdate*` and `notifyDrop*` are easy to miss since both compile and run without errors, but produce wrong schema events on the wire.
+- When renaming CLI parameters or changing their semantics, check all annotation strings (`@Command`, `@Arguments`, `@Option`) in addition to runtime logic — they are not validated by the compiler and can silently lag behind the implementation.
+- When a library's major version changes, check all integration points that rely on callable or duck-typed contracts — these are not caught by static analysis. The pattern `lambda ...: dict(...)` as an auth callback is a red flag when the dependency has been bumped.
+- CLI tools that operate remotely via [Class/Subsystem] should never read `DatabaseDescriptor` for state that describes the remote node — it reflects only the local configuration. Always derive node properties from the [Class/Subsystem]/probe data returned by the target node.
+- When a library version is bumped, grep all packaging/launch scripts for the old version string to ensure they are updated in the same commit. A mismatch between the JAR filename on disk and the path in the launch script will always silently drop the agent or hard-fail.
+- Format-string widths for columns that display numeric or variable-length data should be derived from the maximum expected value, not from the header label length. During review, verify that each `%-Ns` width is at least as wide as the longest value that could appear in that column.
+- When a project supports a minimum JDK version, review any new imports from packages introduced in later JDKs (e.g., `java.nio.charset.StandardCharsets` requires Java 7). A shared utility constant for common charsets avoids scattering language-version-sensitive literals throughout the codebase.
+- DROP
+- When a subclass changes the object's layout (adds fields) relative to its parent, it must override all memory-measurement methods; inheriting them silently gives wrong answers. Review any class that adds fields but does not override `unsharedHeapSize` / similar.
+- When a subclass adds instance fields, verify it overrides every method that measures object size. Also verify that interface method names exactly match their implementations — a mismatched name silently prevents overriding.
+- When cherry-picking or merging across branches that have undergone class renames, verify that every import and type reference in the patch corresponds to the target branch's class hierarchy. A quick `javac` error — or an `import` referencing a class not present in the branch — is an immediate signal of a mis-targeted patch.
+- During review, check that every class passes its own class literal to `LoggerFactory.getLogger(...)`. Copy-paste errors when subclassing are common here; a simple grep for `getLogger(` will expose any mismatches between the enclosing class name and the argument.
+- In PowerShell (unlike Bash arithmetic), division of integers yields doubles. Any script that divides a memory or size quantity and then uses the result as a JVM argument or in integer comparisons must explicitly truncate or floor the result. Review all arithmetic in `.ps1` scripts for missing `[Math]::Truncate` or `[int]` casts.
+- When a consumer filters or skips work based on an estimated count, verify what happens when the estimate is zero. If the estimator is heuristic (e.g., [Class/Subsystem] sampling), a lower bound of at least 1 (or a configurable minimum) prevents silent data loss.
+- Whenever `Map.get` is called, verify that the argument type matches the map's declared key type. Java's generics erasure means `Map<K,V>.get(Object)` accepts anything without a compile-time warning, so wrong-type lookups always return `null` silently. Cross-check `get` call sites against the map's declaration and its `put` call sites.
+- When a class serialized into a [Class/Subsystem] `CompositeData` gains a new field, verify that the field is added consistently to all three parallel arrays (`ITEM_NAMES`, `ITEM_DESCS`, `ITEM_TYPES`) and that both the `toCompositeData` and `fromCompositeData` paths reference the same index. Array-index mismatches between write and read paths are easy to introduce and hard to catch without running the [Class/Subsystem] tool.
+- Any time a buffer-writing method (`putLong`, `putInt`, `putShort`) is chosen, verify that the method's width matches the field's declared size in the on-disk format. A mismatch silently corrupts adjacent bytes without throwing an exception if the buffer is large enough.
+- Wrong Variable Name in StorageService — After any variable rename, search the entire file (and all callers) for the old name to catch stale references. Compiler errors surface the immediate problem, but partial renames in large methods can leave silent logic gaps if the old name happens to refer to another in-scope variable.
+- When a serialization format becomes version-dependent, audit every construction site of the options/context object that carries the version. Factory methods for "internal" or "test" use are especially likely to be left with a stale default (often 0) that silently selects an old format.
+- When building error messages that reference a named object (column, table, [Class/Subsystem]), check that the format argument is the `.name` field (or equivalent string accessor), not the object itself—unless the object's `toString` is explicitly designed for user-facing output.
+- When a class hierarchy causes overload resolution ambiguity (a subtype implementing multiple interfaces), an explicit method selection via an extra discriminating argument or cast is needed. Review every call-site where a handler object satisfies multiple overload signatures and confirm the intended overload is actually selected.
+- Any subsystem that is itself responsible for delivering hints or replaying batches must not use the general write path that can produce new hints on failure. Whenever `sendRR` is called with a write mutation, ask: "if this times out, should a hint be created?" — for hint delivery and batchlog replay the answer is always no.
+- After refactoring a method to accept a flag that distinguishes two code paths, verify that every call site that invokes the new signature derives the flag from context rather than hardcoding a constant. A hardcoded `false` (or `true`) is a strong signal that the flag may be wrong for some callers.
+- Whenever a timestamp is passed to a [Class/Subsystem] internal mutation or [Class/Subsystem], verify the unit: internal APIs uniformly expect microseconds, but `System.currentTimeMillis` silently compiles and produces milliseconds. Code-review checklist: reject any use of `System.currentTimeMillis` in mutation/delete paths; require `FBUtilities.timestampMicros` or `System.nanoTime/1000`.
+- When a boolean flag method on a command object always returns a constant, verify that every caller scenario is actually covered by that constant — especially when the same command class is reused for multiple query shapes (e.g., normal SELECT vs. SELECT DISTINCT).
+- After a rename/refactor that replaces an accessor, search for all remaining callers of the old method name — a stale call site is easily missed when the old method still compiles (e.g., via a deprecated overload or an unrelated method with the same name).
+- When a build produces multiple jars from the same class directory without explicit include/exclude coordination, duplicate classes appear across artifacts. Review build scripts for any `<include>` list in one jar that is not mirrored by an `<exclude>` in sibling jars built from the same source directory.
+- When an enum is used as a CLI command dispatcher, verify that every user-visible name maps correctly to its enum constant in the lookup table. Missing underscore variants mean some documented command spellings silently fail to dispatch.
+- When constructing a third-party server/framework object and immediately chaining configuration, check whether the library's default allocation or buffer strategy is compatible with the surrounding code. Missing a single flag on a builder chain is easy to overlook, especially when the option name (`useHeapBasedAllocation`) does not appear prominently in examples.
+- Whenever a timestamp is passed across an API boundary, verify the units at both ends. A mismatch comment (e.g., "in seconds" when the actual unit is microseconds) is a strong signal that the unit assumption was never validated. Centralise the conversion at the point of storage so that callers cannot apply it inconsistently.
+- When a variable intended to carry a wall-clock timestamp is reused or shadowed by a duration or monotonic counter, the wrong value silently propagates to storage. During review, verify that every timestamp argument passed to a persistence call is sourced directly from `System.currentTimeMillis` (or an equivalent) rather than from a variable that may have been repurposed.
+- Unit conversions between bits and bytes are a common source of 8× errors. When converting "megabits per second" to "bytes per second" the correct operation is divide by 8, not multiply. Any throughput or bandwidth calculation should have a comment and a unit test that sanity-checks the magnitude of the result.
+- When upgrading a third-party driver dependency, check whether its default configuration enables any subsystems (metrics, logging, [Class/Subsystem]) that pull in transitive library versions — these can silently conflict with the host application's own dependencies. Also verify that all API call sites are updated when methods are renamed or replaced across driver versions.
+- Whenever computing a "mean of means", ask whether the sub-groups have equal weight. If they don't, the aggregate must be weighted by the group size, not the group count. This pattern appears in any metric aggregation over heterogeneous partitions or [Class/Subsystem].
+- Every use of `Unsafe` multi-byte operations on off-heap memory must be guarded by an explicit unaligned-access capability check. Detecting 64-bit by string-matching `os.arch` is fragile; prefer `sun.arch.data.model` with a known-unaligned architecture allowlist as a fallback.
+- Wrong Field Name in SelectStatement Memory Measurement — When a field is renamed during refactoring, search for all uses of the old name in the same class (including less-travelled utility methods like memory-measurement helpers) before committing.
+- After renaming or removing a field, confirm all logging and diagnostic call sites that reference the old name have been updated — they are easy to miss because IDE inspections often don't highlight logger arguments as errors until compile time.
+- Whenever an array is allocated with a concrete subtype but filled by a polymorphic method that may produce supertype instances, the array type should match the declared return type of the filling method. An `ArrayStoreException` at runtime is the signal; static analysis (or using `List<ColumnSpecification>`) would catch it earlier.
+- Hard-coded sentinel integers (-1, 0, Integer.MAX_VALUE) in exception constructors that encode protocol-visible counts should raise a flag. Verify that every `received` / `blockFor` / `acknowledged` argument to timeout exceptions reflects a genuinely computed value, not a placeholder that gets serialised to the client.
+- Whenever a path is constructed by concatenating logical names ([Class/Subsystem]/CF) instead of using the configured data directory list, the resulting path is environment-dependent. Look for any `new File(ksname + separator + cfname)` patterns and verify they are resolved against real data [Class/Subsystem].
+- Static constants used as "defaults" for polymorphic type parameters are a warning sign when the class is also used to represent legacy storage formats (like super columns) that may have different type requirements. The constant should be an instance field with a sensible default, accepted via a constructor parameter.
+- After a merge, scan for fully-qualified class names that reference old type names in the diff. A compile error would also catch this immediately — enforcing that the test suite compiles cleanly as part of CI prevents stale symbol regressions.
+- When constructing [Class/Subsystem] or metrics object names with a hardcoded type string, check whether multiple MBean registration types exist in the codebase for the same metric category. The pattern of building the `ObjectName` inline in a switch statement hides the assumption that there is only one type.
+- DROP
+- DROP
+- When reviewing logback/log4j patterns, `%caller{N}` always emits multi-line output because it includes a formatted stack frame block; prefer `%F:%L` or `%C:%M` for single-line source location.
+- When a cache uses deep-heap measurement for eviction, check whether any large sub-objects are shared across entries; double-counting shared objects inflates the apparent size and causes premature or inaccurate eviction. Introduce a custom measurement interface so shared sub-graphs are excluded.
+- In switch/case dispatch that constructs type-specific objects, verify that every case uses a class consistent with the case label — a `SET` case creating a `Lists.*` object is an immediate red flag. Code-review tools or simple name-matching lints would catch this.
+- Wrong MarshalException Import and Wrong Range Tombstone [Class/Subsystem] — When a refactor moves a class to a new package, search for the old fully-qualified name across the whole tree before committing. For type-selection logic, prefer reusing an already-resolved type field over constructing a new type inline from raw metadata fragments — the two can silently diverge.
+- When comparing a computed length against a sentinel "empty" value, verify what the minimum non-empty return value actually is rather than assuming it is `0`. A quick look at the return expression of the helper (`HEADER_SIZE_LENGTH + n * HEADER_ELT_LENGTH`) makes the floor value obvious.
+- When a runnable is submitted to an executor and references `Thread.currentThread` inside its body, verify whether the intent is to capture the submitting thread or the executing thread. Also check that column/field name constants match the intended semantic — a copy-paste of a nearby `addColumn` call is a common source of this class of error.
+- Wrong Class Reference in StorageService (replace path) — After a class rename refactor, search the entire codebase for the old name before merging. A global find-and-replace or IDE refactor tool would have caught all three occurrences atomically.
+- Wrong Class Reference in StorageService (join path) — After a class rename refactor, search the entire codebase for the old name before merging. A global find-and-replace or IDE refactor tool would have caught all three occurrences atomically.
+- Wrong Class Reference in StorageService (replace-address setup) — After a class rename refactor, search the entire codebase for the old name before merging. A global find-and-replace or IDE refactor tool would have caught all three occurrences atomically.
+- diamond operator incompatibility in index searchers — When a project has a declared minimum Java version, any use of language features from a newer version (diamond operator inference, try-with-resources on older targets) will break the build. CI should enforce `-source`/`-target` compiler flags matching the declared minimum.
+- When a method signature is updated to require an additional parameter, grep for all call sites — especially ones inside conditional branches or separate loops — to ensure all callers are updated in lockstep.
+- When constructing a `[Class/Subsystem]` by adding columns individually, verify whether insertion order is guaranteed to match [Class/Subsystem] order. If columns are added in a potentially non-sorted sequence (e.g., driven by a map or user-supplied parameters), `TreeMapBackedSortedColumns` is the safe default; `ArrayBackedSortedColumns` should only be used when insertion order is provably sorted.
+- When adding a new verb to `MessagingService`, verify that both the serializer registration in `MessagingService` and the verb handler registration in `StorageService` are updated together. Missing either half silently breaks the feature only in multi-replica clusters where the coordinator must forward to remote nodes.
+- When a "skip expensive operation" path assigns a placeholder value before calling an initializer, verify that the initializer cannot overwrite the placeholder. Prefer assigning sentinels after initialization. Also watch for scattered `instanceof` type checks that should instead be polymorphic interface methods.
+- After upgrading a metrics/monitoring library, audit every call site that reads timing values and confirm whether the new version's unit contract matches the old one. A unit mismatch is silent at compile time and only reveals itself as wildly incorrect output at runtime.
+- When wrapping a third-party server/transport builder, cross-check every configuration knob exposed by `DatabaseDescriptor` against the builder's available setter methods. An unset builder option silently falls back to the library default, bypassing operator configuration.
+- Whenever a component resolves a configuration directory by walking up the filesystem tree from the JVM's code-source location, it will break in any non-standard packaging layout. Configuration paths should be derived from the classloader resource hierarchy or from an explicit system property, not from the location of the JAR file.
+- Hard-casting an interface or abstract field to a specific concrete subtype is fragile; any alternative implementation of the same abstract type will produce a `ClassCastException`. Prefer interface abstractions when the field can hold multiple concrete types. Additionally, when a constructor delegates upward via `super(...)` but then adds its own initialisation, check that all sibling constructors also call `this(...)` so no initialisation step is silently skipped.
+- When two parameters share similar names (e.g., `consistency` and `serialConsistency`), they are easy to swap at call sites, especially when both are the same type. Review every call site of methods with multiple same-typed parameters of similar semantic — use named-parameter patterns or wrapper types when the language supports it to make transposition impossible.
+- When reviewing a newly extracted or refactored class, check that its `LoggerFactory.getLogger(...)` call references the containing class, not a superclass or the class from which it was copied. A `getLogger(SomeOtherClass.class)` in a file that does not define `SomeOtherClass` is almost always a copy-paste error.
+- When code is adapted for a new major format version, static or global accessor calls (`DatabaseDescriptor.getX`) should be reviewed to see whether the equivalent per-instance accessor (`[Class/Subsystem].getX`) now exists and should be preferred. Similarly, methods that gain new required parameters across versions will compile with the old zero-arg overload if it still exists, silently using a default that may be wrong for the specific table.
+- Copy-paste errors in logger declarations are common. During review, verify that every `LoggerFactory.getLogger(X.class)` uses the enclosing class `X`, not a neighboring class. Static analysis tools can detect this pattern automatically.
+- When calling `String.format` with multiple `%s` placeholders, verify that the argument list order matches the placeholder order in the format string. This class of bug is especially common when the parameter names resemble each other (e.g., `ksName`/`cfName`) and the format string lists them in non-alphabetical order.
+- Whenever a timeout value is passed alongside an explicit `TimeUnit`, verify that the unit matches the documented or actual unit of the value source. Mismatched units in timeout calls are especially dangerous because the code compiles and runs without error — the symptom is only observable as unexpected timeout behavior under load.
+- In `memorySize` implementations, trace every field: each reference contributes `getReferenceSize` to the owning object's field block, and the pointed-to object is measured separately. Using `getSizeWithRef` inside `getFieldSize` double-counts the reference. A helper method named `getSizeWithRef` is a code smell in this pattern — prefer explicit separation of the reference and the referent.
+- When a refactor removes the code that populates a cache or fallback store, check every consumer of that store. Leftover fallback paths that read from a never-populated structure silently return wrong data. Dead fallbacks should be removed alongside the population code.
+- Throttle logic that fires on row or record counts rather than on bytes actually transferred will always be bursty because row sizes vary widely. I/O throttling should be applied at the byte-transfer layer (the buffer read/write call), not at a higher-level record-counting loop. Review any `if ((counter++ % N) == 0) throttle(...)` pattern in I/O paths.
+- After merging a refactored builder class, verify that all call sites pass all required parameters rather than relying on overloads that may silently drop configuration values like sampling intervals.
+- When reviewing merge commits that touch classes with field-to-method renames, check all callsites that reference fields directly and verify whether the field was replaced by an accessor method in either branch being merged.
+- After any merge that renames a field (e.g., `deletionInfo` to `deletion`), search all usages of the old name in the same file and adjacent files. IDE "find usages" or a simple grep for the old identifier will immediately surface stale references.
+- Spell-check user-visible exception messages and log strings during review. Static analysis tools (e.g., SpotBugs, custom lint rules) or a simple dictionary scan over string literals can catch misspellings before they ship.
+- Review enum constant display strings and log message string literals for spelling. The `UNKNOWN` sentinel value in enums is easy to overlook because it is often added as a defensive fallback and not exercised by normal code paths, so its message string may never be visually inspected after initial authorship.
+- When calling `String.format`, verify that the number and type of arguments match the placeholders in the format string. A mismatch where extra arguments are passed goes undetected at compile time and at runtime — only the error message content reveals the problem. Static analysis tools (e.g., SpotBugs `VA_FORMAT_STRING_EXTRA_ARGUMENTS_PASSED`) catch this class of bug.
+- When a default/fallback value is used for a field that gates data-visibility decisions, verify the sentinel is the "inclusive" extreme (not the "exclusive" one). For timestamps where `Long.MAX_VALUE` means "unbounded / unknown max", initialising to `Long.MIN_VALUE` inverts the guard and causes false negatives.
+- When a sentinel value governs whether data is included or excluded, ask: does this sentinel lean toward inclusion (safe/conservative) or exclusion (dangerous/lossy)? For "max timestamp not known", `Long.MAX_VALUE` is the only safe choice; `Long.MIN_VALUE` silently discards data.
+- Version threshold comparisons in shell scripts using lexicographic string comparison are inherently fragile. Verify that the chosen comparison string correctly separates all valid version strings on both sides of the threshold, paying attention to how dotted version strings sort lexicographically.
+- When computing a "maximum" across multiple sources, ensure all sources are included — here the row-level deletion timestamp was an overlooked source. For "unknown" sentinels used in comparisons, reason about whether the unknown value should be treated as smallest (MIN_VALUE) or largest (MAX_VALUE), choosing the conservative option for correctness.
+- When reporting progress against a "size" denominator, verify that the numerator (bytes counted) and denominator (total expected bytes) measure the same quantity — both compressed or both uncompressed. A mismatch between the two is a silent correctness bug that only shows up as wrong percentages at runtime.
+- DROP
+- When a configuration value that affects open file handles or long-lived objects is stored as a `final` field, any runtime update path will silently have no effect. Look for `public final` primitive fields on objects that are expected to be tuneable at runtime without restart. The fix pattern is `volatile` + getter/setter with propagation to all live instances.
+- A shared property bag initialized with default values will corrupt update operations that legitimately omit those properties. Defaults should be applied only at create-time (and only when the user did not specify a value), never at parse-time in a class used for both CREATE and ALTER paths.
+- After a merge, scan for duplicate field or method declarations, especially when one copy adds a modifier (`volatile`, `final`, `static`) that the other lacks. A compile-time error will catch the duplicate field case in Java, but the duplicate class in a different package is harder to notice without a full build.
+- When a constant is defined with a sign chosen to make one direction of conversion work, double-check that every call site uses the complementary sign. A negative epoch-offset constant requires addition when converting to Unix time; using subtraction is the classic mistake. Also verify that bit-field constructions against a well-known standard (here RFC 4122) cover the exact bit positions specified.
+- When a tool or client is extended to support multiple protocol versions, review every [Class/Subsystem] (or RPC) call site to ensure it is dispatched based on the negotiated version. A version flag at the session level that is not checked at each call site is a common source of wrong-API errors.
+- String constants that must match parser keywords should be validated by a test that round-trips a DDL statement through parsing and execution. When a constant and its corresponding grammar production diverge, the failure mode is silent (property ignored) or a confusing parse error.
+- When adding or reviewing executor service construction that includes a [Class/Subsystem] registration path argument, verify the path matches the established convention for the pool's type (e.g., `"internal"` for internal background pools). Using the pool's descriptive name as the [Class/Subsystem] domain is a common mistake.
+- When a [Class/Subsystem] is used bidirectionally (both "A < B" and "A > B" outcomes needed), a single instance with a hard-coded return value cannot cover both cases. Review any [Class/Subsystem] helper whose `compare` returns a literal constant to confirm that both the positive and negative directions are handled by distinct objects or a runtime parameter, not by wrapping with `ReversedType`.
+- During code review, verify that every `LoggerFactory.getLogger(...)` call passes the enclosing class, not an unrelated class. A quick static check or IDE inspection can flag any logger whose category does not match the class it is declared in.
+- When a method call takes a name-like argument, verify that the argument represents the correct scope ([Class/Subsystem] vs. column family name). Schema permission checks are typically keyed on the [Class/Subsystem], not the object being created within it.
+- When constructing file paths for column-family-scoped data, always go through the column family's `[Class/Subsystem]` object rather than using bare disk paths. A bare `DataDirectory.location` lacks the `<[Class/Subsystem]>/<table>` path components that [Class/Subsystem] expects.
+- When an iterator wraps a sequence of sub-iterators and computes a running position from the current sub-iterator, verify that the current sub-iterator reference is invalidated (set to null) before the outer iterator signals end-of-data, so that any subsequent position query does not read from a closed or stale source.
+- DROP
+- When configuration defaults are duplicated between a YAML template and a Java `Config` class, keep them in sync. Any time a `Config` field initializer uses a round number or sentinel like `Integer.MAX_VALUE`, verify it matches the default stated in the yaml and documentation.
+- Any time code calls `[Class/Subsystem].getString(columnDef.name)` on a table that may use `CompositeType`, the result will be garbled for [Class/Subsystem] tables. The correct pattern is to obtain the column's specific component [Class/Subsystem] via a helper like `getColumnDefinitionComparator(def)`.
+- Stress or test utilities that hardcode a table name created via one API ([Class/Subsystem]/[Class/Subsystem]) will silently fail when the same utility is invoked via a different API ([Class/Subsystem]) that requires its own DDL-created schema. Version-conditional logic or separate setup paths are needed whenever two protocol versions use incompatible schema representations.
+- DROP
+- When schema or metadata tables are seeded or migrated, verify that the timestamp granularity matches the rest of the system. A mismatch between nanosecond and microsecond timestamps is invisible at write time but corrupts ordering and expiry logic later. Startup migration hooks should include a validity check for timestamp ranges.
+- When checking whether a compaction output file has exceeded a target size threshold, verify that the size measurement comes from the actual on-disk bytes written, not the uncompressed logical file pointer — especially when compression is enabled. A size threshold check like `position > [Class/Subsystem] * 1024L * 1024L` where `position` is a logical in-memory pointer passed from `writer.getFilePointer` rather than the compressed bytes actually flushed to disk.
+- DROP
+- When computing a range's right boundary position for binary search, verify that the right bound expression references the range's right field, not a copy-paste of the left field expression. Two consecutive lines computing `leftPosition` and `rightPosition` where both lines call `range.left.maxKeyBound` — the second line should reference `range.right`.
+- When schema serialization passes `[Class/Subsystem]` directly to column-definition helpers, it breaks for composite and super-column types whose column definitions are keyed by only the last component of the composite [Class/Subsystem]. Multiple calls in `[Class/Subsystem]` pass `[Class/Subsystem]` (the full, possibly composite, column [Class/Subsystem]) to `ColumnDefinition.toSchema` / `deleteFromSchema` instead of the purpose-built `getColumnDefinitionComparator` which extracts the last-component type for composite and sub-column type for super-column families.
+- DROP
+- When a self-identity guard uses `getBroadcastAddress` but the node was initialized with `getLocalAddress`, the comparison will be wrong if broadcast and local addresses differ (e.g., NAT/multi-homed). Identity comparison `ep == FBUtilities.getBroadcastAddress` used as self-check guard in methods that historically used `getLocalAddress` for self-identification, or vice-versa; the two methods may return different objects/values.
+- DROP
+- DROP
+- DROP
+- When a configuration parameter is documented and named as a kilobyte value (suffix `_kb`) but the parsing code omits the `* 1024` conversion, the stored value will be 1024x smaller than intended. `return Integer.parseInt(chLength)` in a method named `parseChunkLength` for a parameter named `chunk_length_kb` — missing the unit multiplication that the field name implies.
+- When splitting a file path string using `String.split`, pass the separator through `Pattern.quote` to avoid treating it as a regex metacharacter. `str.split(new Character(File.separatorChar).toString)` — the character is converted to a string but not regex-escaped, so `\` on Windows is treated as an escape sequence in the regex engine and yields an empty result.
+- DROP
+- When two histogram factory methods exist with different bucket counts for different metrics, verify that each call site uses the correct factory by cross-referencing the field name with the factory name. `this.estimatedRowSize = defaultColumnHistogram` and `this.estimatedColumnCount = defaultRowHistogram` — the field names and factory names are swapped, so row-size is tracked with column-count buckets (too small at 114) and column-count is tracked with row-size buckets (over-sized at 150).
+- When an ANTLR grammar rule uses `+` (one-or-more) for a list that can legitimately be empty, change it to `*` (zero-or-more); otherwise the parser throws a recognition error when users attempt to clear the list via an empty array literal. `'[' (hashConstruct ','?)+ ']'` — the `+` quantifier requires at least one element, so the CLI command `WITH column_metadata = []` fails with a parse error instead of clearing the column metadata.
+- When the default thread pool size for a half-synchronous/half-asynchronous server is set to `availableProcessors`, verify that this is sufficient for the expected I/O wait time; hsha servers need a multiplier because threads block on I/O. `conf.rpc_max_threads = Runtime.getRuntime.availableProcessors` for the hsha server — a pool equal to the number of CPU cores will saturate immediately under any I/O-bound load, queuing requests instead of processing them concurrently.
+- When choosing a data directory for a new compaction output file or computing compaction size metrics, always use the on-disk (compressed) file size rather than the logical data size; for compressed [Class/Subsystem] these can differ by an order of magnitude. `[Class/Subsystem].length` used for disk-space checks in `getDataFileLocation`, compaction size logging, and size-tiered bucket computation — for compressed [Class/Subsystem] `length` returns the uncompressed logical size, so disk-full checks vastly overestimate available space needed and size-tiered groupings bucket the wrong [Class/Subsystem] together.
+- When computing a compaction task count as `(totalBytes - maxBytes) / unitBytes`, ensure the unit divisor includes the full byte conversion factor and wrap the subtraction in `Math.max(0, ...)` to prevent a negative count when a level is within bounds. `n += (getTotalBytes([Class/Subsystem]) - maxBytesForLevel(i)) / maxSSTableSizeInMB` — `maxSSTableSizeInMB` is in megabytes but `getTotalBytes` returns bytes, so the quotient is 1,048,576× too large; also the subtraction is not guarded and can be negative when the level is under capacity.
+- When a stress/benchmark operation hardcodes a column family name that does not match the actual column family written during the write phase, reads will always miss and the benchmark produces incorrect results. A string literal column family name in a `ColumnParent` constructor differs from the name used during the corresponding write operation (e.g., `"CounterSuper1"` vs. `"SuperCounter1"`).
+- When a static registry maps a fully-qualified class name string to a [Class/Subsystem] type handler, a typo in the key causes the mapping to be permanently absent, making every attempt to use the counter column type through [Class/Subsystem] fail silently. A `map.put("org.apache.[Class/Subsystem].db.marshal.ColumnCounterType", ...)` entry appears in the type registry when the actual class is named `CounterColumnType`, so the key never matches and the handler is unreachable.
+- DROP
+- When an `AtomicInteger` reference counter can be decremented below zero by concurrent release paths, use `<= 0` rather than `== 0` in the finalizer assertion to avoid spurious assertion failures. `assert references.get == 0;` in a finalizer when the reference count is managed by concurrent `decrementAndGet` calls; the count can legitimately reach negative values before finalization, causing the assertion to fire incorrectly.
+- DROP
+- bytes read and total bytes are swapped in [Class/Subsystem] — When constructing a `[Class/Subsystem]` for progress reporting, verify the argument order matches the constructor signature `([Class/Subsystem], cf, type, bytesRead, totalBytes)`; swapping these two arguments causes progress bars and percentage displays to show inverted or nonsensical values. `Table.IndexBuilder.getProgress` constructs `new [Class/Subsystem](..., iter.getTotalBytes, iter.getBytesRead)`, placing total before read; the constructor expects `(bytesRead, totalBytes)`, so progress is reported as the inverse (e.g. 90% done appears as 10% done).
+- DROP
+- When applying defaults to a [Class/Subsystem]-generated object using `isSet` guards, include every safety-critical boolean flag — check `isSetReplicate_on_write` and apply the correct default before using the value, rather than relying on the Java primitive default of `false`. `[Class/Subsystem].fromThrift` / `applyToCFMetaData` applies defaults for `comment`, `min_compaction_threshold`, and `max_compaction_threshold` via `isSet` guards, but omits `replicate_on_write`; for [Class/Subsystem] clients that do not set this field the Java default (`false`) is used, which is unsafe for counter column families.
+- When building a new immutable set to replace a tracked set, verify that the existing tracked set (not the total live set) is used as the base for the new set. `ImmutableSet.builder.addAll([Class/Subsystem])` used instead of `ImmutableSet.builder.addAll(compacting)` in a method named `markCompacting`, so all live [Class/Subsystem] get added to the compacting set instead of only the already-compacting ones plus the new batch.
+- When deserializing a `[Class/Subsystem]` from the commitlog during replay, pass `fromRemote=false` so that counter columns are treated as local (not pre-incremented remote) values and are replayed correctly. `[Class/Subsystem].serializer.deserialize(dis, true, true)` hardcoded with `fromRemote=true` in the commitlog replay path, causing counter columns to be deserialized as already-applied remote increments and discarded or misapplied on replay.
+- When a CLI command reads arguments by position, verify that the argument array index matches the command's own argument count check. A length check compares against `2` but the actual value is read from `arguments[1]`; the subcommand strips the command name so the remaining array is off by one.
+- When tracking byte offsets in file structures that may exceed 2 GB, use `long` return types for byte-count methods, not `int`. `BufferedRandomAccessFile.bytesPastMark` returns `int` and throws `UnsupportedOperationException("Overflow")` when the measured span exceeds `Integer.MAX_VALUE`, which prevents hinted-handoff delivery for any row whose column index block is larger than 2 GB.
+- When `newIndexMetadata` constructs a secondary-index `[Class/Subsystem]`, verify it copies compaction thresholds and GC grace from the parent CF rather than using hardcoded defaults. `newIndexMetadata` accepts raw `String table, String parentCf` parameters and fills every optional field with `DEFAULT_*` constants, ignoring the parent CF's tuned settings.
+- DROP
+- When constructing a `SuperColumn` serializer from an `[Class/Subsystem]`, use `metadata.subcolumnComparator` rather than the top-level column [Class/Subsystem], since super-column sub-columns may have a different [Class/Subsystem] than the super-column names. `SuperColumn.serializer(getColumnComparator)` passes the top-level column [Class/Subsystem] to the super-column serializer; when the subcolumn [Class/Subsystem] differs, bytes are decoded with the wrong type.
+- DROP
+- Use appropriate integer types to prevent truncation when accumulating large sums across iterations
+- Verify format specifiers match the intended data type (e.g., %d for integers, not %f)
+- Avoid hardcoding values that should come from request parameters or configuration
+- Review control flow statements for unintended empty statements (e.g., if (cond);)
+- Verify that state values match actual state at each transition point
+- Update all client-side queries when renaming registered service objects or type names
+- Use unique patterns for each case branch to prevent copy-paste errors from setting wrong fields
+- Distinguish between sentinel values and valid zero/empty states with distinct return types
+- Verify default values in fallback chains do not unintentionally enable features
+- Always chain original exceptions when wrapping to preserve diagnostic information
+- Initialize stateful accumulators to reasonable defaults, not sentinel values like zero
+- Account for all serialized fields when computing size prefixes or buffer offsets
+- Use strict comparison operators when checking boundary conditions against thresholds
+
+## Wrong serialization / deserialization (176)
+
+- Range-merging logic must handle wrap-around conditions and sentinel values with explicit termination rules.
+- VInt codec must use matching signed/unsigned variants
+- Schema mutations must use Raw forms, defer prepare
+- Timestamp comparisons need matching epoch units
+- SimpleDateFormat fails on negative epochs; use java.time
+- ByteBuffer slice/rewind corrupts position; use mark/reset
+- ClientWrapper prepared statements must use concrete types
+- Unsafe memory on unaligned big-endian needs endian checks
+- Stubs throwing UnsupportedOperationException corrupt tools
+- Repeated deserializations can cache when types known
+- User identifiers serialized to CQL need quoting
+- Paging state varies by version; test compact storage
+- JMX MBean return types must be java.util only
+- IPv6 host:port assembly needs InetAddressAndPort
+- Collection serialization needs sorted maps
+- ByteBuffer.put advances source; duplicate before aggregate
+- Stream-to-array without type produces Object[
+- Schema DDL needs isView branching for materialized views
+- Versioned serializers must not change byte count by version
+- Collection type serialization must avoid mixing column state
+- Slice and rewind leaves limit at capacity; use flip
+- Enum persistence must match name/ordinal across changes
+- Expiry callbacks must read timeout from wrapper
+- Sub-serializers must not be duplicated in parent serializer
+- ByteBuffer column names need comparator-aware conversion
+- BATCH statements need shared properly-sized boundTypes array
+- Thrift iteration needs union-aware dispatch
+- Multi-protocol addresses need protocol-specific normalization
+- String identifiers need generic encoders, not ASCII
+- ByteBufferAccessor methods need ByteBuffer form
+- Python CLI normalization must be consistent
+- Py2/Py3 must use ensure_text for text, not ensure_str
+- New schema columns need backward-compatible presence
+- Composite keys need table-mode branching
+- Schema digest needs version-structural awareness
+- Primitive sizeof needs overloads for all wire types
+- Silent exception loops corrupt byte position
+- Container hashCode needs content hash, not identity
+- Non-canonical encodings need type normalizers
+- Structural state discriminators need sentinels
+- Read-only methods must not mutate buffer
+- Complex validation must go through type-aware path
+- Python mutable types in collections cause TypeError
+- Partial type overrides can activate fallback paths
+- Legacy deserialization cannot assume structural equivalence
+- Python identifiers need encoding before columnize
+- Dropped columns need correct kind information
+- Mixed-version paging must probe target version
+- Backported paging fixes need both sides corrected
+- Super columns need independent testing
+- Composite cells need table-type branching
+- Sorted composites with empty sentinels need re-normalize
+- Serializer Kind dispatch must match types
+- Static columns in mixed clusters need compact handling
+- Dropped column restoration needs invariant validation
+- Super column schema upgrades need all metadata variants
+- Composite serialization needs table-type branching
+- Type information from objects becomes stale post-DDL
+- String-to-enum migration needs all legacy values
+- Range tombstone bounds need matching serializers
+- Unreachable paths must be inside switch default
+- Type hierarchies with new subclasses need exhaustive mapping
+- Multi-byte reads need endian checks
+- Stream classes sharing paths corrupt implicitly
+- Comparator mismatches break generic algorithms
+- Legacy SSTable must use version-gated comparator
+- Composite size assertions fail with variable clustering
+- Complex element validation can crash spuriously
+- Super column names need path-specific decompose
+- Multicolumn restrictions need empty normalization
+- Counter cells need type-aware dispatch
+- Cell kinds need correct wire format mapping
+- Coordinator semantics need receiver compensation
+- Version-guarded deserializers must work both directions
+- Thrift-to-CQL needs LegacyLayout abstraction
+- Grammar token removals must be everywhere
+- Two-phase formats must order data-then-sentinel
+- Enum multi-case variants need runtime discriminators
+- Digest computation must be version-aware
+- Ordinal mappings must enumerate every subtype
+- Byte order sensitive reads need assertion/normalization
+- Serialize/deserialize must match field order
+- Version branches must not change byte counts
+- Version-guarded serializers stay symmetric
+- Builder mode flags guard side-effects
+- Format strings must thread version everywhere
+- Type parsers accepting broad input risk data acceptance
+- Interface fallbacks lose type information
+- Protocol-version threading ensures format compatibility
+- Copy/clone must deep-copy mutable fields
+- Composite assertions cannot assume fixed width
+- SerializedSize delegation must account all fields
+- Grammar forms apply to server and client
+- Validation must understand whole vs component
+- Serializable classes use only JDK types
+- Transient fields need readObject or recomputation
+- Validate-instead-of-convert workarounds risk intent mismatch
+- Protocol sub-field serialization must not replace global
+- Type inheritance for formatting needs override
+- Monkey-patched fixes apply to all related types
+- Cross-subsystem deserialization uses source protocol
+- Deserializers must handle empty buffers
+- Format changes route through version dispatchers
+- Protocol layout assumptions cannot transfer versions
+- String-to-key needs validator fromString
+- Type dispatch must check commutative types
+- On-disk reading gates parser on SSTable version
+- Current-only assertions break upgrades
+- Container decompose uses inner type
+- Binary format reads match documented layout
+- Component iteration uses concrete types
+- Structural variants need exhaustive dispatch
+- Variable-length fields use matching prefix widths
+- Encoded names use same encoding for writes/deletes
+- Integration accounts for composite encoding
+- Cross-system type mismatches reveal in round-trips
+- Super columns tested independently
+- Composite lookups split before access
+- Timestamp comparison documents matching units
+- SimpleDateFormat needs explicit timezone
+- Presentation objects don't share buffer state
+- Protocol codecs mirror field order
+- ByteBuffer must flip before read
+- Paging uses explicit exhaustion checks
+- Stream format flags consumed before conditional reads
+- Variadic calls with compatible types risk swaps
+- Size calculations include length-prefix and data
+- Adapted local variables used, not originals
+- Class renames update registrations and checks
+- ByteBuffer drains to byte[] before serialization
+- Sorted-columns insertion maintains order
+- Size reporting distinguished from embedded sizes
+- Serialize/deserialize/serializedSize stay symmetric
+- Builder/serializer reuse guards side-effects
+- Shared formats thread version to all sites
+- Token display uses factory, not raw bytes
+- Copy methods deep-copy mutable types
+- Cluster key insertion matches sort order
+- Size loops accumulate into totals
+- Marked buffers use mark/reset, not rewind
+- Enum ordinals break on removal; use names
+- Mixed-version parameters stripped of protocol suffix
+- Schema initialization doesn't race readiness
+- Initialization between subsystems needs coordination
+- Byte array serialization without empty-buffer checks throws on null values
+- Variable-length serialization must count both prefix and data bytes
+- Transitive local variables computed but unused indicate copy-paste bugs
+- Renamed classes must update all codec registrations
+- Partial ByteBuffer draining leaves position corruption
+- Sorted container insertion must respect comparator ordering
+- Size field usage must distinguish total object size from embedded records
+- Struct creation from persisted data must validate against invariants
+- File format interleaving metadata must account metadata bytes in checksums
+- Type mismatch or incorrect cast causes runtime exception
+- Type mismatch or incorrect cast causes runtime exception
+- Configuration stored in one unit internally but serialized in different unit
+- ByteBuffer position or offset not properly tracked causes wrong data read
+- Configuration stored in one unit internally but serialized in different unit
+- String formatting includes extra data breaking downstream parsing
+- String formatting includes extra data breaking downstream parsing
+- Avro union field order violates spec breaks deserialization
+- Delimiter character in user input corrupts message serialization format
+- ByteBuffer position or offset not properly tracked causes wrong data read
+- ByteBuffer position or offset not properly tracked causes wrong data read
+- Wire protocol version change not guarded breaks backward compatibility
+- Configuration stored in one unit internally but serialized in different unit
+- Single read call incomplete leaving buffer partially filled
+- Signed byte value misinterpreted as unsigned causes wrong results
+- New message field not guarded by version check breaks old nodes
+- Serialization field order mismatch causes wrong value assignment
+- Configuration stored in one unit internally but serialized in different unit
+- ByteBuffer position or offset not properly tracked causes wrong data read
+- Configuration stored in one unit internally but serialized in different unit
+- Type mismatch or incorrect cast causes runtime exception
+- Configuration stored in one unit internally but serialized in different unit
+- Configuration stored in one unit internally but serialized in different unit
+
+## State not cleaned up (163)
+
+- DROP
+- DROP
+- DROP
+- Partial update to related fields breaks invariant
+- DROP
+- DROP
+- DROP
+- State not cleaned up after operation leaves stale data visible
+- Resource not closed on exception path causes leak
+- New message field not guarded by version check breaks old nodes
+- DROP
+- Gossip state change not propagated to all nodes diverges from authoritative state
+- Gossip state change not propagated to all nodes diverges from authoritative state
+- DROP
+- Array boundary check is off-by-one allows out-of-bounds access
+- DROP
+- DROP
+- Gossip state change not propagated to all nodes diverges from authoritative state
+- DROP
+- Cache not invalidated after update leaves stale values
+- Resource not closed on exception path causes leak
+- Exception not properly handled or propagated
+- Iterator or stream truncated during early exit loses data
+- DROP
+- DROP
+- State not cleaned up after operation leaves stale data visible
+- DROP
+- DROP
+- Cache infrastructure written to but never read provides no benefit
+- DROP
+- State field not cleared leaves value from previous operation
+- Cache not invalidated after update leaves stale values
+- Time window not persistent across restarts allows indefinite accumulation
+- Cache infrastructure written to but never read provides no benefit
+- State not cleaned up after operation leaves stale data visible
+- DROP
+- DROP
+- Array boundary check is off-by-one allows out-of-bounds access
+- DROP
+- Side effect or update applied twice due to shared object reuse
+- DROP
+- DROP
+- Direct array access via ByteBuffer.array fails for off-heap buffers
+- State not cleaned up after operation leaves stale data visible
+- DROP
+- DROP
+- Dropped column metadata incomplete prevents reconstruction
+- DROP
+- DROP
+- DROP
+- Update omits related field leaves object in inconsistent state
+- DROP
+- Cache not invalidated after update leaves stale values
+- Iterator or stream truncated during early exit loses data
+- Conditional early return skips critical bookkeeping
+- State not cleaned up after operation leaves stale data visible
+- DROP
+- Stale or obsolete state remains visible causing wrong behavior
+- DROP
+- DROP
+- DROP
+- DROP
+- State not cleaned up after operation leaves stale data visible
+- DROP
+- DROP
+- Early-exit path bypasses essential state update or cleanup
+- Early-exit path bypasses essential state update or cleanup
+- DROP
+- Reference to mutable object shared across consumers causes cross-contamination
+- DROP
+- Array boundary check is off-by-one allows out-of-bounds access
+- DROP
+- DROP
+- Partial update to related fields breaks invariant
+- Cache not invalidated after update leaves stale values
+- DROP
+- DROP
+- Cache infrastructure written to but never read provides no benefit
+- Early-exit path bypasses essential state update or cleanup
+- Commit ordering reversed causes state inconsistency on crash
+- DROP
+- DROP
+- DROP
+- Conditional early return skips critical bookkeeping
+- Collection modified during iteration invalidates iterator
+- Direct array access via ByteBuffer.array fails for off-heap buffers
+- Negative delta passed to unsigned allocation API causes overflow
+- Mutable field on singleton not properly visible to concurrent readers
+- State not cleaned up after operation leaves stale data visible
+- Cache infrastructure written to but never read provides no benefit
+- DROP
+- State not cleaned up after operation leaves stale data visible
+- Update omits related field leaves object in inconsistent state
+- DROP
+- State not cleaned up after operation leaves stale data visible
+- State not cleaned up after operation leaves stale data visible
+- Resource not closed on exception path causes leak
+- Reference to mutable object shared across consumers causes cross-contamination
+- DROP
+- State not cleaned up after operation leaves stale data visible
+- Mutable object in cache shared across consumers corrupts state
+- Collection modified during iteration invalidates iterator
+- DROP
+- Cleanup logic not placed in finally block skipped on exception
+- Collection modified during iteration invalidates iterator
+- DROP
+- Merge conflict resolution leaves dead code or stale imports
+- Mutable object in cache shared across consumers corrupts state
+- Mutable object in cache shared across consumers corrupts state
+- DROP
+- Removed node state incorporated into topology causes incorrect routing
+- DROP
+- DROP
+- DROP
+- DROP
+- Field not initialized on all code paths leaves undefined value
+- DROP
+- Gossip state change not propagated to all nodes diverges from authoritative state
+- DROP
+- Collection modified during iteration invalidates iterator
+- DROP
+- DROP
+- DROP
+- DROP
+- DROP
+- Configuration stored in one unit internally but serialized in different unit
+- Delimiter character in user input corrupts message serialization format
+- DROP
+- Commit ordering reversed causes state inconsistency on crash
+- DROP
+- ByteBuffer position or offset not properly tracked causes wrong data read
+- State not reset between retries or on timeout leaves stale data
+- Gossip state change not propagated to all nodes diverges from authoritative state
+- Commit ordering reversed causes state inconsistency on crash
+- DROP
+- Cache not invalidated after update leaves stale values
+- DROP
+- Mutable schema object copied by reference instead of cloned
+- Reference to mutable object shared across consumers causes cross-contamination
+- DROP
+- Direct array access via ByteBuffer.array fails for off-heap buffers
+- State not cleaned up after operation leaves stale data visible
+- Array boundary check is off-by-one allows out-of-bounds access
+- Cache not invalidated after update leaves stale values
+- Cleanup logic not placed in finally block skipped on exception
+- File path reused for different entity causes collision
+- State not cleaned up after operation leaves stale data visible
+- DROP
+- DROP
+- Collection modified during iteration invalidates iterator
+- Direct array access via ByteBuffer.array fails for off-heap buffers
+- Reference to mutable object shared across consumers causes cross-contamination
+- DROP
+- DROP
+- Commit ordering reversed causes state inconsistency on crash
+- Gossip state change not propagated to all nodes diverges from authoritative state
+- DROP
+- DROP
+- Exception not properly handled or propagated
+- Stale or obsolete state remains visible causing wrong behavior
+- DROP
+- DROP
+- Collection modified during iteration invalidates iterator
+
+## Race condition / missing synchronization (160)
+
+- Concurrent access to shared mutable state without proper synchronization
+- Time-of-check/time-of-use race allowing stale state observation
+- Concurrent access to shared mutable state without proper synchronization
+- Non-atomic check-then-act sequence creating TOCTOU race
+- Missing null pointer check before dereferencing shared state
+- Time-of-check/time-of-use race allowing stale state observation
+- Concurrent access to shared mutable state without proper synchronization
+- Time-of-check/time-of-use race allowing stale state observation
+- Time-of-check/time-of-use race allowing stale state observation
+- Concurrent access to shared mutable state without proper synchronization
+- Concurrent access to shared mutable state without proper synchronization
+- Concurrent access to shared mutable state without proper synchronization
+- Incorrect ordering of operations affecting memory visibility or state consistency
+- Incorrect ordering of operations affecting memory visibility or state consistency
+- Concurrent access to shared mutable state without proper synchronization
+- Missing null pointer check before dereferencing shared state
+- Concurrent access to shared mutable state without proper synchronization
+- Concurrent access to shared mutable state without proper synchronization
+- Concurrent access to shared mutable state without proper synchronization
+- Concurrent access to shared mutable state without proper synchronization
+- Missing null pointer check before dereferencing shared state
+- Incorrect ordering of operations affecting memory visibility or state consistency
+- Incorrect ordering of operations affecting memory visibility or state consistency
+- Concurrent access to shared mutable state without proper synchronization
+- Unsafe thread spawning in constructor exposing partially-constructed state
+- Concurrent access to shared mutable state without proper synchronization
+- Incorrect ordering of operations affecting memory visibility or state consistency
+- Concurrent access to shared mutable state without proper synchronization
+- Concurrent access to shared mutable state without proper synchronization
+- Concurrent access to shared mutable state without proper synchronization
+- Missing break or exit condition in control flow causing fallthrough
+- Incorrect ordering of operations affecting memory visibility or state consistency
+- Concurrent access to shared mutable state without proper synchronization
+- Time-of-check/time-of-use race allowing stale state observation
+- Concurrent access to shared mutable state without proper synchronization
+- Time-of-check/time-of-use race allowing stale state observation
+- Concurrent access to shared mutable state without proper synchronization
+- Missing break or exit condition in control flow causing fallthrough
+- Non-atomic check-then-act sequence creating TOCTOU race
+- Concurrent access to shared mutable state without proper synchronization
+- Concurrent access to shared mutable state without proper synchronization
+- Incorrect ordering of operations affecting memory visibility or state consistency
+- Concurrent access to shared mutable state without proper synchronization
+- Silent data loss through unguarded collection or field modification
+- Missing null pointer check before dereferencing shared state
+- Non-atomic check-then-act sequence creating TOCTOU race
+- Missing null pointer check before dereferencing shared state
+- Unsafe thread spawning in constructor exposing partially-constructed state
+- Concurrent access to shared mutable state without proper synchronization
+- Unsafe thread spawning in constructor exposing partially-constructed state
+- Incorrect ordering of operations affecting memory visibility or state consistency
+- Non-atomic check-then-act sequence creating TOCTOU race
+- Concurrent access to shared mutable state without proper synchronization
+- Concurrent access to shared mutable state without proper synchronization
+- Concurrent access to shared mutable state without proper synchronization
+- Concurrent access to shared mutable state without proper synchronization
+- Concurrent access to shared mutable state without proper synchronization
+- Incorrect ordering of operations affecting memory visibility or state consistency
+- Concurrent access to shared mutable state without proper synchronization
+- Concurrent access to shared mutable state without proper synchronization
+- Off-by-one error in boundary condition or range calculation
+- Concurrent access to shared mutable state without proper synchronization
+- Concurrent access to shared mutable state without proper synchronization
+- Concurrent access to shared mutable state without proper synchronization
+- Concurrent access to shared mutable state without proper synchronization
+- Incorrect ordering of operations affecting memory visibility or state consistency
+- Concurrent access to shared mutable state without proper synchronization
+- Incorrect ordering of operations affecting memory visibility or state consistency
+- Concurrent access to shared mutable state without proper synchronization
+- Concurrent access to shared mutable state without proper synchronization
+- Concurrent access to shared mutable state without proper synchronization
+- Concurrent access to shared mutable state without proper synchronization
+- Concurrent access to shared mutable state without proper synchronization
+- Concurrent access to shared mutable state without proper synchronization
+- Missing null pointer check before dereferencing shared state
+- Concurrent access to shared mutable state without proper synchronization
+- Concurrent access to shared mutable state without proper synchronization
+- Concurrent access to shared mutable state without proper synchronization
+- Event registration must occur before operation initiation to avoid missed events
+- Concurrent collections require thread-safe access on both reads and writes
+- Correlated state counters must be updated atomically
+- Double-read patterns on atomic values are candidates for lost-update races
+- Guard conditions on atomic increments must reuse returned values
+- Initialization completion flags must be set after all side-effects complete
+- Double-checked locking must use locally-captured references
+- Comparators reading mutable or live-computed values are unreliable in sorts
+- TOCTOU on mkdirs must verify intent between check and creation
+- Expensive cache repopulation should use single-writer patterns
+- Resource cleanup for in-use state must run even during concurrent destruction
+- Listener lists need copy-on-write or concurrent semantics when iterated during modification
+- Size snapshots must be taken before construction, not derived from concurrent collections
+- Wait calls must be inside while loops to handle spurious wakeups
+- View collections returned from methods must be defensive copies if underlying collection is mutable
+- Singleton thread startup from error handlers must guard against concurrent invocations
+- Thread-local state cleared by concurrent paths creates race windows for async tasks
+- Remote node state transitions require direct confirmation, not indirect evidence
+- Static initializers touching global state create order-dependent initialization races
+- Resource acquisition and release must be centralized in the resource owner
+- Fast-path returns bypassing queues create TOCTOU races with queued work
+- Shared mutable collections updated from callbacks need concurrent implementations
+- Loops depending on state changes need guaranteed exit conditions
+- Initialization tasks must wait for explicit readiness signals, not fixed delays
+- Conditional-insert operations must check return values to detect previous insertions
+- Protocol messages with per-request mutable fields must not be singletons
+- Time-sensitive values must be captured before handing work to thread pools
+- Fields shared between threads need volatile or synchronized visibility
+- Composite key layouts differing between static and regular rows require mode-aware indexing
+- Async task handoffs must extract mutable fields to final locals before offload
+- Bootstrap logic must not depend on fixed sleeps to discriminate cluster-join vs start-fresh
+- Related threshold values must be validated together atomically
+- Sequential integer ID generation across nodes needs distributed consensus, not JVM-local
+- Session IDs must use globally-unique sources, not System.nanoTime on multiple nodes
+- Concurrent maps iterated separately need containsKey guards before access
+- Off-heap memory compare-and-swap must increment reference count before deserializing
+- Cached mutable objects shared by writers must be cloned before insertion
+- Cache population races can insert stale data when check-read-insert lacks atomicity
+- Atomic integers updated with computed values need compare-and-set loops
+- Copy-on-put caches must not have mutations during compaction
+- Secondary index cleanup must hold the same locks as concurrent writers
+- Live-view collections returned without locks expose internal structures
+- SSTable compacting markers must use atomically-reserved subset, not original unchecked set
+- Truncation timestamps must be captured between flush and snapshot
+- Bounded queue retries need exception guards against concurrent clear
+- Concurrent callback response counting needs atomic counters, not map size
+- Schema changes must hold migration locks blocking concurrent flushes
+- Maps modified by schema changes need concurrent implementations
+- Memtable field swaps need volatile visibility
+- Hinted handoff must verify remote schema version before delivery
+- Endpoint removal must defer cleanup until quarantine expires
+- UUIDv1 generation with caller timestamps needs monotonic bumps
+- Circular initialization via constructor-triggered singletons causes deadlocks
+- Long I/O from event handlers blocks event threads
+- Shared MessageDigest instances corrupt hashes under concurrency
+- ByteBuffer position mutations create corruption windows for readers
+- Collections modified from multiple threads without sync need concurrent types
+- Frequent locking on uncontended resources becomes hot bottleneck
+- Schema changes must check for concurrent drop operations
+- Drop operations must serialize through compaction point
+- Shared mark state in file objects gets clobbered by concurrent calls
+- Non-blocking maps have non-atomic clear visibility windows
+- Range scans must not omit current memtable
+- Dirty flags need happens-before visibility guarantees
+- Lock-released snapshot reads race with concurrent deleters
+- Memtables added after replacement create invisibility windows
+- NonBlockingHashMap iteration anomalies produce duplicate references
+- Global memtable executor can interleave same-CF flushes
+- SSTable acquisition retry loops race between view and reference
+- Compaction strategy must check progress to prevent overlapping tasks
+- CRC coverage must match all fields between seed and write
+- Compaction reserialize paths must preserve deserializer context
+- Null-field accounting must track both isNull and isChanged
+- Conditional serialization needs matching guards in all three methods
+- Key comparisons and byte serialization need consistent ordering
+- Enum-switched deserialization must re-initialize each case
+- Sequential ByteBuffer decodes must use consistent positioning
+- Never mix raw stream reads with decorator wrapper reads
+- Enum field mappings must match semantic variants
+- Every serialized field needs corresponding serializedSize
+- Singleton static initializers need feature-flag consistency
+- Optional fields need matching condition guards
+
+## Missing null / bounds check (156)
+
+- Verify boundary inclusion semantics are consistent across interval queries and contains checks
+- Guard platform-specific API calls with hasattr checks or try-except AttributeError
+- Check JDK version compatibility for reflection APIs and provide fallback implementations
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Initialize stateful accumulators to reasonable defaults, not sentinel values like zero
+- Guard schema/metadata lookups in background tasks to handle concurrent removal
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Distinguish between sentinel values and valid zero/empty states with distinct return types
+- Verify that state values match actual state at each transition point
+- Update all client-side queries when renaming registered service objects or type names
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Guard calls to startup-sequenced singletons to verify they are ready before use
+- Always chain original exceptions when wrapping to preserve diagnostic information
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Distinguish empty-container states from missing-data states in return values
+- Distinguish empty-container states from missing-data states in return values
+- Check JDK version compatibility for reflection APIs and provide fallback implementations
+- Check JDK version compatibility for reflection APIs and provide fallback implementations
+- Prevent TOCTOU null dereferences by re-checking state before using it
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Guard schema/metadata lookups in background tasks to handle concurrent removal
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Distinguish empty-container states from missing-data states in return values
+- Distinguish between sentinel values and valid zero/empty states with distinct return types
+- Distinguish empty-container states from missing-data states in return values
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Update all client-side queries when renaming registered service objects or type names
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Distinguish empty-container states from missing-data states in return values
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Use appropriate integer types to prevent truncation when accumulating large sums across iterations
+- Guard data structure construction when member objects may be partially initialized
+- Always chain original exceptions when wrapping to preserve diagnostic information
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Handle all sentinel values (null, UNSET, etc.) in generic iteration over user-supplied data
+- Distinguish between sentinel values and valid zero/empty states with distinct return types
+- Always chain original exceptions when wrapping to preserve diagnostic information
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Avoid hardcoding values that should come from request parameters or configuration
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Always chain original exceptions when wrapping to preserve diagnostic information
+- Distinguish empty-container states from missing-data states in return values
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Encode metadata (e.g., emptiness flag) in completion markers, not just file existence
+- Guard schema/metadata lookups in background tasks to handle concurrent removal
+- Always chain original exceptions when wrapping to preserve diagnostic information
+- Distinguish empty-container states from missing-data states in return values
+- Guard data structure construction when member objects may be partially initialized
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Distinguish empty-container states from missing-data states in return values
+- Update all client-side queries when renaming registered service objects or type names
+- Distinguish empty-container states from missing-data states in return values
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Guard schema/metadata lookups in background tasks to handle concurrent removal
+- Distinguish empty-container states from missing-data states in return values
+- Distinguish between sentinel values and valid zero/empty states with distinct return types
+- Distinguish between sentinel values and valid zero/empty states with distinct return types
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Account for all serialized fields when computing size prefixes or buffer offsets
+- Guard schema/metadata lookups in background tasks to handle concurrent removal
+- Guard schema/metadata lookups in background tasks to handle concurrent removal
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Ensure computational formulas are not applied redundantly across refactoring boundaries
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Distinguish between sentinel values and valid zero/empty states with distinct return types
+- Prevent TOCTOU null dereferences by re-checking state before using it
+- Always chain original exceptions when wrapping to preserve diagnostic information
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Guard platform-specific API calls with hasattr checks or try-except AttributeError
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Distinguish empty-container states from missing-data states in return values
+- Use unique patterns for each case branch to prevent copy-paste errors from setting wrong fields
+- Verify type guards execute before narrowing casts to prevent TOCTOU null dereferences
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Distinguish between sentinel values and valid zero/empty states with distinct return types
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Guard schema/metadata lookups in background tasks to handle concurrent removal
+- Guard nullable fields in lazy-initialization patterns with null checks before use
+- Distinguish between sentinel values and valid zero/empty states with distinct return types
+- Guard schema/metadata lookups in background tasks to handle concurrent removal
+- Distinguish between sentinel values and valid zero/empty states with distinct return types
+- Distinguish empty-container states from missing-data states in return values
+- Distinguish empty-container states from missing-data states in return values
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Guard schema/metadata lookups in background tasks to handle concurrent removal
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Encode metadata (e.g., emptiness flag) in completion markers, not just file existence
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Ensure computational formulas are not applied redundantly across refactoring boundaries
+- Distinguish between sentinel values and valid zero/empty states with distinct return types
+- Distinguish between sentinel values and valid zero/empty states with distinct return types
+- Prevent TOCTOU null dereferences by re-checking state before using it
+- Add null checks before dereferencing results from lookups or methods that can return null
+- Distinguish empty-container states from missing-data states in return values
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Assertions are unsafe guards in production code; use conditional checks instead
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Type conversions must verify the actual type before casting or dereferencing type-specific fields
+- Collections that can be empty or null must be guarded before iteration or method calls
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Boundary conditions and limits must be validated before applying operations on collections
+- Type conversions must verify the actual type before casting or dereferencing type-specific fields
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Assertions are unsafe guards in production code; use conditional checks instead
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Fields used in lifecycle methods must be initialized before those methods are called
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Collections that can be empty or null must be guarded before iteration or method calls
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Collections that can be empty or null must be guarded before iteration or method calls
+- Filtering predicates must be applied consistently across all code branches and data paths
+- Collections that can be empty or null must be guarded before iteration or method calls
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Filtering predicates must be applied consistently across all code branches and data paths
+- Schema changes must be visible to all components; metadata objects must be kept in sync
+- Collections that can be empty or null must be guarded before iteration or method calls
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+
+## Incorrect filtering / wrong query result (154)
+
+- Path comparisons must use consistent resolution semantics across the codebase.
+- Boundary conditions and limits must be validated before applying operations on collections
+- Boundary conditions and limits must be validated before applying operations on collections
+- Type conversions must verify the actual type before casting or dereferencing type-specific fields
+- Collections that can be empty or null must be guarded before iteration or method calls
+- Sort order and comparison direction must be consistent across all elements in a collection
+- Sort order and comparison direction must be consistent across all elements in a collection
+- Schema changes must be visible to all components; metadata objects must be kept in sync
+- Sort order and comparison direction must be consistent across all elements in a collection
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Boundary conditions and limits must be validated before applying operations on collections
+- Stateful iterators must correctly handle all transition boundaries without skipping or repeating positions
+- Stateful iterators must correctly handle all transition boundaries without skipping or repeating positions
+- Hard-coded values should be replaced with values derived from the actual data or configuration
+- Aggregation operations must match the logical set operation: unions sum, intersections take minimum
+- All code paths must be explicitly handled; implicit defaults in switch/if-else chains hide missing cases
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Filtering predicates must be applied consistently across all code branches and data paths
+- Type conversions must verify the actual type before casting or dereferencing type-specific fields
+- Filtering predicates must be applied consistently across all code branches and data paths
+- Boundary conditions and limits must be validated before applying operations on collections
+- Boundary conditions and limits must be validated before applying operations on collections
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Aggregation operations must match the logical set operation: unions sum, intersections take minimum
+- Version differences must be accounted for when deserializing or communicating with older implementations
+- Boundary conditions and limits must be validated before applying operations on collections
+- Hard-coded values should be replaced with values derived from the actual data or configuration
+- Boundary conditions and limits must be validated before applying operations on collections
+- Type conversions must verify the actual type before casting or dereferencing type-specific fields
+- Boundary conditions and limits must be validated before applying operations on collections
+- Collections that can be empty or null must be guarded before iteration or method calls
+- Boundary conditions and limits must be validated before applying operations on collections
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Schema changes must be visible to all components; metadata objects must be kept in sync
+- Boundary conditions and limits must be validated before applying operations on collections
+- References to potentially deleted or dropped entities must be validated before use
+- Filtering predicates must be applied consistently across all code branches and data paths
+- Collections that can be empty or null must be guarded before iteration or method calls
+- All code paths must be explicitly handled; implicit defaults in switch/if-else chains hide missing cases
+- Filtering predicates must be applied consistently across all code branches and data paths
+- Multi-step operations must atomically capture and refresh state between steps
+- Sort order and comparison direction must be consistent across all elements in a collection
+- Collections that can be empty or null must be guarded before iteration or method calls
+- All code paths must be explicitly handled; implicit defaults in switch/if-else chains hide missing cases
+- Collections that can be empty or null must be guarded before iteration or method calls
+- Filtering predicates must be applied consistently across all code branches and data paths
+- All code paths must be explicitly handled; implicit defaults in switch/if-else chains hide missing cases
+- Collections that can be empty or null must be guarded before iteration or method calls
+- All code paths must be explicitly handled; implicit defaults in switch/if-else chains hide missing cases
+- Boundary conditions and limits must be validated before applying operations on collections
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Boundary conditions and limits must be validated before applying operations on collections
+- Hard-coded values should be replaced with values derived from the actual data or configuration
+- Boundary conditions and limits must be validated before applying operations on collections
+- Type conversions must verify the actual type before casting or dereferencing type-specific fields
+- Filtering predicates must be applied consistently across all code branches and data paths
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Type conversions must verify the actual type before casting or dereferencing type-specific fields
+- Type conversions must verify the actual type before casting or dereferencing type-specific fields
+- Concurrent operations must atomically observe state or use synchronization barriers
+- Sort order and comparison direction must be consistent across all elements in a collection
+- Boundary conditions and limits must be validated before applying operations on collections
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Concurrent operations must atomically observe state or use synchronization barriers
+- Type conversions must verify the actual type before casting or dereferencing type-specific fields
+- Version differences must be accounted for when deserializing or communicating with older implementations
+- Schema changes must be visible to all components; metadata objects must be kept in sync
+- Boundary conditions and limits must be validated before applying operations on collections
+- Boundary conditions and limits must be validated before applying operations on collections
+- Version differences must be accounted for when deserializing or communicating with older implementations
+- Boundary conditions and limits must be validated before applying operations on collections
+- Version differences must be accounted for when deserializing or communicating with older implementations
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Type conversions must verify the actual type before casting or dereferencing type-specific fields
+- Stateful iterators must correctly handle all transition boundaries without skipping or repeating positions
+- Boundary conditions and limits must be validated before applying operations on collections
+- Type conversions must verify the actual type before casting or dereferencing type-specific fields
+- Boundary conditions and limits must be validated before applying operations on collections
+- Boundary conditions and limits must be validated before applying operations on collections
+- All code paths must be explicitly handled; implicit defaults in switch/if-else chains hide missing cases
+- Any method returning null for "not found" must be null-checked before every dereference at call sites
+- Type conversions must verify the actual type before casting or dereferencing type-specific fields
+- Boundary conditions and limits must be validated before applying operations on collections
+- Type conversions must verify the actual type before casting or dereferencing type-specific fields
+- Stateful iterators must correctly handle all transition boundaries without skipping or repeating positions
+- Boundary conditions and limits must be validated before applying operations on collections
+- Boundary conditions and limits must be validated before applying operations on collections
+- Boundary conditions and limits must be validated before applying operations on collections
+- Type conversions must verify the actual type before casting or dereferencing type-specific fields
+- Aggregation operations must match the logical set operation: unions sum, intersections take minimum
+- Type conversions must verify the actual type before casting or dereferencing type-specific fields
+- Collections that can be empty or null must be guarded before iteration or method calls
+- Collections that can be empty or null must be guarded before iteration or method calls
+- Type conversions must verify the actual type before casting or dereferencing type-specific fields
+- Type conversions must verify the actual type before casting or dereferencing type-specific fields
+- Collections that can be empty or null must be guarded before iteration or method calls
+- Assertions are unsafe guards in production code; use conditional checks instead
+- Stateful iterators must correctly handle all transition boundaries without skipping or repeating positions
+- Boolean conditions must be tested for correctness; inverted conditions silently reverse the intended behavior
+- Type conversions must verify the actual type before casting or dereferencing type-specific fields
+- Type conversions must verify the actual type before casting or dereferencing type-specific fields
+- References to potentially deleted or dropped entities must be validated before use
+- Boundary conditions and limits must be validated before applying operations on collections
+- Type mismatch in collection key lookup causing silent miss
+- Wrong field or parameter used in branching logic
+- Incorrect ordering of operations affecting memory visibility or state consistency
+- Silent data loss through unguarded collection or field modification
+- Wrong field or parameter used in branching logic
+- Incorrect ordering of operations affecting memory visibility or state consistency
+- Incomplete cache key missing scope dimension causing cross-tenant collision
+- Missing break or exit condition in control flow causing fallthrough
+- Incorrect ordering of operations affecting memory visibility or state consistency
+- Incorrect ordering of operations affecting memory visibility or state consistency
+- Sentinel or empty value incorrectly treated as valid data
+- Incomplete cache key missing scope dimension causing cross-tenant collision
+- Wrong comparator field or logic used in sorting operation
+- Wrong field or parameter used in branching logic
+- Type mismatch in collection key lookup causing silent miss
+- Incorrect ordering of operations affecting memory visibility or state consistency
+- Incorrect ordering of operations affecting memory visibility or state consistency
+- Wrong comparator field or logic used in sorting operation
+- Missing null pointer check before dereferencing shared state
+- Missing null pointer check before dereferencing shared state
+- Missing null pointer check before dereferencing shared state
+- Time-of-check/time-of-use race allowing stale state observation
+- Type mismatch in collection key lookup causing silent miss
+- Wrong comparator field or logic used in sorting operation
+- Off-by-one error in boundary condition or range calculation
+- Missing null pointer check before dereferencing shared state
+- Incorrect fallback code path when primary option is unavailable
+- Type mismatch in collection key lookup causing silent miss
+- Incorrect ordering of operations affecting memory visibility or state consistency
+- Missing null pointer check before dereferencing shared state
+- Missing null pointer check before dereferencing shared state
+- Using reference equality instead of value equality for object comparison
+- Missing break or exit condition in control flow causing fallthrough
+- Using reference equality instead of value equality for object comparison
+- Silent data loss through unguarded collection or field modification
+- Missing break or exit condition in control flow causing fallthrough
+- Time-of-check/time-of-use race allowing stale state observation
+- Time-of-check/time-of-use race allowing stale state observation
+- Concurrent access to shared mutable state without proper synchronization
+- Off-by-one error in boundary condition or range calculation
+- Incorrect ordering of operations affecting memory visibility or state consistency
+- Missing null pointer check before dereferencing shared state
+- Wrong comparator field or logic used in sorting operation
+- Wrong comparator field or logic used in sorting operation
+- Time-of-check/time-of-use race allowing stale state observation
+- Time-of-check/time-of-use race allowing stale state observation
+- Wrong field or parameter used in branching logic
+- Missing null pointer check before dereferencing shared state
+- Type mismatch in collection key lookup causing silent miss
+- Incorrect ordering of operations affecting memory visibility or state consistency
+- Concurrent access to shared mutable state without proper synchronization
+
+## Off-by-one (96)
+
+- Array boundary check is off-by-one allows out-of-bounds access
+- DROP
+- Array boundary check is off-by-one allows out-of-bounds access
+- Array boundary check is off-by-one allows out-of-bounds access
+- ByteBuffer position or offset not properly tracked causes wrong data read
+- Integer arithmetic overflows with large values
+- DROP
+- Integer arithmetic overflows with large values
+- Array boundary check is off-by-one allows out-of-bounds access
+- Configuration stored in one unit internally but serialized in different unit
+- Configuration stored in one unit internally but serialized in different unit
+- Array boundary check is off-by-one allows out-of-bounds access
+- ByteBuffer position or offset not properly tracked causes wrong data read
+- DROP
+- Conditional early return skips critical bookkeeping
+- Operation ordering violates dependency constraint
+- Array boundary check is off-by-one allows out-of-bounds access
+- Configuration stored in one unit internally but serialized in different unit
+- Array boundary check is off-by-one allows out-of-bounds access
+- String formatting includes extra data breaking downstream parsing
+- Integer arithmetic overflows with large values
+- Array boundary check is off-by-one allows out-of-bounds access
+- Array boundary check is off-by-one allows out-of-bounds access
+- Array boundary check is off-by-one allows out-of-bounds access
+- DROP
+- Array boundary check is off-by-one allows out-of-bounds access
+- DROP
+- Integer arithmetic overflows with large values
+- DROP
+- Direct array access via ByteBuffer.array fails for off-heap buffers
+- Direct array access via ByteBuffer.array fails for off-heap buffers
+- DROP
+- Array boundary check is off-by-one allows out-of-bounds access
+- DROP
+- Array boundary check is off-by-one allows out-of-bounds access
+- DROP
+- Partial update to related fields breaks invariant
+- Array boundary check is off-by-one allows out-of-bounds access
+- Resource not closed on exception path causes leak
+- Array boundary check is off-by-one allows out-of-bounds access
+- Array boundary check is off-by-one allows out-of-bounds access
+- DROP
+- Configuration stored in one unit internally but serialized in different unit
+- DROP
+- Array boundary check is off-by-one allows out-of-bounds access
+- Array boundary check is off-by-one allows out-of-bounds access
+- DROP
+- DROP
+- In any loop that accumulates items up to a limit, verify whether the stopping condition should be `>` or `>=`. The phrasing "did we get more columns than needed" suggests `>`, but the intent of a user-facing limit is "stop when we have enough," which requires `>=`.
+- Whenever the result of an integer multiplication is assigned to a `long`, verify that at least one operand is already a `long` or is explicitly cast to `long` before the multiplication. Java's promotion rules do not automatically widen the intermediate product.
+- When a range tombstone boundary is used in a comparison loop, check whether the boundary is inclusive or exclusive and ensure the operator matches the semantic contract. Also watch for tester/iterator objects captured from mutable collections at construction time when the collection may be populated lazily or incrementally.
+- Whenever a deadline is computed by adding a duration to `System.nanoTime`, check for potential overflow. The idiomatic safe pattern is to capture `start` and compare `System.nanoTime - start < duration`, which works correctly even when the nanosecond counter wraps around.
+- Early-exit conditions on counters that track "how many items have been found so far" should use `>=` (found at least as many as needed) rather than `>` (found strictly more than needed). Using `>` causes one unnecessary extra iteration.
+- Any bounds guard that throws on `> length` instead of `>= length` (or equivalently `> length - 1`) will silently allow an access at index `length` — the classic fencepost error. During review, verify that the exception message's stated maximum matches exactly what the guard allows through.
+- When dividing an offset range into fixed-size buckets, check both endpoints: an endpoint that equals an exact multiple of the bucket size does not actually require the next bucket. Always validate inclusive vs. exclusive range semantics and add a boundary test at exact multiples.
+- When an index or offset is computed by starting from a base value and applying conditional decrements across multiple branches, it is easy to apply the wrong number of decrements. Prefer computing the final value in a single expression that encodes all conditions explicitly, rather than mutating a variable through a sequence of `if/else` blocks.
+- Token-space arithmetic on `Murmur3Partitioner` (64-bit signed long space) must never use `float` or even `double` for intermediate calculations — the token range exceeds what either type can represent without rounding. Review any ownership, split, or midpoint calculation in hash-based partitioners: use `BigInteger` for differences and `BigDecimal` for divisions.
+- When inserting into a composite type whose component count varies depending on schema features (like collections adding a trailing `ColumnToCollectionType`), verify that any index variable is adjusted for all cases where extra components may be present, not just the case where the new column itself introduces the extra component.
+- Any arithmetic that adds a constant to a value that may be `Integer.MAX_VALUE` (commonly used as a sentinel for "unlimited") must guard against overflow. Review all `limit + 1` or `count + 1` patterns to confirm the maximum sentinel is excluded from the increment path.
+- When iterating over a byte buffer using a scaled loop index (`offset = i * stride`), boundary checks must use the derived `offset` variable, not the raw loop counter. A mismatch between the scale used in the index calculation and the scale used in the boundary check is a classic off-by-one.
+- When computing a size or offset that depends on the structure of a composite type, check whether any additional "hidden" or structural types (e.g., collection markers, end-of-components bytes) are appended to the user-visible type list. Treating the raw `types.size` as equivalent to the user-visible component count is a recurring source of off-by-one errors.
+- When progress tracking increments a counter on every iteration of an inner loop (column pages) rather than on every instance of the outer logical unit (rows), the counter will over-count. Look for `totalRead++` inside iterators that may visit multiple pages per logical record.
+- When progress tracking increments a counter on every page fetch rather than every unique logical key, wide rows will cause the progress counter to grow much faster than the actual number of rows processed. Ensure row-progress counters are gated on key identity, not on iteration step.
+- When a loop boundary is meant to "check one extra entry beyond the sampled interval" to handle range-query edge cases, using strict less-than instead of less-than-or-equal silently skips that last check. Review index-scan loops where the comment explains that a boundary condition may require examining one further entry.
+- Midpoint computations on ring/modular arithmetic spaces must account for the minimum value (`MINIMUM`) as the true lower bound, not just `0`. Omitting `min` from wrapping range calculations introduces a systematic bias that shifts all midpoints by `min/2`.
+- When a comparator check is meant to detect "not strictly increasing" order, verify the operator is `>= 0` (catches equal keys too) rather than `> 0` (which silently passes duplicate keys as in-order). `acrComparator.compare(prevRow, compactedRow) > 0` passes silently when two consecutive rows have the same key (compare returns 0), allowing duplicate-key rows to be treated as correctly ordered.
+- When a leveled compaction strategy decides which level to promote a compacted SSTable to, check whether the result size is strictly smaller than the max SSTable size before promoting, not just equal to it (off-by-one with `<` vs `<=`). A condition `SSTable.getTotalBytes(removed) < maxSSTableSizeInBytes` that uses strict-less-than, causing an SSTable that is exactly `maxSSTableSizeInBytes` bytes to be incorrectly promoted rather than kept at L0.
+- When calling `MessageDigest.update(byte[], offset, length)` on a `ByteBuffer`'s backing array, always add `arrayOffset` to the position, since a sliced or wrapped ByteBuffer's `position` is relative to the view, not the underlying array. `messageDigest.update(block.array, block.position, block.remaining)` — missing `block.arrayOffset` in the offset argument, causing the digest to hash bytes starting at the wrong position in the backing array.
+- When a range-slice query is meant to "page" from a specific start column (exclusive), verify that the filter's column-counting logic treats the start column as already-consumed rather than counting it as part of the requested limit; otherwise the first page of results will be off-by-one. `ExtendedFilter.create(cfs, filter, clause, maxResults, maxIsColumns)` is called without an `isPaging` flag — the filter counts the start column (used for continuation) as one of the `maxResults`, so each subsequent page returns one fewer result than requested, and the final page may appear prematurely.
+- When a pagination loop skips the first entry of a page and decrements `columnsRead`, the loop will incorrectly believe the page is not full and terminate early, dropping valid rows that were never returned. A skip-and-continue branch that decrements a "columns read" counter at the same time it advances the iterator — if skipping is not supposed to consume the page budget, the decrement is wrong.
+- When a retry-count formula divides by a live-count variable that could legitimately reach zero (e.g. after tombstone filtering), guard with a zero check before dividing. `int retryCount = ((count * count) / liveColumnsInRow) + 1;` — division by `liveColumnsInRow` with no guard; when all fetched columns are tombstones the variable is 0, causing `ArithmeticException`.
+- When paginating through a slice and using the last column of one page as the start of the next, verify that the overlap column is counted exactly once and that the termination condition accounts for a non-full final page. A paging loop adjusts `totalCount--` and `requestedCount++` to compensate for repeated boundary columns, but the logic misidentifies which column is duplicated and fails to terminate early when the last page is smaller than the page size.
+- When computing a numeric estimate by subtracting a `long` from another `long` and accumulating the result into an `int`, check for integer overflow and ensure intermediate computations do not wrap around to negative values. `int n = 0; n += Math.max(0L, bytes - max) / unit` where `bytes - max` can exceed `Integer.MAX_VALUE`; accumulating into an `int` silently overflows to a negative count visible in JMX.
+- When comparing a local deletion time against `gcBefore` (which is `now - gc_grace`), verify whether the boundary should be strict (`<`) or non-strict (`<=`): at gc_grace=0, `gcBefore == now`, and `localDeletionTime == gcBefore` means the tombstone is exactly at the boundary and should not yet be collected. `localDeletionTime <= gcBefore` (or `getLocalDeletionTime <= gcBefore`) used as the condition to discard a tombstone; when gc_grace=0 this prematurely removes tombstones that were just written in the current second.
+- header size miscalculated — When computing the new serialized size after removing entries from a structure that has both a fixed-size body entry and a variable-size header entry per shard type, using the same removal count for both sizes produces an incorrect buffer size when only a subset of removed entries have header records. `int removedHeaderSize = removedShards * HEADER_ELT_LENGTH` where `removedShards` counts all removed shards but only delta-type shards have header entries — non-delta shards should not contribute to `removedHeaderSize`.
+- When converting a binary-search result to an index boundary, handle the case where the negated insertion-point equals zero separately; decrementing zero produces -1, which is interpreted as "not found" and causes an assertion or incorrect empty-range decision. `right = (right + 1) * -1; if (right > 0) right--;` — if binary search returns -1 (not found, insertion point 0), then `right` becomes 0, the condition `right > 0` is false, no decrement happens, and the subsequent `left >= right` comparison (with `left == 0`) produces `0 >= 0` which incorrectly drops the range instead of asserting.
+- When tracking byte offsets within a data file that can exceed 2 GB, verify that accumulator variables are declared as `long`, not `int`; silent integer overflow produces negative or wrap-around offsets that corrupt the column index. `int endPosition = 0, startPosition = -1;` in `ColumnIndexer.serialize` — as column sizes accumulate beyond 2,147,483,647 bytes, `endPosition` overflows to a negative value and the written `IndexInfo` offsets are wrong, corrupting reads for large rows.
+- When implementing a byte-counting wrapper around `DataInput`, ensure each `readXxx` method increments the counter by the actual byte width of the type, and `skipBytes` increments by the actually-skipped count rather than the requested count. `bytesRead += 1` after `source.readChar` (which reads 2 bytes) and `bytesRead += n` after `source.skipBytes(n)` (which may skip fewer than `n` bytes) both corrupt the read-position counter.
+- When computing the number of keys in an SSTable range by index sampling, ensure the range boundary comparison is `left > right` (exclusive empty) rather than `left >= right` (which excludes single-sample ranges), and clamp the result to at least 1 for any non-empty range. `getSampleIndexesForRanges` discards a sample range when `left >= right`, which incorrectly drops a range containing exactly one sample index; downstream, `estimatedKeysForRanges` can then return 0, causing streaming to think a non-empty range has no data.
+- When fetching candidate rows from a secondary index table and the caller's `limit` is 1, fetch at least 2 rows so that paging can skip an initial row that fails additional filter predicates without returning an empty result. Passing `clause.count` (which may be 1) directly as the fetch size to the index table's `QueryFilter`, causing the paging loop to see an empty next-page when the single fetched row did not satisfy all clauses.
+- When checking whether a new file position falls within the current buffer, use a strict `>` comparison against `bufferOffset + validBufferBytes` rather than `>=`, because the byte at `bufferOffset + validBufferBytes` is the first byte of the *next* buffer (not part of the current one) only if it was never written; a position exactly equal to `bufferOffset + validBufferBytes` is still in-bounds during a write. `if (newPosition >= bufferOffset + validBufferBytes || newPosition < bufferOffset)` causes an unnecessary `reBuffer` call when seeking to exactly the end of the current valid buffer region, discarding data that could be appended in place.
+- When implementing a JDBC `ResultSet`, all column-index parameters are 1-based per the JDBC spec; list/array accesses must subtract 1 before indexing into internal 0-based collections. `values.get(index)` is called directly in `getBytes`, `getInt`, `getLong`, `getObject`, and `getString` without the required `index - 1` adjustment, causing off-by-one mismatches and `IndexOutOfBoundsException` for the last column.
+- When a counter should only be incremented when a condition (e.g., iterator successfully added) is true, verify the increment statement is inside the conditional block, not after the closing brace. `sstablesToIterate++` appears one line after the closing brace of the `if (iter.getColumnFamily != null)` block, making it unconditional; it should be inside the block.
+- When checking whether a seek position is at or past end-of-file, use `>= channel.size` instead of `> channel.size` to avoid attempting a buffer fill from the exact EOF position. `if (bufferOffset > channel.size)` misses the case where `bufferOffset == channel.size`, causing `reBuffer` to issue a channel read at the exact EOF position which returns 0 bytes but still incurs system-call overhead.
+- When checking whether a buffer read should return -1 for EOF, use `length > bufferEnd` (strictly greater) rather than `length >= bufferEnd`, otherwise reading the last valid byte in the buffer is falsely treated as EOF. `if (length >= bufferEnd && hitEOF) return -1;` returns -1 when `length == bufferEnd`, but `bufferEnd` is the exclusive upper bound, so the byte at `bufferEnd - 1` is still valid.
+- When read repair is disabled and the recipient endpoint list is trimmed to `blockfor` entries but the messages array is sized to the original (larger) list length, the mismatched sizes cause `ArrayIndexOutOfBoundsException` or messages sent to null endpoints. `Message[] messages = new Message[targets]` where `targets` was set to `handler.blockfor` but `endpoints` still contained more entries — the loop that populates `messages[i]` using `endpoints.get(i)` would read beyond `targets` or vice versa.
+- When `ByteBuffer.get(int index)` is called with a hardcoded index of `0` on a buffer that may have a non-zero `position` (e.g., a slice or post-read buffer), the code reads from the absolute offset 0 in the backing array rather than the logical first byte of the buffer's content. `c.value.get(0) == 1` reads the absolute first byte of the buffer's array, ignoring `position`. The correct call is `c.value.get(c.value.position)` to read the first byte at the current logical start.
+- When constructing a `String` from a `ByteBuffer`'s backing array, if `buffer.arrayOffset` is added to both the `offset` parameter and to the `length` parameter of `new String(array, offset, length, charset)`, the string is constructed with more bytes than intended, reading garbage data from beyond the valid region. `new String(buffer.array, buffer.arrayOffset + offset, length + buffer.arrayOffset, charset)` — `arrayOffset` added to length is wrong; `length` is a count, not an absolute index.
+- When multiplying `int` values to produce a result larger than 2^31-1 (e.g., memsize in MB times 1024*1024), promote to `long` immediately by using a `long` literal (`2L`, `1000L`) as the first operand. `2 * memsize.value * 1024 * 1024` overflows `int` for any memtable size above ~1 GB (memsize > 1024 MB). Similarly, `getMemtableFlushAfterMins * 60 * 1000` overflows for flush periods above ~35 minutes.
+- When constructing a `UUID` from a `ByteBuffer` by reading two `long` values, the second `getLong` call must read at offset `+8`, not at the same position as the first; reading both from the same index produces a UUID where both halves are identical. Both `getLong` calls use `bytes.position+bytes.arrayOffset`, so `mostSigBits == leastSigBits`, producing malformed UUIDs with wrong ordering and comparisons.
+- When searching backward through a `ByteBuffer`'s backing array for a delimiter, use `limit + arrayOffset` as the starting search index, not `position + arrayOffset`; searching from position finds only the beginning of the data, missing the separator entirely. `ArrayUtils.lastIndexOf(joined.array, SEPARATOR.getBytes[0], joined.position+joined.arrayOffset)` searches backwards from the start of the buffer's data. The separator is located somewhere before the end, so searching from the beginning (position) can never find it correctly — the search proceeds from the wrong anchor.
+- When implementing a hash loop over a byte array with a non-zero `offset`, keep the loop variable `i` zero-based (0 to `len_4`) and add `offset` only when indexing into `data[]`; iterating `i` from `offset` to `offset+len_4` while also using `i_4 = i<<2` double-counts the offset. Starting `i` at `offset` and computing `i_4 = i << 2` shifts the entire offset into byte positions. Combined with the constant offsets (+0/+1/+2/+3), this reads far outside the intended block.
+- When filtering commitlog entries to replay, check whether the boundary condition uses `>=` or `>` for the flush position comparison — using `>=` will replay the mutation at the exact flush position that was already applied. `if (finalHeader.isDirty(id) && entryLocation >= finalHeader.getPosition(id))` — the `>=` comparison causes the entry whose position equals the recorded flush position to be replayed, even though the commitlog header records the position of the last successfully flushed entry (meaning that entry was already persisted).
+- When a histogram's `max` method searches for the highest non-empty bucket and returns an offset, verify whether the offset array is left-biased (entry i represents the lower bound of bucket i) or right-biased, and adjust the return index accordingly. `EstimatedHistogram.max` iterates from the highest bucket downward and returns `bucketOffsets[i == 0 ? 0 : i - 1]`, which is the lower bound of the bucket below the one that has data — off by one bucket in the wrong direction.
+- When allocating a buffer to hold Snappy-compressed output, use `Snappy.maxCompressedLength(inputLength)` rather than `inputLength` because compressed output can exceed the input size for small or incompressible data. `compressed = new byte[metadata.chunkLength]` or `new byte[buffer.length]` used as the Snappy output buffer will be too small for chunks where compression produces larger output than the input, causing an `ArrayIndexOutOfBoundsException`.
+- When computing a byte count by multiplying megabytes by 1024 twice, ensure at least one operand is a `long` literal to prevent int overflow before the result is stored in a `long` field. `this.bufferSize = bufferSizeInMB * 1024 * 1024` performs int multiplication that overflows for `bufferSizeInMB >= 2048` even though `bufferSize` is declared `long`. ## Resource leak (78) - **0024** Lambda Capture Allocation in UnfilteredSerializer.deserializeRowBody — When a lambda captures local variables, a new object is allocated per invocation instead of using a cached singleton. In a hot deserialization loop this silently inflates GC pressure without any functional breakage. Review any `Collection.apply` / `forEach` call in a tight loop that captures more than one variable — if an existing context object is available as a parameter, threading state through it avoids the allocation entirely.
+
+## Resource leak (77)
+
+- When a try-block allocates a pooled or closeable resource and the single-exception catch re-throws as a different exception type, exceptions thrown as the target type from callees will escape the catch entirely and bypass cleanup. Always add a broad `catch (Throwable)` (or a parallel catch for each expected exception type) to guard resource release, and add a separate catch for re-thrown checked exception subclasses so that `markSuspect`/cleanup is not skipped by exception-type promotion.
+- Any code that allocates a pooled resource (buffer, connection, file handle) and then calls another method that can throw must wrap the call in try/finally or try/catch to release the resource. Similarly, exception-handler chains that only catch `IOException` but not the domain-specific subclass that wraps it (e.g., `CorruptSSTableException`) will silently skip side-effects like `markSuspect`. During review, scan every catch block that handles I/O exceptions and verify that domain-exception subclasses are also handled.
+- When a cache holds the only reference to a resource that is also used by long-lived consumers (e.g., open file readers), an eviction callback that unconditionally frees the resource is a use-after-free waiting to happen. The pattern to look for is: cache stores object → eviction listener calls `close`/`free` → consumers hold a bare object reference with no counted handle. The correct pattern is reference counting: the cache holds one share, each consumer acquires an additional share at open time and releases it at close time, and the resource is freed only when all shares are released.
+- When a superclass changes the signature of a method that subclasses rely on for resource cleanup (acquire/release, open/close), the old override silently becomes a new, unreachable method rather than a compile error. The `@Override` annotation would have caught this immediately; its absence on the old method was the missing safeguard. During review, verify that every resource-release path is annotated with `@Override` so that signature drift is a compile-time failure rather than a silent resource leak.
+- A `checkpoint` call that throws a checked/unchecked exception inside a `finally` block suppresses the original exception and prevents subsequent cleanup code from running. During review, any `finally { someMethod; }` pattern where `someMethod` itself can throw should be treated with suspicion; the cleanup logic that follows it will be unreachable.
+- Whenever a Netty `ByteBuf.nioBuffer` result is stored as a long-lived handle that will later be returned to an off-heap pool, verify that the returned `ByteBuffer` is the pool-tracked object and not a derived view. Slicing, duplicating, or compositing operations on Netty buffers produce new `ByteBuffer` objects whose `attachment` chain does not directly point to the pool's `Chunk`; passing such objects to `BufferPool.put` causes a silent no-op release and a permanent off-heap leak. The fix is to walk the attachment chain (as `unwrapBufferPoolManagedBuffer` does) to recover the original chunk-managed buffer before storing the reference.
+- When a resource owner is submitted to an executor and its lifecycle is managed through callbacks, the resource must be closed in the callback, not inside the method that runs on the executor. Embedding `close` in a `try/finally` inside the task body is only safe when the caller holds no other reference to the resource and the task is the sole owner of the lifetime. Any time a `SecondaryIndexBuilder` (or similar task) holds file handles and is submitted asynchronously, review that every outcome path (success, failure, cancellation) triggers `close`.
+- Whenever a method acquires multiple `AutoCloseable` or ref-counted resources in sequence, review whether a failure midway through leaves earlier resources uncleaned. The pattern of allocating `A`, then `B`, then `C` with a single `return C` at the end is a classic "stepwise leak" — each step that follows the first can throw, and without a `try/catch` or try-with-resources chain the earlier allocations are abandoned. In Cassandra's SSTable layer, `IndexSummary` and `FileHandle` are reference-counted (`SharedCloseableImpl`) rather than `AutoCloseable`, so try-with-resources is not directly applicable; an explicit `catch (Throwable t)` block with null-guarded cleanup is the required pattern.
+- Any time a map or cache is populated at the start of an operation and is supposed to be cleared at the end, verify that every terminal code path—including the success path—performs the cleanup. It is common to handle the failure case via an exception handler but forget the normal-exit branch.
+- Anywhere a `ThreadLocal<ByteBuffer>` is used for off-heap scratch space, look for capacity-check-and-replace patterns where the old buffer is silently discarded. Off-heap `ByteBuffer` objects must be explicitly cleaned (via `FileUtils.clean` or `Cleaner`) whenever they are replaced, because the JVM will not reclaim direct memory until GC pressure is high enough to finalize the old reference — which may be too late or never occur under steady load.
+- Whenever an `Object[]` (or other concrete collection) is passed through an API that only accepts `Iterable` or `Iterator`, look for the wrapping step — `Arrays.asList`, `Collections.singleton`, etc. If the wrapping is done on a hot path, consider adding an overload that accepts the concrete type directly via a strategy object, eliminating the allocation without duplicating the core algorithm.
+- Whenever a direct `ByteBuffer` field is reassigned inside a conditional block, check whether `FileUtils.clean` (or the equivalent `sun.misc.Cleaner` invocation) is called on the old buffer first. The pattern `if (buf.capacity < needed) buf = allocate(needed)` without a preceding `clean(buf)` is a reliable indicator of a direct buffer leak.
+- When a method receives an `AutoCloseable` or iterator parameter and wraps it in try-with-resources, check whether the caller also closes it. Ownership of `AutoCloseable` objects must be documented (or enforced via type system). Any method that takes an iterator by parameter and closes it without a clear ownership contract is a candidate for double-close bugs.
+- Any `FutureCallback` (Guava) or `ListenableFuture` listener that allocates a resource (thread pool, file handle, lock) before submitting the future must shut down that resource in every callback branch, ideally using a `finally` block. A code review heuristic: search for `executor.shutdown` inside a `FutureCallback.onSuccess` and confirm a matching call exists in `onFailure` and in a `finally` block. Asymmetric resource release across success and failure callbacks is a textbook resource-leak pattern.
+- Whenever a `ListenableFutureTask` (or any `Runnable` that carries its own result/exception container) is handed to an executor, using `submit` will re-wrap it and shadow the internal future, breaking any attached listeners. The safe pattern is `execute`, which runs the `Runnable` directly. Reviewers should treat any `executor.submit(futureTask)` call as a bug candidate and verify whether the returned `Future` from `submit` is the same object as the input.
+- Any `CountDownLatch.countDown` call that is not inside a `finally` block (or equivalent) is a latent hang: any exception between entry and that line leaves the latch permanently under-counted. Review every usage of countdown/semaphore release to confirm it is protected by `finally`.
+- When a resource pair (reference count + lifecycle transaction) must be released together, releasing only one on error paths creates a ref leak. Review every early-exit and exception path from the point resources are acquired to confirm both halves of the pair are always released in tandem.
+- Whenever a collection of `Closeable` resources is built in a loop, any exception thrown partway through the loop leaves the already-created resources open. The pattern `list.add(openResource)` inside a loop must be wrapped in a try/catch that closes all list members before rethrowing.
+- In connection-management threads, the stop flag must be visible to the run loop before side effects like clearing the queue take place. A `while(true)` loop that reads a stop flag only at an inner break rather than the outer condition is a classic thread-leak pattern. Whenever a failed-connection branch clears a shared queue, the companion in-flight local list must also be cleared to avoid replaying the same messages on the next iteration.
+- Any code path that calls `SSTableReader.open*` has an implicit obligation to either add the reader to a container that will close it, or explicitly call `selfRef.release`. Review every early-exit (`continue`, `return`, exception-catch) in loops that open SSTables and confirm the ref is released before leaving scope. Static analysis rules that flag acquired `Ref<>` objects which escape neither a `try-with-resources` block nor an explicit `release` call would catch this pattern mechanically.
+- Whenever a resource is allocated inside a `try` block and the variable is not visible in the `catch`/`finally` block, a leak path exists for every exception thrown between allocation and successful return. The fix pattern — declare the variable before the `try`, null-check before closing in `catch` — is standard; prefer try-with-resources where applicable.
+- Any code that creates a network resource and then performs further configuration (cipher suites, protocols, bind addresses) without a `finally` or try-with-resources guard leaks the resource on configuration failure. Audit every `createSocket`/`createServerSocket` call: if the configuration happens outside a catch that closes the socket, it is a leak.
+- Any `isShutdown` guard followed by `submit` on a different line is a TOCTOU race. The correct pattern is to attempt the submit and catch `RejectedExecutionException`. Also watch for `return`-less branches that call `Futures.immediateCancelledFuture` — if the return value is not used, the guard has no effect. Finally, audit drain/shutdown sequences for ordering: tasks that update system state must be stopped before the system tables are flushed.
+- Any class that wraps an OS resource (file descriptor, socket, channel) and exposes a `close` method without implementing `AutoCloseable` is a resource-leak hazard. Search for classes that call `NativeLibrary.tryOpenDirectory` or similar low-level open calls and verify that every call-site either uses try-with-resources or calls `close` in a `finally` block. The tell-tale sign here was that `removeUnfinishedLeftovers` did use a `finally` block but `classifyFiles` did not, so normal startup cleanup was safe while the more-frequent snapshot and compaction paths leaked.
+- Whenever a resource is allocated before a configuration call that can itself throw a checked exception, every exception path between allocation and the final `return` must either close/release the resource or hand it to a try-with-resources block. In this case the `ServerSocket` was created outside any `try` statement, so the single-line `setReuseAddress` call was the only opportunity for a leak — easy to miss because `SocketException` from a socket option setter is rare in practice.
+- Long-lived session objects that cache `SSTableReader` instances by identity are a resource leak risk. The DataTracker/LifecycleTransaction model is designed so that SSTable references should be held only for the duration of a specific operation and then released. Any collection that accumulates `SSTableReader` objects across multiple asynchronous phases (prepare, validate, anti-compact) should instead store stable identifiers (filenames, descriptors) and resolve them to live readers at the point of use.
+- Any accumulation pattern of the form `result = Iterables.concat(result, next)` inside a loop is a stack-depth time bomb. The `concat(a, b)` overload creates a node whose iterator delegates to `a` first then `b`; chaining n times produces n levels of delegation. The safe pattern is to collect all sources into a list and call `Iterables.concat(list)` exactly once outside the loop.
+- Index builders that accumulate all data in a single in-memory structure before writing are vulnerable to OOM on large SSTables. During review, look for data structures that grow unboundedly proportional to SSTable size (e.g., a `TreeMap` keyed on every indexed term) and verify the builder has a flush/spill mechanism. Also check that on-disk merge paths stream data rather than loading all segments into the heap simultaneously.
+- Any time a reference-counted object is released before a second reference is acquired from the same object, there is a window where the underlying resource may be destroyed. Look for patterns where `release` / `close` on a view or snapshot is called before `tryRef` / `ref` on members of that snapshot — especially in non-synchronized blocks where concurrent compaction or streaming can reclaim the file.
+- When a factory method opens a low-level resource (channel, stream) and immediately wraps it in a higher-level closeable that owns it, static analysis tools often flag the inner resource as leaked because they cannot follow ownership-transfer semantics through constructor arguments. Before suppressing the warning, confirm that (a) the wrapper's `close` genuinely closes the inner resource, (b) the factory has no early-exit code path that could leave the inner resource open, and (c) the suppression annotation is accompanied by a comment explaining the ownership contract. If any early-exit path exists, real cleanup code should be added.
+- This is the same pattern as applied to the same `OutboundTcpConnectionPool.newSocket` method; commit 0956 added the annotation to the two-argument overload in a separate commit. When reviewing NIO code that wraps a `SocketChannel` in a `Socket.getChannel`-based adapter, verify that all paths through the factory either close on error or document transitive ownership before suppressing leak warnings.
+- Any inner class or lambda passed to a scheduled executor that is also stored back as a field on the enclosing object creates a reference cycle. During review, check whether `ScheduledFuture` (or any `Future`) fields are held strongly by objects that the submitted `Runnable`/`Callable` also references; if so, either the future should be held weakly or the runnable should not close over the owning object. The `Ref`-based leak detector is particularly sensitive to such cycles, so spurious leak reports are a signal to look for strong-cycle closure patterns.
+- Any class that spawns a background thread must store a reference to it and provide a `close` / `stop` method that interrupts or joins it. During review, look for `new Thread(...).start` where the result is discarded and no corresponding lifecycle method exists. Also verify that every caller of a closeable stream wraps it in try-with-resources or has a `finally { stream.close; }` block.
+- In any catch block that performs cleanup before re-throwing, every cleanup call that can itself throw must be wrapped in a nested try/catch. If the outer exception is discarded in favour of the cleanup exception, the original failure context is lost and retry logic — which may only handle specific exception types — will behave incorrectly. During review, look for naked cleanup calls (like `abort`, `close`, `rollback`) directly in catch blocks without their own error handling.
+- When a message verb handler encounters an error condition, look for any code path that throws an exception or returns without sending a reply. Repair protocols are driven by request/response pairs; if the coordinator sends a message and receives neither a success nor a failure reply, it will block forever. Any early-exit path in a handler must either send an explicit failure response or be guaranteed to propagate through a higher-level exception handler that does so.
+- Whenever an iterator yields `AutoCloseable` items, every call to `next` must be paired with a close, typically via try-with-resources. A bare `iter.next` passed directly to another method is a signal that the resource may not be closed on all paths. In paging scenarios this is especially harmful because the pager uses the close signal to release the current page and prepare the next.
+- `ConcurrentLinkedQueue.remove(Object)` is documented to be O(n) and leaves internal node references in place until a future traversal; using it as a membership set for objects that are frequently added and removed is a common source of memory leaks. Code that populates a `ConcurrentLinkedQueue` with `add` and then cleans it with `remove(Object)` in a hot path should be flagged during review.
+- When a class holds both a raw object reference and a reference-counted `Ref` to the same object, the raw pointer is typically unnecessary and creates a dual-ownership confusion. Code review should flag any `Ref` field that is accompanied by a naked field of the same underlying type, then verify that every exit path (normal completion, cancellation, exception) calls `ref.release` exactly once.
+- No Buffer Pooling and Swapped allocate/allocateDirect Flags — When refactoring resource-pooled readers, verify that every construction path passes a non-null owner to the pool mechanism; passing `null` is a common shortcut that silently disables pooling and is easy to miss in review. Additionally, boolean-flag methods like `useDirectBuffer` that gate `allocate` vs `allocateDirect` are high-risk for inversion bugs — the two methods look similar and are easy to transpose. A reviewer should confirm that the semantics of the flag name match the branch taken.
+- When a class wraps a resource (thread pool, connection, file handle) and exposes both a "record error" path and a "shutdown + record error" path, verify that the failure handler always calls the latter. `setException`/`setResult` on a Future base class is rarely the right call in a resource-owning subclass; look for a `shutdown`, `close`, or `forceShutdown` wrapper.
+- Whenever a resource-close sequence contains a user-supplied callback (`runOnClose`, `onClose`, `afterClose`), check that the callback fires *before* the resources it is permitted to touch are released. The correct pattern is to close resources in dependency order: close what the callback needs last, not first. Additionally, any native-memory wrapper that releases a pointer should zero the pointer field immediately to prevent use-after-free access through a dangling reference.
+- Any producer that writes to a bounded blocking queue and relies on a separate consumer thread to drain it must guard against the consumer dying unexpectedly. Using an unbounded `put` or `offer` without a timeout is safe only if the consumer is guaranteed to be alive. Reviewers should check that every queue-write path either uses a timed offer with a liveness check or can tolerate an infinite wait.
+- Cleanup loops that release multiple resources must not short-circuit on the first failure; every resource must get a release attempt regardless of what the earlier ones do. A simple review heuristic: any `for` loop over a collection of reference-counted or closeable objects where the loop body is not wrapped in try/catch is a candidate for this defect. The pattern of "collect first exception, suppress the rest, rethrow at the end" is the standard idiom to fix it.
+- When a parameterised overload is introduced to fix a resource leak, check every call site that uses the old no-arg form. Merge conflicts often resolve to the no-arg form because it existed in both sides of the merge; a reviewer should verify that all call sites that should pass `true` (or any non-default argument) actually do so after a merge is resolved.
+- Any time an exception is thrown from a constructor or an initialisation method on a ref-counted object, check that all previously acquired references are released before the throw. Similarly, when a `close` method is introduced with an overloaded boolean parameter, audit all call sites: the default (false) overload must not silently skip cleanup that some callers need.
+- Review every exit path from a constructor or init method on a ref-counted resource; any exception thrown before all resources are properly handed off must be preceded by a release. When adding a boolean parameter to a `close` method, ensure the default overload delegates correctly and that every call site is audited for which semantics it requires.
+- Any component that holds a long-lived reference to an `SSTableReader` and performs I/O operations against it must bracket the lifetime with `acquireReference` / `releaseReference`. Reviewers should audit every constructor or factory method that accepts an `SSTableReader` and check whether reference acquisition appears before the first I/O call and release appears in `close` or a `finally` block. The test suite update, which wraps scanners in try-with-resources, is also a reliable signal that the original code lacked proper cleanup.
+- Whenever a class that starts a background periodic task (timer, scheduled executor, etc.) can be instantiated in multiple contexts — normal operation vs. temporary/incremental variants — there must be an explicit guard ensuring the background task is only started for the canonical lifetime case. A boolean flag like the old `isOpenEarly` is also a code smell: replacing it with an enum forces callers to consider all cases and makes it easier to add new open modes safely.
+- When building a collection of `Closeable` resources in a loop, any exception mid-loop must close the resources already acquired before propagating. The pattern "accumulate then return" without a try/catch around the loop is a reliable indicator of a potential resource leak.
+- Causes Netty to Block — In Netty pipelines, every `Frame` (or equivalent pooled buffer) that enters the pipeline needs exactly one release after the write is done. When error and success paths use different write mechanisms, check that both paths perform the matching release — and that neither releases the buffer before the write completes.
+- Any class that allocates a reference-counted or pooled resource must follow a strict acquire-then-guard pattern: wrap every operation that could throw between acquisition and handoff in a try/catch that releases the resource on the exceptional path. Code review should trace every allocation site to its matching release, including non-obvious failure branches like `map.put` throwing.
+- Any code that calls `getSSTables` and then uses the returned readers past a potential yield point needs a matching `markCurrentSSTablesReferenced` + `releaseReferences` pair. Code reviews should flag bare `getSSTables` calls in methods that perform I/O or block.
+- A boolean "replaced" flag cannot capture which specific resources were shared with the replacement. Whenever a class reuses some but not all resources from a predecessor, each resource must carry its own close guard (or share a reference count). Look for resource-owning classes with a single "is replaced" boolean that governs all cleanup paths uniformly.
+- Any resource acquired at task-start should be released in all exit paths: normal completion, error, and cancellation. When `releaseReference` (or any analogous cleanup) lives only inside a success-path method, failures silently leak. Review code where a try/finally or explicit abort path is absent from transfer or producer tasks that hold external references.
+- Resource cleanup listeners should be registered at the same point the resource is acquired, not in a constructor that runs before the resource is fully committed. Review any class that registers failure or lifecycle listeners in a constructor: if object creation can succeed while the underlying resource acquisition can fail separately, the listeners should be registered alongside the resource, not at construction time.
+- Whenever multiple `Closeable` resources are opened in a method, each one must appear in the `finally` block (or a try-with-resources). A common oversight is adding a second resource after the first and forgetting to add a matching close call.
+- Every metric registered in a constructor or `init` method must have a matching `removeMetric` call in the corresponding `release`/`close` method. A straightforward audit is to diff the set of `createMetricName` strings at registration time against those at release time—any asymmetry is a leak. Additionally, metric names must be copied exactly; a typo causes the removal to silently no-op.
+- Any time an object that holds a resource (socket, file handle, thread) is constructed before a `putIfAbsent` or `computeIfAbsent` call, check that the losing race participant disposes of the resource on conflict. The type signature of `putIfAbsent` returning the previous value is the signal — that return value must never be ignored.
+- Whenever an SSTableReader is opened outside the normal `DataTracker` lifecycle (e.g. from a snapshot directory), it bypasses the reference-counting system and must be explicitly closed. Look for code that calls `releaseReferences` on readers that were never registered with a tracker—those calls are silently ineffective and mask a resource leak.
+- In any session/connection/repair protocol where a coordinator waits for a completion callback, every exception path in the worker must call the failure notification before rethrowing. If only a subset of exception types (e.g., `IOException`) is handled, unchecked exceptions will silently strand the coordinator. Review try-catch blocks in streaming and repair workers for missing `RuntimeException` handlers.
+- Inline field initializers on mutable collections are a red flag when any constructor delegates to another that re-assigns the same field. Prefer `final` fields with no initializer and assign only inside constructors to prevent the redundant allocation pattern.
+- When a constructor's only job in the non-intersecting case is to set `exhausted = true` after allocating file handles, the intersection check should be lifted to the call site. Constructors that can produce a logically empty/no-op object from shared resources are candidates for refactoring into factory methods that can return a cheaper sentinel.
+- Whenever serialization goes through an intermediate `byte[]` before being written to a final destination, look for an opportunity to serialize directly to the destination stream/buffer. Intermediate byte arrays waste memory and increase GC frequency; the pattern `serialize -> byte[] -> buffer.put(bytes)` should be replaced with streaming serialization.
+- Whenever an iterator of closeable objects is filtered, confirm that filtered-out items are explicitly closed. A filter that silently skips objects without releasing their resources is a resource leak. Look for patterns where `Iterators.filter` or stream `.filter` is applied to objects implementing `Closeable`.
+- After a merge, inspect any `close` overrides that changed signature. A `close` that calls `source.close` without wrapping the checked exception violates the parent contract and may result in swallowed I/O errors or compilation failures. Cassandra consistently uses `FSReadError`/`FSWriteError` as the unchecked wrappers for I/O exceptions in close paths.
+- When a `ThreadPoolExecutor` stage is created with a `LinkedBlockingQueue` that has no capacity bound, check whether the workload feeding that stage can produce tasks faster than they are consumed — an unbounded queue hides back-pressure, exhausts heap, and causes GC storms. A stage is initialised as `multiThreadedConfigurableStage(Stage.REPLICATE_ON_WRITE, getConcurrentReplicators)` where the overload used defaults to an unbounded `LinkedBlockingQueue`, while other high-traffic stages (MUTATION, READ) are also unbounded — one of them being `REPLICATE_ON_WRITE` which fires once per CL.ONE write.
+- When an `SSTableWriter` is created inside a method that can throw `IOException`, verify that a `try/catch` calls `writer.abort` on failure — without this, a partially written SSTable is left on disk and may be streamed as a valid (but corrupt) file. `SSTableWriter writer = getWriter; writer.closeAndOpenReader;` without a surrounding try/catch means any `IOException` during write leaves the writer open and its incomplete files on disk, which the bulk loader will then attempt to stream to the cluster.
+- When `StreamOut.transferSSTables` is called, verify that `SSTableReader.acquireReferences` has been called beforehand, because the streaming code assumes references are held and will dereference them during transfer. `StreamOut.transferSSTables(session, sstables, ranges, ...)` called directly without a preceding `SSTableReader.acquireReferences(sstables)` — the streaming path holds and releases a reference per SSTable, so calling it without acquiring causes a negative reference count and the reader can be compacted-away while streaming is in progress.
+- When `new FileInputStream(path)` is passed directly to `KeyStore.load` inside a `try` block that lacks a `finally` close, each call to `createSSLContext` permanently leaks one or two file descriptors. A `FileInputStream` is constructed inline as an argument to a method call (`ts.load(new FileInputStream(...), ...)`) without being assigned to a variable, making it impossible to close in a `finally` block.
+- When a streaming session object holds reference-counted SSTable handles but has no mechanism to detect that the remote peer has gone down, the references are never released and the SSTables cannot be deleted or compacted. A streaming session class does not implement `IFailureDetectionEventListener` or `IEndpointStateChangeSubscriber`; its `close` method is only reachable via normal completion, leaving no path to release SSTable references on peer failure.
+- When SSTable files are passed to a streaming session, always acquire a reference-counted snapshot via `markCurrentSSTablesReferenced` rather than the raw `getSSTables` collection, which can be mutated by concurrent compaction. Streaming code calls `cfstore.getSSTables` and passes the result to `transferSSTables`, but `getSSTables` returns an unguarded snapshot; without reference counting, concurrent compaction can delete those files before the stream completes.
+- When a long-lived map uses object instances as keys and those objects can be dropped at runtime (e.g. ColumnFamilyStore after a drop), use weak-key references so the map doesn't prevent GC of the dropped objects. `private Map<ColumnFamilyStore, Integer> estimatedCompactions = new NonBlockingHashMap<>` holds strong references to `ColumnFamilyStore` keys that may have been dropped, preventing garbage collection of the entire CFS object graph.
+- When a loop opens an `IColumnIterator` inside a try/catch but closes it only in the happy path, flag the missing `finally` block as a resource leak. An `IColumnIterator columns` is obtained from `filter.getSSTableColumnIterator(reader)` but `columns.close` only appears in the success path; exceptions bypass the close call.
+- When a streaming session is created unconditionally but files are only added conditionally, verify there is an else branch that closes the session when no files are added, to avoid a session leak that blocks the caller. `StreamOut.transferRanges` created a `StreamSession`, called `session.begin` only inside `if (pending.size > 0)`, but had no `else` branch to close the session when there was nothing to stream, leaving the session dangling and the caller waiting forever.
+- When a constructor opens a file and returns early if the key is not found, check that `this.file` is assigned before the early return so the `close` method has access to the handle; otherwise the handle opened before the return leaks. `SSTableSliceIterator` assigned `this.file = file` at the top of the constructor before the null check. When `file` was null (key not found), `this.file` was set to null before a new file handle was opened, and then an early `return` path failed to set `this.file` to the newly opened handle. The fd opened by `ssTable.getFileDataInput(...)` was then not referenced by the object and could not be closed.
+- When a class conditionally creates a resource (file handle) only when a parameter is null, but the `closeFileWhenDone` flag is never set in that branch, the file is never closed. `closeFileWhenDone` defaults to `false`; the branch that creates a new `FileDataInput` forgets to set it to `true`, so `close` skips closing the file the iterator itself opened.
+- When a `try/finally` block closes resources in the `finally` clause and then the return statement follows *outside* the try block, the iterators are closed before the caller can consume them. Code that calls `FileUtils.closeQuietly(iter)` in a `finally` block and then returns a result that wraps or references those same iterators outside the `finally` scope will hand the caller already-closed iterators. ## Silent skip on non-match (38) - **002** Pre-2.1 Snapshot Directories Invisible to SnapshotLoader — Anywhere a regex is applied to a filesystem path: check whether every historical format is covered (or explicitly rejected with a warning). Silent-skip (`if (matcher.find) { ... }` with no `else` warn) on filesystem data makes missing matches invisible. New components in a long-lived codebase often re-implement path parsing without inheriting existing backward-compat logic.
+
+## Silent skip on non-match (38)
+
+- When streaming non-contiguous file sections, confirm that a seek to `section.start` is always executed before any read of that section, for every code path (NIO and non-NIO). Missing a seek in any branch means the second section will begin reading from wherever the previous section left off.
+- Whenever a parser pre-processes input with a regex before handing it to a proper lexer, check whether the regex respects all quoting and escaping contexts. A regex such as `[/][*].*[*][/]` with no awareness of surrounding quotes is a classic "silent mangle" that can delete valid user data without any error message.
+- Lexer rules that use multiple fully-optional groups after a fixed prefix can silently match zero-length tokens, shadowing identifier or keyword rules. During grammar review, enumerate all paths through optional-group sequences and check whether the rule can fire when all optional parts are absent; if so, it will conflict with `IDENT`.
+- When a parser or validator covers only the "true" branch of a two-valued domain and falls back to the negation for everything else, it silently accepts garbage input. Review any code that uses a single positive-match regex to decide a boolean: if the input is not explicitly validated against a negative pattern as well, any typo or unrecognised value will produce the wrong result without surfacing an error to the caller.
+- When a single positive-match regex is used to produce a boolean result, the negative branch is implicitly "everything else", which makes the validator accept arbitrary garbage. Reviewers should look for regexes or conditions that decide a two-valued property and verify that the negative case is explicitly enumerated, not left as a fallthrough.
+- Grammar-driven completion rules must mirror the actual CQL grammar completely; any missing optional clause at the end of a production silently truncates the completion token stream. `ctxt.get_binding` calls without a default argument are fragile: if the binding is absent (common for early-typed tokens) they raise a `KeyError`, which completion handlers typically swallow, producing an empty suggestion list.
+- When a parser tries a set of format patterns in sequence and any non-match silently moves on to the next, check that every plausible input variant—including whitespace-delimited and non-delimited forms of the same token—is covered. Timestamp offset parsing is especially prone to this because RFC 3339, ISO 8601, and common locale formats differ only in whether a space precedes the numeric offset.
+- Any code that feeds a `Range<Token>` directly into an interval-tree or sorted-boundary query without first checking `strictlyWrapsAround` (or calling `unwrap`) is potentially broken for partitioners with wrapping ranges (Murmur3 and Random). Reviewers should look for `sstablesInBounds`, `overlaps`, or `contains` calls that consume a range argument without a wrapping check, especially on user-facing paths like force-compaction or repair.
+- When a new CQL syntax feature is implemented server-side, the `cql3handling.py` grammar rules must be updated in lockstep. Review additions to the CQL grammar (`CqlParser.g`) for any new keywords or clauses and verify that a matching rule appears in the Python grammar in `cql3handling.py`. Absence of a clause in the Python grammar silently prevents completion without any error to the user.
+- When extending a configuration method with a new "explicit" path, verify that the old implicit path (e.g. plain credentials) is still reachable as the default. The pattern `if (!x.isPresent) return absent` is a red flag when the callers may rely on an older, simpler credential mechanism — check whether the fallback should instead delegate to a legacy helper.
+- In CQL3 result-processing code, any `Iterator<CQL3Row>` retrieved from `CQL3RowBuilder.group` should be accompanied by a call to `getStaticRow` before iterating clustering rows. If only `hasNext`/`next` are used, static-column state will be silently ignored. This pattern is especially dangerous for collection operations (list index reads/writes) applied to `static` columns, because no error is thrown—the operation simply sees an empty state and produces incorrect output.
+- When a method scans a composite object (partition → rows → columns) to decide whether an update is needed, look for missing checks at each nesting level. Here the outermost level (partition tombstone) and the innermost level (column data) were handled, but the middle level (row tombstone) was not. Any code path that short-circuits "no update needed" without exhaustively considering all tombstone granularities in Cassandra's data model is a candidate for this class of bug.
+- When a new API path is introduced and the old deprecated path delegates to a shared `RepairOption` builder, check that every option the old path accepted is faithfully forwarded into the builder. A silent "no-op" is especially dangerous here: the operation completes without error but accomplishes nothing. Integration tests should exercise the deprecated JMX entry points directly and verify that a non-empty range set is actually repaired.
+- When adding a new metric to the JMX/metrics layer, check that the corresponding display code in nodetool (or any other consumer of those metrics) is updated in the same commit. A checklist of displayed fields compared to exposed metrics helps catch these omissions during review.
+- When a method has multiple execution paths that share a common postcondition (e.g., "every sstable read must be metered"), check that each branch fulfills it independently. A quick grep for the metering call across all branches of the same method reveals asymmetric coverage. Code reviews should treat instrumentation calls (metrics, tracing, rate tracking) as correctness requirements, not optional decoration, and verify they appear uniformly across all exit paths.
+- In cqlsh grammar rules, every token or alternation that represents a keyword the user must type should carry a named label so the completion framework can advance its state machine past that keyword. An unnamed inline alternation between quoted keywords is a clear indicator that completion will stall at that position.
+- When a class has parallel min/max (or similar paired) configuration fields, verify that both are forwarded wherever one is. A lone `nativeMin*` application with no corresponding `nativeMax*` in the same block is a strong signal that the max case was forgotten.
+- A helper method that logs a warning and `continue`s on an invalid input makes failures invisible to callers. Look for patterns where an error condition produces an empty collection without surfacing any exception or status code, especially in paths that then loop over that collection.
+- When iterating over a collection to find a matching element, using `break` on a non-match condition is almost always wrong — it abandons the search instead of moving to the next candidate. Any loop of the form "for each X, if some precondition fails → break" should be scrutinised for whether `continue` was intended.
+- In any iterator that reads ahead from a stream, ensure that a record which fails a filter predicate is either put back or kept for re-evaluation rather than silently discarded. Whenever a loop `continue`s after reading but before storing, ask whether the read item should have been retained for the next predicate check.
+- Any streaming or scanning code that accepts a `List<Range<Token>>` from an external caller should call `Range.normalize` before iterating. The silent-skip symptom — no error, but less data than expected on the destination — is a strong indicator that wrapped ranges were not handled.
+- When a Hadoop record reader or writer initialises schema metadata from a CQL system table, it should guard against the empty-result case and provide a fallback for legacy Thrift column families. Any code that silently continues after receiving an unexpectedly empty schema list risks producing wrong results downstream.
+- When notifying external observers about node liveness, verify that the notification is tied to the actual liveness event (`onAlive`) rather than to a state-machine transition (`handleStateNormal`) that may fire at times unrelated to the node becoming reachable.
+- When a method's return value is the same type as an argument it mutates, callers may silently ignore the return value while believing the mutation was sufficient. Prefer void mutation methods or pure factory methods; avoid methods that both mutate and return the same object.
+- When adding a new network verb, verify that its serializer is registered in the `MessagingService` verb-to-serializer map. A missing entry is not a compile-time error and will only manifest at runtime when the verb is exercised over the network.
+- When overriding `afterExecute` to log exceptions, check `(r instanceof Future<?>) && ((Future<?>)r).isDone` rather than `r instanceof FutureTask<?>`, because `ScheduledFutureTask` wraps `FutureTask` and calling `get` on a non-done scheduled task blocks indefinitely. `if (r instanceof FutureTask<?>) { ((FutureTask<?>)r).get; }` in `afterExecute` will block if the task is a repeating `ScheduledFutureTask` that is not yet done, hiding the exception and freezing the thread.
+- An early-return guard that silences a whole branch of logic should be reviewed to ensure that inputs intended for that branch are either empty or explicitly rejected. When disabling a feature via a null/empty sentinel, validate that no configuration for the disabled feature was provided.
+- When reviewing a property-dispatch block that handles a known set of configuration keys, verify that every key the parser accepts also has a corresponding handler in the apply method. Missing entries cause silent no-ops that are difficult to diagnose.
+- A `break` inside a loop that is supposed to collect all matching items into a list is a red flag. The pattern "add one item then break" is only correct when you want the first match, not all matches. When multiple list columns in a single statement require a read, breaking early leaves subsequent columns in a stale state.
+- When an optimization skips processing of an SSTable based on a range check (e.g., "skip if token range doesn't intersect local ranges"), verify that the skip is only valid when there are no secondary indexes that also need the row data processed. A range-intersection early-exit that calls `cfs.replaceCompactedSSTables(...)` and `continue` before checking `indexedColumns`, causing indexed columns to have stale index entries for data that no longer belongs to this node.
+- When a builder-pattern DDL statement parses options into fields, verify that every parsed field is actually forwarded to the builder call that constructs the final metadata object. A property (e.g., `compactionStrategyClass`) is parsed and stored in a local field during `validate` but the builder call in `getCFMetaData` never passes that field, silently falling back to the default.
+- When a new endpoint is first seen in gossip and its state is not ALIVE, if `FailureDetector.report` is never called for it, the failure detector has no arrival samples and will permanently consider the node dead. A code path handling "new node" in gossip state processing has only a comment but no `FailureDetector.instance.report(ep)` call before delegating to `handleMajorStateChange`.
+- When a verb handler applies a mutation but never sends a reply back to the coordinator, any read-repair path that expects an acknowledgment will time out waiting forever. A `VerbHandler.doVerb` implementation that deserializes and applies a mutation with no `MessagingService.instance.sendReply(...)` call — the handler silently succeeds with no response.
+- When a network write method catches `IOException` and rethrows it as an unchecked `RuntimeException`, the caller cannot distinguish a transient IO failure from a programming error and cannot trigger reconnect or retry logic. An `IOException` in a serialization method is caught and rethrown as `new RuntimeException(e)`, hiding the original exception type from callers that handle `IOException` to initiate reconnection.
+- When constructing an updated schema object from an existing one, explicitly pass every mutable field — including boolean flags like `durable_writes` — to the constructor rather than relying on defaults; and use generated setters rather than direct field assignment so the Thrift "isSet" tracking is updated. `UpdateKeyspace` creates `newKsm` with `new KSMetaData(ksm.name, ksm.strategyClass, ksm.strategyOptions, oldKsm.cfMetaData...)` without passing `ksm.isDurableWrites`, silently resetting `durable_writes` to its default; separately, `KSMetaData.toThrift` uses `ksdef.durable_writes = ...` instead of `ksdef.setDurable_writes(...)`, leaving the "isSet" bit unset.
+- When an abstract `init` method is implemented as a no-op in a concrete subclass that relies on the initialized state to route data, verify the implementation actually populates required mappings or the caller will silently send to no endpoints. The `SSTableLoader.Client` anonymous inner class used for JMX-triggered bulk loading overrides `init` with an empty body, so `addRangeForEndpoint` is never called and the loader has no idea where to stream SSTable data.
+- When an `Iterator.next` implementation catches a checked exception internally, it must either rethrow it wrapped in an unchecked exception or propagate it; returning `null` silently hides I/O errors from callers. `catch (IOException e) { return null; }` in `ColumnIterator.next` swallows the exception and returns `null` as if it were a valid column, masking read failures.
+- When a hinted-handoff hint-routing loop finds no suitable live alternate endpoint, check whether it silently discards the hint instead of falling back to a local store. `getHintedMapForEndpoints` logs a warning "Unable to find a live Endpoint" and adds nothing to the map when all candidate alternate endpoints are already used, causing the hint to be silently dropped rather than stored locally. ## Missing override of default method (37) - **001** TTLed MV Row Re-appears After Cursor Compaction — `default` returning a constant is safe only for the immutable base case. Any `Reusable*`/`Mutable*` subclass that deserializes external state with sentinel values needs to override it. Promoting `default` → `abstract` forces the audit at compile time.
+
+## Missing override of default method (36)
+
+- When a `default` method in an abstract base class performs work directly on the calling thread without any thread-pool dispatch, subclasses that accumulate large backlogs of work are vulnerable to stack overflow. Any time a default base-class `executor` or `execute` method simply calls the callback inline, check whether high-cardinality replay or bulk initialization paths can exhaust the stack.
+- When a class hierarchy introduces a generic accessor-parameterized API alongside an existing concrete-type API, verify that the abstract/interface boundary is placed on the generic form so subclasses cannot accidentally implement only the legacy overload. Every call site should be audited to ensure it passes the accessor it actually has rather than relying on a default.
+- When a class exposes final fields or private factories that are read directly inside methods used in data-structures (like `Comparator`), mock-based tests cannot stub them. Review any `compareTo` / `Comparator` implementation that dereferences instance fields directly rather than going through an accessor: any test that mocks the class will silently use `null` or a zero-initialized value, producing incorrect ordering or NPEs that only manifest under Mockito-instrumented code paths.
+- When a class stores data off-heap and overrides accessors like `get(i)` to read from native memory, it should also override all size/length query methods that the parent implements in terms of those accessors; failing to do so means the "fast path" size query silently falls back to the "slow path" that allocates heap objects. During review, for every off-heap class, check that every method whose default implementation materialises heap data is either overridden with a direct native read or explicitly documented as intentionally using the slow path.
+- In type hierarchies where a predicate (e.g., `referencesDuration`, `isFrozen`, `isMultiCell`) must be propagated recursively through container and wrapper types, every non-leaf type class must either delegate to its `subTypes` loop or be explicitly overridden. Auditing all overrides of such predicates for absent `subTypes` recursion—especially in `ReversedType`—catches this pattern.
+- Whenever a composite `CQL3Type.Raw` subclass wraps another raw type (e.g. `Vector` wrapping its element type, `List` wrapping its value type), every method that must recurse into child types — `referencesUserType`, `referencesDuration`, `udts`, etc. — must be explicitly overridden to delegate to the child. Missing any one of these means the outer container is treated as opaque for that property, silently hiding nested type dependencies from the schema loader.
+- Every concrete `AbstractType` subclass that represents a composite (vector, tuple, UDT) must override `getMaskedValue` to produce a structurally valid composite value. If the base implementation returns a scalar zero/null buffer, the composite serializer will reject it during validation. Review all composite type classes and confirm the method is overridden and that its return value passes `type.validate`.
+- When a concrete subclass extends a base class that has a `sharedCopy` / `clone` / copy-constructor pattern, and the subclass adds new fields, a reviewer should verify that the subclass overrides every copy-producing method; failing to do so silently produces a truncated copy that is typed as the base class, losing subclass invariants. Similarly, any magic sentinel value passed to a builder method (here `0` vs. `-1`) should be expressed as a named constant — a bare `0` that is supposed to mean "no override" but is actually ignored by the "if <= 0, ignore" guard is impossible to distinguish from an intentional zero.
+- Every method intended to override a superclass or interface method should carry `@Override`; the compiler then catches name mismatches immediately. During merges that rename interface methods, check all implementing classes for stale method names. A static analysis pass that flags non-`@Override` public methods whose signature matches a supertype method (modulo name) would surface this class of bug.
+- When implementing an interface callback for cleanup or finalization logic, verify the exact method name against the interface declaration — especially when interfaces have similarly-named methods (`onClose`, `onPartitionClose`, `close`). The compiler will not warn about an `@Override` annotation if the parent class also has a method of the same name through a different inheritance path. A test that asserts the secondary index CFS is empty after deleting indexed rows would catch this immediately.
+- Whenever a composite appender class (one that wraps or delegates to other appenders) does not override `stop`, check whether the parent's `stop` actually tears down the children in the right order. The pattern to look for is: a class that holds references to child `Appender` objects, calls `addAppender` / `detachAndStopAllAppenders` elsewhere, but has no `stop` override. On shutdown, child appenders may still have buffered data that will be lost once the parent marks itself stopped.
+- When a method that should reflect the *current* state of a mutable data structure instead returns a schema-level or construction-time constant, the comment "we don't really know" is a strong signal that the value is a placeholder rather than a genuine answer. Review every place the field is set and ask whether it is updated on every mutating path; if writes to the field and writes to the underlying data are not co-located in a single atomic unit (here, the `Holder` record), the two can diverge.
+- When a class wraps a set of delegate objects and inherits default behaviour from a base class, any method that modifies state on `this` without forwarding to the delegates is a candidate for a missing propagation bug. Look for `enable`/`disable`, `start`/`stop`, or similar lifecycle pairs: if the wrapper class does not explicitly override them, state changes affect only the wrapper's flag and are invisible to the inner objects. A code search for `super.enable` or `super.disable` absent in wrapper subclasses is a reliable heuristic.
+- When a class lazily normalises its state (sort, dedup, flush) before some operations but not others, check every accessor that depends on the normalised state for a matching guard. A missing override of a base-class method is easy to overlook during refactors; grep for every public method of the parent that reads state the subclass mutates lazily.
+- Binary search and other hot-path loops that construct a new wrapper object (especially `ByteBuffer.wrap(...)`) around off-heap or already-materialized data on every iteration are candidates for this pattern. A reviewer should ask: can the wrapper be pre-allocated outside the loop and its view updated in-place? The missing `@Override` annotations are a secondary signal — when an interface or abstract class is refactored, implementations without `@Override` silently stop overriding the updated signature, breaking dispatch.
+- After any merge that spans an interface or abstract class, verify that every concrete implementation still matches the current interface contract — method signatures, parameter lists, and return types must agree exactly. Also audit visibility: if a field or method was made public in one branch to support cross-package access, a merge that silently reverts it to package-private will compile fine within the same package but break callers elsewhere. Running a full build immediately after a merge is the cheapest detector.
+- When an abstract base class defines a single method that must serve two semantically distinct call sites (write-path vs. maintenance-path), subclasses cannot specialize each case independently. Look for `abstract void delete` (or similar) called from both a normal-operation path and a background cleanup path; if those two paths have different correctness requirements, they need separate override points.
+- When a lifecycle method (start, stop, destroy) was originally written for one platform or container and is later run under a different one, check whether the new environment provides the same teardown guarantees. In particular, look for implicit assumptions like "the supervisor will clean up after us" — if those assumptions are documented only in comments (or not at all), they are fragile. Platform-specific branches with clear comments explaining why they diverge are the correct pattern.
+- Subclasses that carry additional semantic identity (e.g. `CounterUpdateColumn` vs. `Column`) must override every factory-style method on the base class that returns `this`-type, including `withUpdatedName`, `withUpdatedTimestamp`, and similar. Grepping for `withUpdated` or `copy`-style methods in a base class and checking each subclass for a corresponding `@Override` is an effective audit technique. The absence of `@Override` annotations on a type hierarchy where the base class has several return-new-instance helpers is the key smell.
+- After merging branches that add methods to an interface, grep for all classes implementing that interface and verify each has stubs for every new method. IDE "implement interface" refactors and compiler errors catch this, but in large merge patches the build may not be run before committing.
+- Wrapper / decorator types (`ReversedType`, `FrozenType`, etc.) must override every method that inspects internal structure, including compatibility and equality checks. A code review checklist for new wrapper types should include: `isCompatibleWith`, `isValueCompatibleWith`, `equals`, `hashCode`, and `comparatorSet`.
+- Any subsystem that opens network connections with a hardcoded socket creation helper will be unable to support encryption without a refactor. Connection creation should be separated behind a factory interface from the start so callers (especially tools like sstableloader) can plug in their own socket configuration.
+- When code creates an anonymous subclass of an external library type, check whether that type is a class or interface across the versions supported. Anonymous subclasses of types that become interfaces in newer library versions will fail with `IncompatibleClassChangeError` at runtime rather than compile time.
+- Remove Dead onSuspected Method from CqlConfigHelper — When updating a third-party library dependency, scan `@Override` annotations in adapter/anonymous classes that implement the library's interfaces. Any `@Override` targeting a method that was removed in the new version will either fail to compile or silently become a dead method, both of which signal a broken interface contract.
+- Missing onSuspected Override in CqlConfigHelper — When an interface adds a new non-default abstract method, all anonymous/inner-class implementations must be updated. A build break is the strongest signal, but code reviewers can catch it by checking that every method in the target interface has a corresponding implementation in the anonymous class.
+- Spurious @Override on onSuspected in CqlConfigHelper — When merging branches that track different versions of a third-party driver interface, `@Override` annotations can become invalid. Build failures catch this immediately, but reviewers should verify that merged `@Override` stubs actually correspond to methods declared in the interface version used on the target branch.
+- Missing onSuspected Override in CqlConfigHelper (Branch Variant) — When the same build fix appears on multiple branches, the underlying interface change was not propagated consistently across all active merge lines. Track interface changes in third-party driver upgrades and apply them to every affected branch simultaneously.
+- Missing onSuspected Override in CqlConfigHelper (Branch Variant) — Repeated application of the same fix across many branch-merge commits is a sign of an under-synchronized multi-branch workflow. A shared utility or driver upgrade task should be coordinated so the fix lands once and is propagated cleanly rather than patched post-hoc on each branch.
+- Any `switch` on an enum without an exhaustive case list (or a meaningful `default`) is fragile: new enum values added later — or rarely exercised existing ones — will fall through to a crash. Require that `blockFor` and similar dispatch methods explicitly enumerate every `ConsistencyLevel` value, or at minimum assert-fail on unknown values with a descriptive message.
+- When adding a guard method to suppress a behavior, audit every code path that implements that behavior to ensure all branches (warn, error, exception) are gated. Also verify that every subclass that overrides the old method name is updated when the method is renamed.
+- When a legacy type class (`DateType`, `LongType` alias, etc.) is wire-compatible with a CQL3 native type but doesn't override `asCQL3Type`, any CQL3 function that dispatches on the CQL3 type will silently use the wrong type. Review all `AbstractType` subclasses that predate the CQL3 type system and verify they override `asCQL3Type` appropriately.
+- Any `equals` override that calls `Objects.equal(this, x)` is self-referential and effectively useless — `Objects.equal` will call `this.equals(x)` again (or fall back to `==`). Review all `equals` overrides to ensure they compare fields of the two objects rather than delegating back to the object itself.
+- When an interface gains a new execution mode (e.g., "internal" vs. "external"), check whether every implementation class provides the new method. A missing `executeInternal` on any `CQLStatement` subclass would throw `UnsupportedOperationException` at runtime rather than failing at compile time, because the method was added to the interface without a default implementation. Watch for startup-path queries that share a code path with authenticated client queries.
+- When a data-holding inner class of a message type stores a field `private` with no accessor, callers that need to read the value are forced to use reflection or will fail to compile. During review, any inner class that acts as a plain data carrier (DTO) should expose its fields at the visibility level appropriate for its consumers.
+- When a class extends `TServerTransport` (Thrift), check that `interrupt` is overridden to unblock a thread blocked in `accept`; without it, the jsvc shutdown signal cannot wake the server socket thread and the process hangs indefinitely. `TCustomServerSocket extends TServerTransport` with no `interrupt` override — Thrift's `AbstractNonblockingServer` calls `interrupt` on the transport to stop accepting, but the default implementation is a no-op, leaving the `accept` call blocked forever after `stop` is requested.
+- When exposing a method via JMX through an MBean interface, ensure the interface method name matches the JavaBean property naming convention (`getSize` for a readable attribute named "Size") so the JMX infrastructure can expose it; a non-conforming name like `size` may not be visible as a JMX attribute. `InstrumentingCacheMBean` declares `public int size` but JMX attribute naming requires `getSize` for the property "Size"; clients calling the MBean attribute "Size" get an error because no `getSize` method is present in the implementation. ## Deadlock (25) - **0032** DurabilityQueue/ShardScheduler Deadlock and Null Boolean Dereference — Whenever a method receives a `Boolean` (boxed) result from an asynchronous callback that may deliver `null` on exceptional paths, always guard the unbox with an explicit null check before using the value in a boolean expression. Similarly, when handing off an object to a data structure (like an eviction queue), check preconditions such as reference count and "not already enqueued" inside the same locked section where the hand-off occurs, rather than letting the caller perform an unconditional add after the call returns.
+
+## Deadlock (24)
+
+- When reviewing code that operates inside a lock (especially gossip's `synchronized` blocks), look for any call that delegates to a public API method on the same singleton — these methods often acquire the same lock independently. The pattern of "update shared state then immediately re-read it" inside a locked section is a strong signal: if the update method also locks, there is a latent deadlock waiting for a concurrent gossip round to trigger it.
+- `synchronized` methods that call into Netty pipeline operations (or any callback that may re-enter the same lock from a different thread) are deadlock-prone. During review, trace every code path reachable from within a `synchronized` block: if any path leads to blocking on an I/O thread that itself needs the same lock, the synchronization must be replaced with lock-free data structures or finer-grained locking.
+- `SynchronousQueue` is appropriate only when the submitter must never block — it requires an immediately-available worker. Using it as a thread-pool work queue with `ThreadPoolExecutor.CallerRunsPolicy` or a blocking handler means the submitting thread stalls whenever the pool is saturated. For executors fed by a critical coordination thread, always use a bounded or unbounded `BlockingQueue` that allows tasks to be queued without blocking the submitter.
+- Static initialisers that call methods which can throw, and whose exception path re-enters the same class, are classic deadlock setups in Java. Any `static final Foo INSTANCE = new Foo.start` pattern warrants scrutiny: if `start` fails, the class becomes permanently broken and further access hangs. Look for JVM class-loading locks combined with internal `synchronized` methods in the same class.
+- When a `static synchronized` method acquires a class-level monitor and the same monitor is also reachable through the startup initialization path, any external entry point that bypasses the "are we ready?" guard can trigger a classic lock-order deadlock. Review any `static synchronized` method that opens keyspaces or column family stores and check whether startup code holds the same class monitor at any point in its call stack.
+- Gossip Blocked by Synchronized prepareForRepair — Coarse-grained `synchronized` methods that invoke callbacks or external subsystems (gossip, messaging, I/O) while holding the monitor are a classic deadlock risk. Reviewers should flag `synchronized` on long or multi-step methods and ask whether the lock can be narrowed to just the shared-state mutation.
+- synchronized prepareForRepair blocks gossip; hardcoded 1-hour timeouts — Any `synchronized` method that performs remote I/O or blocks on a latch is a deadlock risk — the lock is held for the entire duration of the blocking call. In review, look for `synchronized` on public service methods that send network messages and verify that the state they protect is not already thread-safe (e.g., `ConcurrentHashMap`).
+- Look for read-lock critical sections that perform unbounded or O(N*M) work such as nested loops over tokens, replicas, or ranges. These are good candidates for a "snapshot-and-release" refactor: take a minimal snapshot while holding the lock, then do the expensive work outside it. The key invariant to preserve is that the published result is consistent with a single coherent snapshot.
+- Any time code submits a task to an executor and then blocks the same executor thread waiting for the result, a deadlock is possible if the thread pool is bounded and fully occupied. Look for patterns of `getUninterruptibly(stage.execute(...))` or `future.get` called from within a task already running on the same stage. In Cassandra's `MUTATION` stage especially, re-queuing under lock contention is safe only when the queuing thread is not itself blocking on the result.
+- Synchronizing on `this` (or on a passed-in object) is dangerous when that same object is used as a monitor elsewhere. Review any method that calls `synchronized(someObjectPassedIn)` and check whether the passed-in object's class also has `synchronized` methods or blocks that could be entered by another thread holding a different lock, creating a lock-ordering inversion. The safest fix is always a private, purpose-specific lock object.
+- Be suspicious whenever a `synchronized` block contains both a blocking wait (flush, future.get, latch.await) and a call that iterates over associated objects that share the same lock hierarchy. If secondary indexes are involved, check whether the index CFS can also try to acquire the primary CFS monitor during the blocked operation. Prefer narrowing the synchronized region to only the state mutation that needs atomicity, and doing any blocking work outside the lock.
+- Whenever a thread pool's `submit(runnable)` return value is used as a completion barrier by blocking on `.get` or `FBUtilities.waitOnFutures`, verify that the future truly tracks execution end and not just queue insertion. The risk is highest in message-handling stages that submit work to secondary executors: if the handler thread blocks waiting on the compaction thread, you get a cross-stage dependency that can stall repair coordination for all peers. Look for places where a plain `Runnable` is wrapped and submitted but the wrapping future's lifecycle is never properly tied to the task itself.
+- CLI tools that initialize Cassandra subsystems (via `DatabaseDescriptor.loadSchemas` or `Keyspace.open*`) must always call `System.exit` explicitly because those subsystems start non-daemon background threads that will prevent JVM shutdown.
+- When a thread pool executor is embedded inside a Netty pipeline and uses a bounded blocking submission queue, the Netty I/O threads can deadlock waiting to enqueue work while holding resources needed to drain the queue. Any `ThreadPoolExecutor` that (a) sits inside a Netty handler chain and (b) uses a bounded blocking queue is a candidate for this pattern; prefer `MemoryAwareThreadPoolExecutor` or an unbounded queue with external back-pressure.
+- Whenever a blocking socket is used for bidirectional communication managed by two separate threads, look for the possibility that both threads can block simultaneously waiting for the other side—a classic two-thread deadlock. Protocols that require a handshake before data transfer are especially prone to this: if A sends a message while waiting for B's acknowledgement, and B is simultaneously doing the same on the same socket, neither side progresses.
+- When iterating a collection and using `continue` to skip an element, check whether the element holds resources that must be released. A `close` method that is `private` on a concrete class but needed by an abstract base class is a clear sign that the cleanup path is broken for callers that only hold a reference to the abstract type.
+- Calling `.get` (or any blocking wait) inside a message verb handler is a classic distributed deadlock pattern: the same thread pool that processes incoming requests is blocked waiting for outgoing requests that are themselves handled by the same pool on other nodes. Any handler that coordinates writes across replicas should use callbacks or separate thread pools rather than blocking in-place.
+- When a thread that handles incoming RPC messages blocks waiting for outgoing RPC responses, look for potential deadlock if the responses can only be processed by the same thread pool. The general fix is to replace blocking `.get` with a completion callback that executes the continuation asynchronously after the condition is satisfied.
+- When code on a dedicated processing stage (thread pool) performs a blocking synchronous RPC call with a retry loop, check whether the response to that RPC also needs to be processed on the same stage — a deadlock results if the stage is single-threaded. A while-retry loop calling `IAsyncResult iar = MessagingService.instance.sendRR(...)` followed by `iar.get(timeout, ...)` inside a `Runnable` dispatched to the migration stage — blocking a migration-stage thread waiting for a response that must be processed by a migration-stage thread.
+- When a task running on executor A calls a method that acquires a lock already held by a thread blocked waiting for executor A to complete, a deadlock occurs; detect by tracing `forceFlush` calls made directly from the CommitLog executor thread. A `forceFlush` (or equivalent method that acquires `Table.switchLock`) is called synchronously from within a Runnable submitted to the CommitLog executor, while the caller that submitted to the CommitLog executor may hold `Table.switchLock`.
+- When the same thread that dispatches work to an executor is also the executor's worker thread, submitting new tasks from within a task causes a deadlock. `applyCounterMutation` unconditionally calls `StageManager.getStage(Stage.MUTATION).execute(runnable)`, even when it is already running on the MUTATION stage (e.g., inside `CounterMutationVerbHandler`), which blocks the stage thread waiting for itself.
+- When a CountDownLatch or similar barrier is sized from a collection of endpoints, check that dead endpoints are excluded before sizing the latch, otherwise the operation will hang until timeout. `replicatingNodes` was populated with all endpoints that would gain new ranges (via `getNewEndpoints`), including endpoints reported as down by the failure detector. The `CountDownLatch` was sized to include those dead nodes, causing `removeToken` to block indefinitely waiting for acknowledgements that would never arrive.
+- When a blocking wait loop polls a boolean flag that is only set inside a callback, verify the callback will actually be invoked even when the work queue is empty (zero items to bootstrap). `StorageService` spun in `while (isBootstrapMode) { Thread.sleep(100); }` waiting for `finishBootstrapping` to clear the flag, but `finishBootstrapping` was called only from `BootStrapper` callbacks; if no keyspaces existed, no callbacks fired and the loop never terminated.
+- When a `synchronized` method lazily creates an object that itself triggers gossip or token-metadata callbacks that also need the same lock, a deadlock occurs; pre-creating all instances during single-threaded startup avoids the cycle. `synchronized getReplicationStrategy` that lazily instantiates strategies on first call; the constructor of `AbstractReplicationStrategy` registers with `TokenMetadata`, which can call back into `StorageService` under a different lock. ## Non-atomic file write (9) - **003** Non-Atomic Heartbeat Write in DataResurrectionCheck — Any file that gates startup, migration, or recovery needs the write-then-rename pattern: `bytes → .tmp → fsync → rename → fsync parent`. Jackson's `writeValue(OutputStream)` is unsafe for safety-critical files because it auto-closes. `OVERWRITE` mode is never atomic. A fatal error handler on parse failure without a fallback turns a corrupted write into an unrecoverable state — worst-case for the exact shutdown scenarios this check is meant to survive.
+
+## Non-atomic file write (8)
+
+- When a segment transition persists multiple related files (index, metadata, offsets), verify that every file is explicitly flushed and synced before the directory entry is synced. A missing flush on any one file leaves the segment in a partially-durable state that appears valid but contains stale data after recovery.
+- Any use of `Files.copy(src, dst)` without `REPLACE_EXISTING` in code that may run more than once for the same destination path will fail on the second run. Review every `Files.copy` call and ask whether the destination could already exist; if yes, an explicit copy-option (`REPLACE_EXISTING` or `ATOMIC_MOVE`) is required. This is especially common in class-loader and plugin-loading paths where JARs are staged to a work directory on each server start.
+- Any time a utility opens a file channel with `WRITE | CREATE` but without `TRUNCATE_EXISTING` and without `APPEND`, review whether callers can write to a pre-existing file. If the new payload is shorter than the original file, silent data corruption occurs. During code review, treat the three-way split `WRITE/WRITE+APPEND/READ_WRITE` as a strong signal: the non-append write path almost always needs `TRUNCATE_EXISTING` unless the caller explicitly manages file length.
+- Any schema-change path that calls `announce*` multiple times in sequence for logically related objects (table + its views, type + its dependents) is vulnerable to the same partial-visibility window. Reviewers should verify that correlated schema objects are bundled into a single `Mutation` before being broadcast, or that a compensating rollback path exists.
+- Anytime a multi-step file-lifecycle sequence assumes that a previous deletion is immediately visible to a subsequent directory scan, look for a missing directory sync between those two steps. The invariant "sync the directory before enumerating its contents for deletion" prevents stale cache entries from producing spurious not-found errors.
+- Flush loops that unconditionally invoke write/open operations and only check for emptiness after the fact are prone to this pattern. During review, look for any loop where a file-creation call appears before the `hasNext` / `isEmpty` guard; those two should be swapped or the guard should gate the entire write.
+- Every code path that writes durability-critical metadata (compression info, index files, manifest files) must call `flush` then `fd.sync` (or use a utility like `CLibrary.trySync`) before closing. A `BufferedOutputStream` wrapping a `FileOutputStream` without an explicit `flush` before close silently loses data in the buffer. Review any `new DataOutputStream(new BufferedOutputStream(new FileOutputStream(...)))` usage to confirm both flush and sync are present.
+- When writing a file that includes a checksum or digest, the checksum step must always be the last operation on the file content. Any sequence where a checksum/sync/flush precedes a `close` or `truncate` on the same file should be reviewed.
+
