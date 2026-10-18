@@ -138,8 +138,20 @@ public final class Schema implements SchemaProvider
     @Override
     public Keyspace getKeyspaceInstance(String keyspaceName)
     {
-        // isLocalSystemKeyspace covers virtual keyspaces too, so a keyspace only has to be classified
-        // once here; virtual keyspaces are the only ones without an instance
+        // Distributed keyspaces, which include the replicated system keyspaces, are the common case: this method is
+        // called several times per read or write command to resolve one of them. Look those up first, so their names
+        // are not classified at all, and only classify the names that are missing from the distributed schema (the
+        // local and virtual system keyspaces, and unknown names). The cluster metadata is not available yet during
+        // the startup checks, which only resolve local system keyspaces.
+        ClusterMetadata metadata = ClusterMetadata.currentNullable();
+        if (metadata != null)
+        {
+            Keyspace keyspace = metadata.schema.getKeyspace(keyspaceName);
+            if (keyspace != null)
+                return keyspace;
+        }
+
+        // Virtual system keyspaces are the only local keyspaces that have no instance to return.
         if (SchemaConstants.isLocalSystemKeyspace(keyspaceName))
         {
             if (SchemaConstants.isVirtualSystemKeyspace(keyspaceName))
@@ -148,8 +160,8 @@ public final class Schema implements SchemaProvider
             Supplier<Keyspace> supplier = localKeyspaceInstances.get(keyspaceName);
             return supplier == null ? null : supplier.get();
         }
-        else
-            return ClusterMetadata.current().schema.getKeyspace(keyspaceName);
+
+        return null;
     }
 
     public Keyspaces distributedAndLocalKeyspaces()

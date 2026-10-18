@@ -199,8 +199,8 @@ public abstract class AbstractReadExecutor
                                                        ReadCoordinator coordinator,
                                                        Dispatcher.RequestTime requestTime) throws UnavailableException
     {
-        Keyspace keyspace = Keyspace.open(command.metadata().keyspace);
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(command.metadata().id);
+        ColumnFamilyStore cfs = command.getColumnFamilyStore();
+        Keyspace keyspace = cfs.keyspace;
         SpeculativeRetryPolicy retry = cfs.metadata().params.speculativeRetry;
 
         ReplicaPlan.ForTokenRead replicaPlan = ReplicaPlans.forRead(metadata,

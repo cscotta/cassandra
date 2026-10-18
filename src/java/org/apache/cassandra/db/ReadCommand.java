@@ -171,6 +171,16 @@ public abstract class ReadCommand extends AbstractReadQuery
 
     private boolean trackWarnings;
 
+    /*
+     * The store this command targets. A command is executed against a single table, but the store is needed by
+     * several steps of a read (read executor selection, local execution and latency tracking), each of which resolved
+     * the keyspace and then the table again. Keeping the first resolution is safe: a command's table cannot change
+     * while it is in flight, and the field is only ever set to the store this command already targets. Like
+     * Mutation#cachedSerializations this is deliberately unsynchronized; a first use from multiple threads may
+     * resolve the store twice, which is what happened before.
+     */
+    private ColumnFamilyStore columnFamilyStore;
+
     protected final DataRange dataRange;
 
     @Nullable
@@ -523,6 +533,17 @@ public abstract class ReadCommand extends AbstractReadQuery
         return executeLocally(executionController, null);
     }
 
+    /**
+     * @return the store this command targets, resolving it on first use
+     */
+    public ColumnFamilyStore getColumnFamilyStore()
+    {
+        ColumnFamilyStore cfs = columnFamilyStore;
+        if (cfs == null)
+            columnFamilyStore = cfs = Keyspace.openAndGetStore(metadata());
+        return cfs;
+    }
+
     // ClusterMetadata is null on startup when there are local reads from system tables before it's initialized
     public UnfilteredPartitionIterator executeLocally(ReadExecutionController executionController, @Nullable ClusterMetadata cm)
     {
@@ -531,7 +552,7 @@ public abstract class ReadCommand extends AbstractReadQuery
         COMMAND.set(this);
         try
         {
-            ColumnFamilyStore cfs = Keyspace.openAndGetStore(metadata());
+            ColumnFamilyStore cfs = getColumnFamilyStore();
             if (!potentialTxnConflicts.allowed)
                 ConsensusRequestRouter.validateSafeToReadNonTransactionally(this, cm);
             Index.QueryPlan indexQueryPlan = indexQueryPlan();

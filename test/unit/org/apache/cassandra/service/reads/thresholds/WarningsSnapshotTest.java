@@ -28,6 +28,7 @@ import org.quicktheories.generators.SourceDSL;
 import org.quicktheories.impl.Constraint;
 
 import org.apache.cassandra.locator.InetAddressAndPort;
+import org.apache.cassandra.net.ParamType;
 
 import static org.apache.cassandra.service.reads.thresholds.WarningsSnapshot.Builder;
 import static org.apache.cassandra.service.reads.thresholds.WarningsSnapshot.Counter;
@@ -41,6 +42,19 @@ public class WarningsSnapshotTest
 {
     private static final InetAddressAndPort HOME = address(127, 0, 0, 1);
     private static final InetAddressAndPort VACATION_HOME = address(127, 0, 0, 2);
+
+    /**
+     * A read response carries no warning params unless a threshold was crossed, so the empty set must be rejected
+     * before any intersection work is done.
+     */
+    @Test
+    public void isSupported()
+    {
+        assertThat(WarningContext.isSupported(java.util.Collections.emptySet())).isFalse();
+        assertThat(WarningContext.isSupported(ImmutableSet.of(ParamType.TOMBSTONE_WARNING))).isTrue();
+        assertThat(WarningContext.isSupported(ImmutableSet.of(ParamType.TOMBSTONE_FAIL, ParamType.TRACE_SESSION))).isTrue();
+        assertThat(WarningContext.isSupported(ImmutableSet.of(ParamType.TRACE_SESSION))).isFalse();
+    }
 
     @Test
     public void staticMergeEmtpy()

@@ -40,7 +40,9 @@ public class WarningContext
 
     public static boolean isSupported(Set<ParamType> keys)
     {
-        return !Collections.disjoint(keys, SUPPORTED);
+        // this is called for every read response, and a response carries no warnings unless a threshold was crossed,
+        // so check for the common empty case before intersecting anything
+        return !keys.isEmpty() && !Collections.disjoint(keys, SUPPORTED);
     }
 
     public RequestFailure updateCounters(Map<ParamType, Object> params, InetAddressAndPort from)

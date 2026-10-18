@@ -103,6 +103,7 @@ import static org.apache.cassandra.utils.TimeUUID.Generator.nextTimeUUID;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -292,6 +293,21 @@ public class ReadCommandTest
                                     metadata14);
 
         LocalSessionAccessor.startup();
+    }
+
+    /**
+     * The store a command targets must be resolved to the store the command's table belongs to, and must be memoized
+     * on the command so that the read executor selection, the local execution and the latency tracking share it.
+     */
+    @Test
+    public void testColumnFamilyStoreIsMemoized()
+    {
+        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(CF2);
+        ReadCommand command = Util.cmd(cfs).build();
+        ColumnFamilyStore first = command.getColumnFamilyStore();
+        assertSame(cfs, first);
+        assertSame(first, command.getColumnFamilyStore());
+        assertSame(Keyspace.openAndGetStore(command.metadata()), command.getColumnFamilyStore());
     }
 
     @Test
