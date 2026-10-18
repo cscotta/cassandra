@@ -138,10 +138,13 @@ public final class Schema implements SchemaProvider
     @Override
     public Keyspace getKeyspaceInstance(String keyspaceName)
     {
-        if (SchemaConstants.isVirtualSystemKeyspace(keyspaceName))
-            return null;
-        else if (SchemaConstants.isLocalSystemKeyspace(keyspaceName))
+        // isLocalSystemKeyspace covers virtual keyspaces too, so a keyspace only has to be classified
+        // once here; virtual keyspaces are the only ones without an instance
+        if (SchemaConstants.isLocalSystemKeyspace(keyspaceName))
         {
+            if (SchemaConstants.isVirtualSystemKeyspace(keyspaceName))
+                return null;
+
             Supplier<Keyspace> supplier = localKeyspaceInstances.get(keyspaceName);
             return supplier == null ? null : supplier.get();
         }

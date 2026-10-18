@@ -186,7 +186,8 @@ public interface SinglePartitionReadQuery extends ReadQuery
             for (ReadQuery query : queries)
             {
                 query.maybeValidateIndex(selectOptions);
-                selectOptions.validate(metadata(), IndexRegistry.obtain(metadata()), query.indexQueryPlan());
+                if (!selectOptions.isEmpty())
+                    selectOptions.validate(metadata(), IndexRegistry.obtain(metadata()), query.indexQueryPlan());
             }
         }
 

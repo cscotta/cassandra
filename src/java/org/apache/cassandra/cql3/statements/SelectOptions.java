@@ -43,6 +43,15 @@ public class SelectOptions extends PropertyDefinitions
     private static final Set<String> KEYWORDS = ImmutableSet.of(INCLUDED_INDEXES, EXCLUDED_INDEXES);
 
     /**
+     * @return {@code true} if no {@code SELECT} option was provided, in which case
+     *         {@link #validate(TableMetadata, IndexRegistry, Index.QueryPlan)} has nothing to validate
+     */
+    public boolean isEmpty()
+    {
+        return properties.isEmpty();
+    }
+
+    /**
      * Validates all the {@code SELECT} options.
      *
      * @throws InvalidRequestException if any of the options are invalid
