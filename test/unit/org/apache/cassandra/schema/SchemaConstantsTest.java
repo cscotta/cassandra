@@ -18,17 +18,28 @@
 
 package org.apache.cassandra.schema;
 
+import java.util.Collections;
 import java.util.Locale;
 
+import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Sets;
 import org.junit.Test;
 
+import org.apache.cassandra.cql3.statements.SelectOptions;
+
+import static org.apache.cassandra.schema.SchemaConstants.LOCAL_SYSTEM_KEYSPACE_NAMES;
+import static org.apache.cassandra.schema.SchemaConstants.REPLICATED_SYSTEM_KEYSPACE_NAMES;
+import static org.apache.cassandra.schema.SchemaConstants.VIRTUAL_SYSTEM_KEYSPACE_NAMES;
+import static org.apache.cassandra.schema.SchemaConstants.getSystemKeyspaces;
 import static org.apache.cassandra.schema.SchemaConstants.isLocalSystemKeyspace;
 import static org.apache.cassandra.schema.SchemaConstants.isNonVirtualSystemKeyspace;
 import static org.apache.cassandra.schema.SchemaConstants.isReplicatedSystemKeyspace;
 import static org.apache.cassandra.schema.SchemaConstants.isSystemKeyspace;
 import static org.apache.cassandra.schema.SchemaConstants.isVirtualSystemKeyspace;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 /**
  * The system keyspace predicates are evaluated several times per read and write command, so they are
@@ -37,11 +48,9 @@ import static org.junit.Assert.assertTrue;
  */
 public class SchemaConstantsTest
 {
-    private static final String[] LOCAL = { "system", "system_schema", "system_accord" };
-    private static final String[] VIRTUAL = { "system_virtual_schema", "system_views", "system_metrics",
-                                              "system_accord_debug", "system_accord_debug_remote" };
-    private static final String[] REPLICATED = { "system_auth", "system_traces", "system_distributed",
-                                                 "system_cluster_metadata" };
+    private static final String[] LOCAL = LOCAL_SYSTEM_KEYSPACE_NAMES.toArray(new String[0]);
+    private static final String[] VIRTUAL = VIRTUAL_SYSTEM_KEYSPACE_NAMES.toArray(new String[0]);
+    private static final String[] REPLICATED = REPLICATED_SYSTEM_KEYSPACE_NAMES.toArray(new String[0]);
     private static final String[] USER = { "cassandra_easy_stress", "perf_kv_45706", "systemx", "systems",
                                            "system_schema2", "system_views_too", "system_", "_system", "sys" };
 
@@ -128,6 +137,40 @@ public class SchemaConstantsTest
         finally
         {
             Locale.setDefault(previous);
+        }
+    }
+
+    @Test
+    public void systemKeyspaceSetsAreDisjointAndComplete()
+    {
+        assertTrue(Collections.disjoint(LOCAL_SYSTEM_KEYSPACE_NAMES, VIRTUAL_SYSTEM_KEYSPACE_NAMES));
+        assertTrue(Collections.disjoint(LOCAL_SYSTEM_KEYSPACE_NAMES, REPLICATED_SYSTEM_KEYSPACE_NAMES));
+        assertTrue(Collections.disjoint(VIRTUAL_SYSTEM_KEYSPACE_NAMES, REPLICATED_SYSTEM_KEYSPACE_NAMES));
+        assertEquals(Sets.union(Sets.union(LOCAL_SYSTEM_KEYSPACE_NAMES, REPLICATED_SYSTEM_KEYSPACE_NAMES), VIRTUAL_SYSTEM_KEYSPACE_NAMES),
+                     getSystemKeyspaces());
+    }
+
+    @Test
+    public void nullKeyspaceNamesAreNotSystemKeyspaces()
+    {
+        assertFalse(isLocalSystemKeyspace(null));
+        assertFalse(isReplicatedSystemKeyspace(null));
+        assertFalse(isVirtualSystemKeyspace(null));
+        assertFalse(isSystemKeyspace(null));
+        assertFalse(isNonVirtualSystemKeyspace(null));
+    }
+
+    @Test
+    public void emptySelectOptionsAreImmutable()
+    {
+        try
+        {
+            SelectOptions.EMPTY.addProperty(SelectOptions.INCLUDED_INDEXES,
+                                           ImmutableSet.of(ImmutableSet.of("ks", "idx")));
+            fail("SelectOptions.EMPTY must be immutable");
+        }
+        catch (UnsupportedOperationException expected)
+        {
         }
     }
 

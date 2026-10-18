@@ -73,8 +73,10 @@ public final class SchemaConstants
         ImmutableSet.of(TRACE_KEYSPACE_NAME, AUTH_KEYSPACE_NAME, DISTRIBUTED_KEYSPACE_NAME, METADATA_KEYSPACE_NAME);
 
     // Array forms of the system keyspace name sets, for allocation-free case insensitive tests on the
-    // request path (see containsKeyspaceName). Keyspace names are restricted to \w+, so an ignoring
-    // case comparison agrees with comparing the locale-aware lower case forms.
+    // request path (see containsKeyspaceName). Keyspace names created through CQL are restricted to \w+,
+    // so an ignoring-case comparison agrees with comparing the locale-aware lower case forms for every
+    // name that can exist in system_schema. Other inputs (quoted CQL identifiers, JMX strings) can
+    // classify differently, but they are looked up case-sensitively downstream, so the difference is benign.
     private static final String[] LOCAL_SYSTEM_KEYSPACES = LOCAL_SYSTEM_KEYSPACE_NAMES.toArray(new String[0]);
     private static final String[] VIRTUAL_SYSTEM_KEYSPACES = VIRTUAL_SYSTEM_KEYSPACE_NAMES.toArray(new String[0]);
     private static final String[] REPLICATED_SYSTEM_KEYSPACES = REPLICATED_SYSTEM_KEYSPACE_NAMES.toArray(new String[0]);
