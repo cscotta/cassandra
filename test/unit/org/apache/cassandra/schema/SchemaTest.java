@@ -35,6 +35,8 @@ import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.tcm.Epoch;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -56,6 +58,19 @@ public class SchemaTest
     {
         SchemaTestUtil.dropKeyspaceIfExist(KS_ONE, true);
         SchemaTestUtil.dropKeyspaceIfExist(KS_TWO, true);
+    }
+
+    @Test
+    public void getKeyspaceInstanceClassifiesSystemAndUserKeyspaces()
+    {
+        assertNull(Schema.instance.getKeyspaceInstance("system_views"));
+        assertNotNull(Schema.instance.getKeyspaceInstance("system"));
+        assertNotNull(Schema.instance.getKeyspaceInstance("system_schema"));
+
+        KeyspaceMetadata ksm = KeyspaceMetadata.create(KS_ONE, KeyspaceParams.simple(1));
+        SchemaTestUtil.submit(metadata -> metadata.schema.getKeyspaces().withAddedOrUpdated(ksm));
+        assertNotNull(Schema.instance.getKeyspaceInstance(KS_ONE));
+        assertNull(Schema.instance.getKeyspaceInstance(KS_TWO));
     }
 
     @Test

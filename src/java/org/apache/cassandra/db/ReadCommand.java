@@ -506,7 +506,8 @@ public abstract class ReadCommand extends AbstractReadQuery
             indexQueryPlan.validate(this);
         }
 
-        selectOptions.validate(metadata(), IndexRegistry.obtain(metadata()), indexQueryPlan());
+        if (!selectOptions.isEmpty())
+            selectOptions.validate(metadata(), IndexRegistry.obtain(metadata()), indexQueryPlan());
     }
 
     /**

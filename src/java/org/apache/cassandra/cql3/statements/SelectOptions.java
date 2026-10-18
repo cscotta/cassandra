@@ -36,11 +36,27 @@ import org.apache.cassandra.schema.TableMetadata;
  */
 public class SelectOptions extends PropertyDefinitions
 {
-    public static final SelectOptions EMPTY = new SelectOptions();
+    public static final SelectOptions EMPTY = new SelectOptions()
+    {
+        @Override
+        public void addProperty(String name, Object value)
+        {
+            throw new UnsupportedOperationException("SelectOptions.EMPTY is immutable");
+        }
+    };
     public static final String INCLUDED_INDEXES = "included_indexes";
     public static final String EXCLUDED_INDEXES = "excluded_indexes";
 
     private static final Set<String> KEYWORDS = ImmutableSet.of(INCLUDED_INDEXES, EXCLUDED_INDEXES);
+
+    /**
+     * @return {@code true} if no {@code SELECT} option was provided, in which case
+     *         {@link #validate(TableMetadata, IndexRegistry, Index.QueryPlan)} has nothing to validate
+     */
+    public boolean isEmpty()
+    {
+        return properties.isEmpty();
+    }
 
     /**
      * Validates all the {@code SELECT} options.
@@ -51,6 +67,8 @@ public class SelectOptions extends PropertyDefinitions
                          IndexRegistry indexRegistry,
                          @Nullable Index.QueryPlan indexQueryPlan)
     {
+        if (properties.isEmpty())
+            return;
         validate(KEYWORDS, Collections.emptySet());
         parseIndexHints(table, indexRegistry).validate(indexQueryPlan);
     }

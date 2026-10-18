@@ -34,7 +34,6 @@ import org.apache.cassandra.service.accord.AccordKeyspace;
 import org.apache.cassandra.tracing.TraceKeyspace;
 
 import static org.apache.cassandra.db.Directories.TABLE_DIRECTORY_NAME_SEPARATOR;
-import static org.apache.cassandra.utils.LocalizeString.toLowerCaseLocalized;
 
 /**
  * When adding new String keyspace names here, double check if it needs to be added to PartitionDenylist.canDenylistKeyspace
@@ -72,6 +71,15 @@ public final class SchemaConstants
     /* replicate system keyspace names (the ones with a "true" replication strategy) */
     public static final Set<String> REPLICATED_SYSTEM_KEYSPACE_NAMES =
         ImmutableSet.of(TRACE_KEYSPACE_NAME, AUTH_KEYSPACE_NAME, DISTRIBUTED_KEYSPACE_NAME, METADATA_KEYSPACE_NAME);
+
+    // Array forms of the system keyspace name sets, for allocation-free case insensitive tests on the
+    // request path (see containsKeyspaceName). Keyspace names created through CQL are restricted to \w+,
+    // so an ignoring-case comparison agrees with comparing the locale-aware lower case forms for every
+    // name that can exist in system_schema. Other inputs (quoted CQL identifiers, JMX strings) can
+    // classify differently, but they are looked up case-sensitively downstream, so the difference is benign.
+    private static final String[] LOCAL_SYSTEM_KEYSPACES = LOCAL_SYSTEM_KEYSPACE_NAMES.toArray(new String[0]);
+    private static final String[] VIRTUAL_SYSTEM_KEYSPACES = VIRTUAL_SYSTEM_KEYSPACE_NAMES.toArray(new String[0]);
+    private static final String[] REPLICATED_SYSTEM_KEYSPACES = REPLICATED_SYSTEM_KEYSPACE_NAMES.toArray(new String[0]);
     /**
      * The longest permissible KS or CF name.
      *
@@ -127,11 +135,28 @@ public final class SchemaConstants
     }
 
     /**
+     * Tests a keyspace name against one of the system keyspace name arrays above.
+     *
+     * These predicates are evaluated several times per read or write command, so the comparison must
+     * not allocate or convert every character of the name: an ignoring case comparison rejects a
+     * non-matching name on its first differing character (or on its length) and allocates nothing.
+     */
+    private static boolean containsKeyspaceName(String[] keyspaceNames, String keyspaceName)
+    {
+        for (String name : keyspaceNames)
+        {
+            if (name.equalsIgnoreCase(keyspaceName))
+                return true;
+        }
+        return false;
+    }
+
+    /**
      * @return whether or not the keyspace is a really system one (w/ LocalStrategy, unmodifiable, hardcoded)
      */
     public static boolean isLocalSystemKeyspace(String keyspaceName)
     {
-        return LOCAL_SYSTEM_KEYSPACE_NAMES.contains(toLowerCaseLocalized(keyspaceName)) || isVirtualSystemKeyspace(keyspaceName);
+        return containsKeyspaceName(LOCAL_SYSTEM_KEYSPACES, keyspaceName) || isVirtualSystemKeyspace(keyspaceName);
     }
 
     /**
@@ -139,7 +164,7 @@ public final class SchemaConstants
      */
     public static boolean isReplicatedSystemKeyspace(String keyspaceName)
     {
-        return REPLICATED_SYSTEM_KEYSPACE_NAMES.contains(toLowerCaseLocalized(keyspaceName));
+        return containsKeyspaceName(REPLICATED_SYSTEM_KEYSPACES, keyspaceName);
     }
 
     /**
@@ -148,7 +173,7 @@ public final class SchemaConstants
      */
     public static boolean isVirtualSystemKeyspace(String keyspaceName)
     {
-        return VIRTUAL_SYSTEM_KEYSPACE_NAMES.contains(toLowerCaseLocalized(keyspaceName));
+        return containsKeyspaceName(VIRTUAL_SYSTEM_KEYSPACES, keyspaceName);
     }
 
     /**
@@ -166,9 +191,8 @@ public final class SchemaConstants
      */
     public static boolean isNonVirtualSystemKeyspace(String keyspaceName)
     {
-        final String lowercaseKeyspaceName = toLowerCaseLocalized(keyspaceName);
-        return LOCAL_SYSTEM_KEYSPACE_NAMES.contains(lowercaseKeyspaceName)
-               || REPLICATED_SYSTEM_KEYSPACE_NAMES.contains(lowercaseKeyspaceName);
+        return containsKeyspaceName(LOCAL_SYSTEM_KEYSPACES, keyspaceName)
+               || containsKeyspaceName(REPLICATED_SYSTEM_KEYSPACES, keyspaceName);
     }
 
     /**
