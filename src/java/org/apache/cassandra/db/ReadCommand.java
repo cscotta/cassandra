@@ -174,8 +174,9 @@ public abstract class ReadCommand extends AbstractReadQuery
     /*
      * The store this command targets. A command is executed against a single table, but the store is needed by
      * several steps of a read (read executor selection, local execution and latency tracking), each of which resolved
-     * the keyspace and then the table again. Keeping the first resolution is safe: a command's table cannot change
-     * while it is in flight, and the field is only ever set to the store this command already targets. Like
+     * the keyspace and then the table again. Keeping the first resolution is safe: the field is only ever set to the
+     * store this command already targets, and a store that stopped being valid is dropped and resolved again, so a
+     * table that is dropped while the command is in flight fails exactly as a fresh resolution does. Like
      * Mutation#cachedSerializations this is deliberately unsynchronized; a first use from multiple threads may
      * resolve the store twice, which is what happened before.
      */
@@ -539,7 +540,9 @@ public abstract class ReadCommand extends AbstractReadQuery
     public ColumnFamilyStore getColumnFamilyStore()
     {
         ColumnFamilyStore cfs = columnFamilyStore;
-        if (cfs == null)
+        // {@code valid} is volatile and cleared when the table is dropped, so a memoized store that stopped being
+        // valid is never returned; resolving again fails the same way it did before the store was memoized
+        if (cfs == null || !cfs.isValid())
             columnFamilyStore = cfs = Keyspace.openAndGetStore(metadata());
         return cfs;
     }

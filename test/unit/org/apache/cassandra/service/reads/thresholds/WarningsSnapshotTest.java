@@ -19,6 +19,7 @@ package org.apache.cassandra.service.reads.thresholds;
 
 import java.net.InetAddress;
 import java.net.UnknownHostException;
+import java.util.HashSet;
 
 import com.google.common.collect.ImmutableSet;
 
@@ -35,6 +36,7 @@ import static org.apache.cassandra.service.reads.thresholds.WarningsSnapshot.Cou
 import static org.apache.cassandra.service.reads.thresholds.WarningsSnapshot.builder;
 import static org.apache.cassandra.service.reads.thresholds.WarningsSnapshot.empty;
 import static org.apache.cassandra.service.reads.thresholds.WarningsSnapshot.merge;
+import static java.util.Collections.emptySet;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.quicktheories.QuickTheory.qt;
 
@@ -50,7 +52,8 @@ public class WarningsSnapshotTest
     @Test
     public void isSupported()
     {
-        assertThat(WarningContext.isSupported(java.util.Collections.emptySet())).isFalse();
+        assertThat(WarningContext.isSupported(emptySet())).isFalse();
+        assertThat(WarningContext.isSupported(new HashSet<>())).isFalse();
         assertThat(WarningContext.isSupported(ImmutableSet.of(ParamType.TOMBSTONE_WARNING))).isTrue();
         assertThat(WarningContext.isSupported(ImmutableSet.of(ParamType.TOMBSTONE_FAIL, ParamType.TRACE_SESSION))).isTrue();
         assertThat(WarningContext.isSupported(ImmutableSet.of(ParamType.TRACE_SESSION))).isFalse();

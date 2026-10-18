@@ -50,6 +50,19 @@ public class SchemaKeyspaceInstanceTest
         SchemaLoader.createKeyspace(KEYSPACE, KeyspaceParams.simple(1), SchemaLoader.standardCFMD(KEYSPACE, TABLE));
     }
 
+    /**
+     * The reordering of the lookup relies on no local or virtual system keyspace name being resolvable through the
+     * distributed schema; assert that precondition over every name those groups contain.
+     */
+    @Test
+    public void systemKeyspacesAreNotInTheDistributedSchema()
+    {
+        for (String name : SchemaConstants.LOCAL_SYSTEM_KEYSPACE_NAMES)
+            assertNull(name, ClusterMetadata.current().schema.getKeyspace(name));
+        for (String name : SchemaConstants.VIRTUAL_SYSTEM_KEYSPACE_NAMES)
+            assertNull(name, ClusterMetadata.current().schema.getKeyspace(name));
+    }
+
     @Test
     public void resolvesLocalSystemKeyspace()
     {

@@ -141,8 +141,10 @@ public final class Schema implements SchemaProvider
         // Distributed keyspaces, which include the replicated system keyspaces, are the common case: this method is
         // called several times per read or write command to resolve one of them. Look those up first, so their names
         // are not classified at all, and only classify the names that are missing from the distributed schema (the
-        // local and virtual system keyspaces, and unknown names). The cluster metadata is not available yet during
-        // the startup checks, which only resolve local system keyspaces.
+        // local and virtual system keyspaces, and unknown names). A name cannot be in both groups: creating a local
+        // system keyspace name is rejected, and the upgrade path filters them out of the distributed schema. The
+        // cluster metadata is not available yet during the startup checks, which only resolve local system
+        // keyspaces; a distributed keyspace resolved before the metadata exists now gets null instead of failing.
         ClusterMetadata metadata = ClusterMetadata.currentNullable();
         if (metadata != null)
         {
