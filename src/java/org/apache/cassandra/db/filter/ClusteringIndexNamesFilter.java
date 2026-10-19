@@ -55,6 +55,10 @@ public class ClusteringIndexNamesFilter extends AbstractClusteringIndexFilter
     // reversed), so we keep that too for simplicity.
     private final NavigableSet<Clustering<?>> clusteringsInQueryOrder;
 
+    // The slices depend only on the requested clusterings and the table comparator, but every source of a read
+    // (each sstable's lower bound iterator and each memtable's iterator) asks for them, so they are built once.
+    private volatile SlicesCache slicesCache;
+
     public ClusteringIndexNamesFilter(NavigableSet<Clustering<?>> clusterings, boolean reversed)
     {
         super(reversed);
@@ -136,10 +140,32 @@ public class ClusteringIndexNamesFilter extends AbstractClusteringIndexFilter
 
     public Slices getSlices(TableMetadata metadata)
     {
+        SlicesCache cache = slicesCache;
+        if (cache != null && cache.comparator == metadata.comparator)
+            return cache.slices;
+
         Slices.Builder builder = new Slices.Builder(metadata.comparator, clusteringsInQueryOrder.size());
         for (Clustering<?> clustering : clusteringsInQueryOrder)
             builder.add(Slice.make(clustering));
-        return builder.build();
+        Slices slices = builder.build();
+        slicesCache = new SlicesCache(metadata.comparator, slices);
+        return slices;
+    }
+
+    /**
+     * The slices built for one table comparator. {@link Slices} is immutable, so one instance can be shared by
+     * every iterator of a read; a schema change yields a different comparator and rebuilds them.
+     */
+    private static final class SlicesCache
+    {
+        final ClusteringComparator comparator;
+        final Slices slices;
+
+        SlicesCache(ClusteringComparator comparator, Slices slices)
+        {
+            this.comparator = comparator;
+            this.slices = slices;
+        }
     }
 
     public UnfilteredRowIterator getUnfilteredRowIterator(final ColumnFilter columnFilter, final Partition partition)
