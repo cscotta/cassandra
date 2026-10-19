@@ -263,6 +263,21 @@ public final class SimpleRestriction implements SingleRestriction
         operator.restrict(rangeSet, bindAndGetClusteringElements(context), partitioner);
     }
 
+    /**
+     * Returns the clustering elements of a restriction bounded by {@code <}, {@code <=}, {@code >}, {@code >=} or
+     * {@code BETWEEN}: one element for the operators with a single bound and the start and end elements for
+     * {@code BETWEEN}.
+     *
+     * @param context the function context
+     * @return the bound elements
+     */
+    List<ClusteringElements> boundElements(FunctionContext context)
+    {
+        assert operator == Operator.GT || operator == Operator.GTE || operator == Operator.LT
+               || operator == Operator.LTE || operator == Operator.BETWEEN : String.format("Unexpected operator: %s", operator);
+        return bindAndGetClusteringElements(context);
+    }
+
     private List<ClusteringElements> bindAndGetClusteringElements(FunctionContext context)
     {
         switch (columnsExpression.kind())

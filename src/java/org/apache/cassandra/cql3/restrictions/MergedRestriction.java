@@ -351,6 +351,16 @@ public final class MergedRestriction implements SingleRestriction
         }
     }
 
+    /**
+     * Returns the restrictions this one is composed of.
+     *
+     * @return the merged restrictions
+     */
+    List<SimpleRestriction> underlyingRestrictions()
+    {
+        return restrictions;
+    }
+
     @Override
     public void addToRowFilter(RowFilter filter, IndexRegistry indexRegistry, FunctionContext context, IndexHints indexHints)
     {

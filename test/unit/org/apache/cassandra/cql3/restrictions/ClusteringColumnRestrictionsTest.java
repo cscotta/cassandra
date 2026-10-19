@@ -138,6 +138,99 @@ public class ClusteringColumnRestrictionsTest
     }
 
     /**
+     * The direct construction of single column slices must not diverge from the generic range set based one.
+     */
+    @Test
+    public void testSingleColumnSliceMatchesGenericPath()
+    {
+        ByteBuffer value1 = ByteBufferUtil.bytes(1);
+        ByteBuffer value2 = ByteBufferUtil.bytes(2);
+
+        for (Sort sort : Sort.values())
+        {
+            for (int clusteringColumns = 1; clusteringColumns <= 2; clusteringColumns++)
+            {
+                TableMetadata tableMetadata = clusteringColumns == 1 ? newTableMetadata(sort)
+                                                                    : newTableMetadata(sort, Sort.ASC);
+
+                for (Operator operator : asList(Operator.GT, Operator.GTE, Operator.LT, Operator.LTE))
+                    assertSlicesMatchGeneric(tableMetadata, newSingleRestriction(tableMetadata, 0, operator, value1));
+
+                // open and closed ranges
+                assertSlicesMatchGeneric(tableMetadata,
+                                         newSingleRestriction(tableMetadata, 0, Operator.GT, value1),
+                                         newSingleRestriction(tableMetadata, 0, Operator.LT, value2));
+                assertSlicesMatchGeneric(tableMetadata,
+                                         newSingleRestriction(tableMetadata, 0, Operator.GTE, value1),
+                                         newSingleRestriction(tableMetadata, 0, Operator.LTE, value2));
+
+                // contradictory bounds produce the same (empty or single open) result on both paths
+                assertSlicesMatchGeneric(tableMetadata,
+                                         newSingleRestriction(tableMetadata, 0, Operator.GTE, value2),
+                                         newSingleRestriction(tableMetadata, 0, Operator.LTE, value1));
+                assertSlicesMatchGeneric(tableMetadata,
+                                         newSingleRestriction(tableMetadata, 0, Operator.GT, value2),
+                                         newSingleRestriction(tableMetadata, 0, Operator.LT, value1));
+
+                // BETWEEN has a single restriction with two bounds
+                assertSlicesMatchGeneric(tableMetadata, newSingleRestriction(tableMetadata, 0, Operator.BETWEEN, value1, value2));
+
+                // equal bound values: only the fully inclusive bounds describe a slice containing that value
+                assertSlicesMatchGeneric(tableMetadata,
+                                         newSingleRestriction(tableMetadata, 0, Operator.GTE, value1),
+                                         newSingleRestriction(tableMetadata, 0, Operator.LTE, value1));
+                assertSlicesMatchGeneric(tableMetadata,
+                                         newSingleRestriction(tableMetadata, 0, Operator.GT, value1),
+                                         newSingleRestriction(tableMetadata, 0, Operator.LTE, value1));
+                assertSlicesMatchGeneric(tableMetadata,
+                                         newSingleRestriction(tableMetadata, 0, Operator.GTE, value1),
+                                         newSingleRestriction(tableMetadata, 0, Operator.LT, value1));
+                assertSlicesMatchGeneric(tableMetadata, newSingleRestriction(tableMetadata, 0, Operator.BETWEEN, value1, value1));
+                assertSlicesMatchGeneric(tableMetadata, newSingleRestriction(tableMetadata, 0, Operator.BETWEEN, value2, value1));
+
+                ClusteringColumnRestrictions equalBounds = restrictions(tableMetadata,
+                                                                        newSingleRestriction(tableMetadata, 0, Operator.GTE, value1),
+                                                                        newSingleRestriction(tableMetadata, 0, Operator.LTE, value1));
+                assertSameSlices(equalBounds.genericSlices(QueryOptions.DEFAULT), equalBounds.slices(QueryOptions.DEFAULT));
+
+                if (clusteringColumns > 1)
+                {
+                    // an equality prefix followed by a slice
+                    assertSlicesMatchGeneric(tableMetadata,
+                                             newSingleRestriction(tableMetadata, 0, Operator.EQ, value1),
+                                             newSingleRestriction(tableMetadata, 1, Operator.GT, value1));
+                    // multi column slices are not handled by the single column path
+                    assertSlicesMatchGeneric(tableMetadata, newMultiSlice(tableMetadata, 0, Operator.GT, value1, value2));
+                }
+            }
+        }
+    }
+
+    private static void assertSlicesMatchGeneric(TableMetadata tableMetadata, Restriction... restrictions)
+    {
+        ClusteringColumnRestrictions restrictionSet = restrictions(tableMetadata, restrictions);
+        assertSameSlices(restrictionSet.genericSlices(QueryOptions.DEFAULT), restrictionSet.slices(QueryOptions.DEFAULT));
+    }
+
+    private static void assertSameSlices(Slices expected, Slices actual)
+    {
+        assertEquals(expected.size(), actual.size());
+        for (int i = 0; i < expected.size(); i++)
+        {
+            assertSameBound(actual.get(i).start(), expected.get(i).start());
+            assertSameBound(actual.get(i).end(), expected.get(i).end());
+        }
+    }
+
+    private static void assertSameBound(ClusteringBound<?> actual, ClusteringBound<?> expected)
+    {
+        assertEquals(expected.kind(), actual.kind());
+        assertEquals(expected.size(), actual.size());
+        for (int i = 0; i < expected.size(); i++)
+            assertEquals(expected.get(i), actual.get(i));
+    }
+
+    /**
      * Test slice restriction (e.g 'clustering_0 > 1') with only one clustering column
      */
     @Test
