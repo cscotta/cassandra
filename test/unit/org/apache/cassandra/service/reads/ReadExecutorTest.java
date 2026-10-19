@@ -31,6 +31,9 @@ import org.apache.cassandra.Util;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.Keyspace;
+import org.apache.cassandra.db.Mutation;
+import org.apache.cassandra.db.ReadCommand;
+import org.apache.cassandra.db.ReadResponse;
 import org.apache.cassandra.db.SinglePartitionReadCommand;
 import org.apache.cassandra.dht.Murmur3Partitioner;
 import org.apache.cassandra.dht.Token;
@@ -41,11 +44,16 @@ import org.apache.cassandra.exceptions.RequestFailure;
 import org.apache.cassandra.exceptions.RequestFailureReason;
 import org.apache.cassandra.locator.EndpointsForToken;
 import org.apache.cassandra.locator.InetAddressAndPort;
+import org.apache.cassandra.locator.ReplicaLayout;
 import org.apache.cassandra.locator.ReplicaPlan;
 import org.apache.cassandra.net.Message;
 import org.apache.cassandra.net.NoPayload;
+import org.apache.cassandra.net.RequestCallback;
 import org.apache.cassandra.net.Verb;
+import org.apache.cassandra.schema.KeyspaceMetadata;
 import org.apache.cassandra.schema.KeyspaceParams;
+import org.apache.cassandra.schema.TableId;
+import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.tcm.Epoch;
 import org.apache.cassandra.transport.Dispatcher;
 
@@ -240,6 +248,93 @@ public class ReadExecutorTest
         {
             assertSame(ExceptionUtils.getStackTrace(t), ReadFailureException.class, t.getClass());
             assertTrue(t.getMessage().contains(RequestFailureReason.READ_TOO_MANY_TOMBSTONES.name()));
+        }
+    }
+
+    /**
+     * A plan whose data requests already cover every replica has no transient and no digest request to
+     * make, so the read command must not be copied to build those groups.
+     */
+    @Test
+    public void testEmptyRequestGroupsDoNotCopyTheCommand()
+    {
+        CountingReadCommand command = new CountingReadCommand();
+        RecordingCoordinator coordinator = new RecordingCoordinator();
+        ReplicaPlan.ForTokenRead plan = plan(ConsistencyLevel.ONE, targets.subList(0, 1), targets.subList(0, 1));
+        AbstractReadExecutor executor = new AbstractReadExecutor.NeverSpeculatingReadExecutor(coordinator, cfs, command, plan, Dispatcher.RequestTime.forImmediateExecution(), true);
+
+        EndpointsForToken none = EndpointsForToken.empty(dummy);
+        executor.makeTransientDataRequests(none);
+        executor.makeDigestRequests(none);
+
+        assertEquals(0, command.transientCopies);
+        assertEquals(0, command.digestCopies);
+        assertEquals(0, coordinator.sendCount);
+    }
+
+    /**
+     * A non-empty digest group must still be sent, from a single digest copy of the command.
+     */
+    @Test
+    public void testNonEmptyDigestGroupCopiesTheCommandOnce()
+    {
+        CountingReadCommand command = new CountingReadCommand();
+        RecordingCoordinator coordinator = new RecordingCoordinator();
+        ReplicaPlan.ForTokenRead plan = plan(ConsistencyLevel.LOCAL_QUORUM, targets, targets.subList(0, 2));
+        AbstractReadExecutor executor = new AbstractReadExecutor.NeverSpeculatingReadExecutor(coordinator, cfs, command, plan, Dispatcher.RequestTime.forImmediateExecution(), true);
+
+        executor.makeDigestRequests(targets.subList(0, 2));
+
+        assertEquals(1, command.digestCopies);
+        assertEquals(2, coordinator.sendCount);
+    }
+
+    private static class RecordingCoordinator implements ReadCoordinator
+    {
+        int sendCount;
+
+        public boolean localReadSupported()
+        {
+            return true;
+        }
+
+        public EndpointsForToken forNonLocalStrategyTokenRead(ClusterMetadata metadata, KeyspaceMetadata keyspace, TableId tableId, Token token)
+        {
+            return ReplicaLayout.forNonLocalStrategyTokenRead(metadata, keyspace, token);
+        }
+
+        public void sendReadCommand(Message<ReadCommand> message, InetAddressAndPort to, RequestCallback<ReadResponse> callback)
+        {
+            sendCount++;
+        }
+
+        public void sendReadRepairMutation(Message<Mutation> message, InetAddressAndPort to, RequestCallback<Object> callback)
+        {
+        }
+
+        public boolean isEventuallyConsistent()
+        {
+            return true;
+        }
+    }
+
+    public static class CountingReadCommand extends MockSinglePartitionReadCommand
+    {
+        int digestCopies;
+        int transientCopies;
+
+        @Override
+        protected SinglePartitionReadCommand copyAsDigestQuery()
+        {
+            digestCopies++;
+            return this;
+        }
+
+        @Override
+        protected SinglePartitionReadCommand copyAsTransientQuery()
+        {
+            transientCopies++;
+            return this;
         }
     }
 
