@@ -175,6 +175,24 @@ public class ClusteringColumnRestrictionsTest
                 // BETWEEN has a single restriction with two bounds
                 assertSlicesMatchGeneric(tableMetadata, newSingleRestriction(tableMetadata, 0, Operator.BETWEEN, value1, value2));
 
+                // equal bound values: only the fully inclusive bounds describe a slice containing that value
+                assertSlicesMatchGeneric(tableMetadata,
+                                         newSingleRestriction(tableMetadata, 0, Operator.GTE, value1),
+                                         newSingleRestriction(tableMetadata, 0, Operator.LTE, value1));
+                assertSlicesMatchGeneric(tableMetadata,
+                                         newSingleRestriction(tableMetadata, 0, Operator.GT, value1),
+                                         newSingleRestriction(tableMetadata, 0, Operator.LTE, value1));
+                assertSlicesMatchGeneric(tableMetadata,
+                                         newSingleRestriction(tableMetadata, 0, Operator.GTE, value1),
+                                         newSingleRestriction(tableMetadata, 0, Operator.LT, value1));
+                assertSlicesMatchGeneric(tableMetadata, newSingleRestriction(tableMetadata, 0, Operator.BETWEEN, value1, value1));
+                assertSlicesMatchGeneric(tableMetadata, newSingleRestriction(tableMetadata, 0, Operator.BETWEEN, value2, value1));
+
+                ClusteringColumnRestrictions equalBounds = restrictions(tableMetadata,
+                                                                        newSingleRestriction(tableMetadata, 0, Operator.GTE, value1),
+                                                                        newSingleRestriction(tableMetadata, 0, Operator.LTE, value1));
+                assertSameSlices(equalBounds.genericSlices(QueryOptions.DEFAULT), equalBounds.slices(QueryOptions.DEFAULT));
+
                 if (clusteringColumns > 1)
                 {
                     // an equality prefix followed by a slice

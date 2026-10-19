@@ -181,20 +181,26 @@ final class ClusteringColumnRestrictions extends RestrictionSetWrapper
         for (int i = 0, m = parts.size(); i < m; i++)
         {
             SimpleRestriction part = parts.get(i);
+            Operator operator = part.operator();
+            // NEQ and NOT IN are slices for filtering purposes but do not denote bounds: reject them before binding
+            if (operator != Operator.GT && operator != Operator.GTE && operator != Operator.LT
+                && operator != Operator.LTE && operator != Operator.BETWEEN)
+                return null;
+
             List<ClusteringElements> elements = part.boundElements(options);
-            switch (part.operator())
+            switch (operator)
             {
                 case GT:
                 case GTE:
                     if (start != null || elements.size() != 1)
                         return null;
-                    start = elements.get(0).toBound(true, part.operator() == Operator.GTE);
+                    start = elements.get(0).toBound(true, operator == Operator.GTE);
                     break;
                 case LT:
                 case LTE:
                     if (end != null || elements.size() != 1)
                         return null;
-                    end = elements.get(0).toBound(false, part.operator() == Operator.LTE);
+                    end = elements.get(0).toBound(false, operator == Operator.LTE);
                     break;
                 case BETWEEN:
                     if (start != null || end != null || elements.size() != 2)
@@ -220,6 +226,8 @@ final class ClusteringColumnRestrictions extends RestrictionSetWrapper
     /**
      * Builds the slices by restricting a range spanning all the clusterings, the generic implementation for every
      * restriction shape that {@link #singleColumnSlices(QueryOptions)} does not handle.
+     * <p>
+     * Package private so that {@code ClusteringColumnRestrictionsTest} can check both implementations agree.
      *
      * @param options the query options
      * @return the slices
