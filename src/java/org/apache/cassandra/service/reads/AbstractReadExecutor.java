@@ -51,6 +51,7 @@ import org.apache.cassandra.transport.Dispatcher;
 import org.apache.cassandra.utils.FBUtilities;
 
 import static com.google.common.collect.Iterables.all;
+import static com.google.common.collect.Iterables.isEmpty;
 import static java.util.concurrent.TimeUnit.MICROSECONDS;
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static org.apache.cassandra.utils.MonotonicClock.Global.preciseTime;
@@ -125,13 +126,23 @@ public abstract class AbstractReadExecutor
 
     protected void makeTransientDataRequests(Iterable<Replica> replicas)
     {
+        // Copying the command to a transient query allocates a copy of the command, its data range and
+        // its bounds; do not pay for it when there is no transient replica to send it to.
+        if (isEmpty(replicas))
+            return;
+
         makeRequests(command.copyAsTransientQuery(replicas), replicas);
     }
 
     protected void makeDigestRequests(Iterable<Replica> replicas)
     {
+        // Only send digest requests to full replicas, send data requests instead to the transient replicas.
+        // Nothing to send (and nothing to validate) when the group is empty, which is the common case at
+        // CL=ONE or whenever every replica is already covered by the data requests.
+        if (isEmpty(replicas))
+            return;
+
         assert all(replicas, Replica::isFull);
-        // only send digest requests to full replicas, send data requests instead to the transient replicas
         makeRequests(command.copyAsDigestQuery(replicas), replicas);
     }
 
