@@ -263,6 +263,19 @@ public final class SimpleRestriction implements SingleRestriction
         operator.restrict(rangeSet, bindAndGetClusteringElements(context), partitioner);
     }
 
+    /**
+     * Returns the clustering elements of a slice restriction: one element for the operators with a single bound and
+     * the start and end elements for {@code BETWEEN}.
+     *
+     * @param context the function context
+     * @return the bound elements
+     */
+    List<ClusteringElements> boundElements(FunctionContext context)
+    {
+        assert operator.isSlice();
+        return bindAndGetClusteringElements(context);
+    }
+
     private List<ClusteringElements> bindAndGetClusteringElements(FunctionContext context)
     {
         switch (columnsExpression.kind())

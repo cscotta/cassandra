@@ -17,6 +17,7 @@
  */
 package org.apache.cassandra.cql3.restrictions;
 
+import java.util.Collections;
 import java.util.List;
 import java.util.NavigableSet;
 
@@ -25,10 +26,14 @@ import javax.annotation.Nullable;
 import com.google.common.collect.RangeSet;
 
 import org.apache.cassandra.cql3.FunctionContext;
+import org.apache.cassandra.cql3.Operator;
 import org.apache.cassandra.cql3.QueryOptions;
+import org.apache.cassandra.db.BufferClusteringBound;
 import org.apache.cassandra.db.Clustering;
+import org.apache.cassandra.db.ClusteringBound;
 import org.apache.cassandra.db.ClusteringComparator;
 import org.apache.cassandra.db.MultiCBuilder;
+import org.apache.cassandra.db.Slice;
 import org.apache.cassandra.db.Slices;
 import org.apache.cassandra.db.filter.IndexHints;
 import org.apache.cassandra.db.filter.RowFilter;
@@ -130,6 +135,96 @@ final class ClusteringColumnRestrictions extends RestrictionSetWrapper
     }
 
     public Slices slices(QueryOptions options) throws InvalidRequestException
+    {
+        Slices slices = singleColumnSlices(options);
+        return slices != null ? slices : genericSlices(options);
+    }
+
+    /**
+     * Builds the slices of a restriction set that only constrains the first clustering column with a slice, for
+     * instance {@code c1 >= ? AND c1 <= ?} on an ascending column.
+     * <p>
+     * For a single ascending column the restricted set is always one slice whose bounds are the restriction bounds,
+     * so it can be built directly. {@link #genericSlices(QueryOptions)} starts from a Guava {@code RangeSet}
+     * containing every clustering and removes the restricted ranges from it, which costs a tree insertion, a tree
+     * removal and several temporary objects per execution. Reversed columns, token restrictions and multi-column
+     * restrictions can produce several ranges (the CQL order and the internal clustering order differ) and are left
+     * to the generic path.
+     *
+     * @param options the query options
+     * @return the slices, or {@code null} if this restriction set has to be handled by {@link #genericSlices(QueryOptions)}
+     */
+    @Nullable
+    private Slices singleColumnSlices(QueryOptions options)
+    {
+        if (restrictions.size() != 1)
+            return null;
+
+        SingleRestriction restriction = restrictions.lastRestriction();
+        if (restriction == null || !restriction.isSlice() || restriction.isMultiColumn() || restriction.isOnToken())
+            return null;
+
+        ColumnMetadata column = restriction.firstColumn();
+        if (column.position() != 0 || column.type.isReversed())
+            return null;
+
+        List<SimpleRestriction> parts;
+        if (restriction instanceof SimpleRestriction)
+            parts = Collections.singletonList((SimpleRestriction) restriction);
+        else if (restriction instanceof MergedRestriction)
+            parts = ((MergedRestriction) restriction).underlyingRestrictions();
+        else
+            return null;
+
+        ClusteringBound<?> start = null;
+        ClusteringBound<?> end = null;
+        for (int i = 0, m = parts.size(); i < m; i++)
+        {
+            SimpleRestriction part = parts.get(i);
+            List<ClusteringElements> elements = part.boundElements(options);
+            switch (part.operator())
+            {
+                case GT:
+                case GTE:
+                    if (start != null || elements.size() != 1)
+                        return null;
+                    start = elements.get(0).toBound(true, part.operator() == Operator.GTE);
+                    break;
+                case LT:
+                case LTE:
+                    if (end != null || elements.size() != 1)
+                        return null;
+                    end = elements.get(0).toBound(false, part.operator() == Operator.LTE);
+                    break;
+                case BETWEEN:
+                    if (start != null || end != null || elements.size() != 2)
+                        return null;
+                    start = elements.get(0).toBound(true, true);
+                    end = elements.get(1).toBound(false, true);
+                    break;
+                default:
+                    return null;
+            }
+        }
+
+        Slice slice = Slice.make(start == null ? BufferClusteringBound.BOTTOM : start,
+                                 end == null ? BufferClusteringBound.TOP : end);
+        if (slice.isEmpty(comparator))
+            return Slices.NONE;
+
+        Slices.Builder builder = new Slices.Builder(comparator, 1);
+        builder.add(slice);
+        return builder.build();
+    }
+
+    /**
+     * Builds the slices by restricting a range spanning all the clusterings, the generic implementation for every
+     * restriction shape that {@link #singleColumnSlices(QueryOptions)} does not handle.
+     *
+     * @param options the query options
+     * @return the slices
+     */
+    Slices genericSlices(QueryOptions options) throws InvalidRequestException
     {
         MultiCBuilder builder = new MultiCBuilder(comparator);
         if (restrictions.isEmpty()) // to avoid an iterator allocation for restrictions
