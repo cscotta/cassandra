@@ -106,9 +106,11 @@ public class SharedExecutorPool
     }
 
     /**
-     * Takes an exclusive spinning slot for a new worker, or -1 if every slot is already owned.
+     * Takes an exclusive spinning slot for {@code worker}, or -1 if every slot is already owned. Slots are taken on
+     * the first spin rather than on construction, so a pool with more workers than slots only loses the handoff of
+     * its spin for the workers that cannot be registered.
      */
-    int acquireSpinningSlot()
+    int acquireSpinningSlot(SEPWorker worker)
     {
         while (true)
         {
@@ -117,7 +119,10 @@ public class SharedExecutorPool
                 return -1;
             int slot = Long.numberOfTrailingZeros(~mask);
             if (spinningSlots.compareAndSet(mask, mask | (1L << slot)))
+            {
+                spinners.set(slot, worker);
                 return slot;
+            }
         }
     }
 
@@ -139,6 +144,10 @@ public class SharedExecutorPool
      */
     private SEPWorker pollSpinningWorker()
     {
+        // the registry is only consulted when a worker is spinning, which keeps the common case to a single read
+        if (spinningCount.get() == 0)
+            return null;
+
         // a claim can lose against the worker waking up and unregistering itself, in which case we look again
         for (int attempt = 0; attempt < 4; attempt++)
         {
@@ -154,7 +163,7 @@ public class SharedExecutorPool
                 if (worker == null)
                     continue;
                 long deadline = worker.spinDeadline();
-                if (deadline <= 0 || deadline >= earliestDeadline)
+                if (deadline == SEPWorker.NOT_SPINNING || deadline >= earliestDeadline)
                     continue;
                 earliest = worker;
                 earliestDeadline = deadline;

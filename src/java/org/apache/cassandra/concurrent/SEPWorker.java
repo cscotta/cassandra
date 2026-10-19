@@ -43,14 +43,20 @@ final class SEPWorker extends AtomicReference<SEPWorker.Work> implements Runnabl
     final Thread thread;
     final SharedExecutorPool pool;
     /**
-     * This worker's exclusive slot in the pool's spinning registry, or -1 if every slot was already owned.
+     * The value of {@link #spinDeadlineNanos} while the worker is not registered as spinning.
      */
-    final int spinningSlot;
+    static final long NOT_SPINNING = Long.MIN_VALUE;
     /**
-     * The time at which this worker will wake up from its current spin, or 0 when it is not registered as spinning.
-     * It is written only by this worker and claimed (reset to 0) by whichever thread wants to hand it some work.
+     * This worker's exclusive slot in the pool's spinning registry, or -1 while it has not spun, or if every slot was
+     * already owned. It is only written by this worker and read by it again when it ends.
      */
-    private final AtomicLong spinDeadlineNanos = new AtomicLong();
+    int spinningSlot = -1;
+    /**
+     * The time at which this worker will wake up from its current spin, or {@link #NOT_SPINNING} when it is not
+     * registered as spinning. It is written only by this worker and claimed (reset to {@link #NOT_SPINNING}) by
+     * whichever thread wants to hand it some work.
+     */
+    private final AtomicLong spinDeadlineNanos = new AtomicLong(NOT_SPINNING);
 
     // prevStopCheck stores the value of pool.stopCheck after we last incremented it; if it hasn't changed,
     // we know nobody else was spinning in the interval, so we increment our soleSpinnerSpinTime accordingly,
@@ -99,9 +105,6 @@ final class SEPWorker extends AtomicReference<SEPWorker.Work> implements Runnabl
         this.workerIdThreadSuffix = '-' + workerId.toString();
         String threadName = threadGroup.getName() + "-Worker-" + workerId;
         this.immediateDebuggableTaskRunner = new ImmediateDebuggableTaskRunner();
-        this.spinningSlot = pool.acquireSpinningSlot();
-        if (spinningSlot >= 0)
-            pool.spinners.set(spinningSlot, this);
         thread = new CassandraThread(threadGroup, this, threadName, immediateDebuggableTaskRunner);
         thread.setDaemon(true);
         set(initialState);
@@ -359,16 +362,22 @@ final class SEPWorker extends AtomicReference<SEPWorker.Work> implements Runnabl
 
         long start = nanoTime();
 
+        // our first spin registers us with the pool, which bounds the registry by the workers that are spinning rather
+        // than by the workers that exist
+        int slot = spinningSlot;
+        if (slot < 0)
+            slot = spinningSlot = pool.acquireSpinningSlot(this);
+
         // publish our scheduled wake-up so that a producer can hand us work instead of starting a new worker; a producer
-        // that claims it resets the deadline to 0, so this is the allocation-free equivalent of the spinning collection
+        // that claims it resets the deadline, so this is the allocation-free equivalent of the spinning collection
         long target = start + sleep;
-        if (spinningSlot >= 0)
+        if (slot >= 0)
             spinDeadlineNanos.set(target);
         LockSupport.parkNanos(sleep);
 
         // unregister ourselves unless a producer already claimed us
-        if (spinningSlot >= 0)
-            spinDeadlineNanos.compareAndSet(target, 0);
+        if (slot >= 0)
+            spinDeadlineNanos.compareAndSet(target, NOT_SPINNING);
 
         // finish timing and grab spinningTime (before we finish timing so it is under rather than overestimated)
         long end = nanoTime();
@@ -383,7 +392,8 @@ final class SEPWorker extends AtomicReference<SEPWorker.Work> implements Runnabl
     }
 
     /**
-     * Returns the time at which this worker will wake up from its current spin, or 0 if it is not registered as spinning.
+     * Returns the time at which this worker will wake up from its current spin, or {@link #NOT_SPINNING} if it is not
+     * registered as spinning.
      */
     long spinDeadline()
     {
@@ -396,7 +406,7 @@ final class SEPWorker extends AtomicReference<SEPWorker.Work> implements Runnabl
      */
     boolean claimSpin(long deadline)
     {
-        return spinDeadlineNanos.compareAndSet(deadline, 0);
+        return spinDeadlineNanos.compareAndSet(deadline, NOT_SPINNING);
     }
 
     private static final long stopCheckInterval = TimeUnit.MILLISECONDS.toNanos(10L);

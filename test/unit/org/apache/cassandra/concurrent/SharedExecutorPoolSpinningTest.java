@@ -50,11 +50,11 @@ public class SharedExecutorPoolSpinningTest
         Set<Integer> slots = new HashSet<>();
         for (int i = 0; i < SharedExecutorPool.MAX_SPINNING_WORKERS; i++)
         {
-            int slot = pool.acquireSpinningSlot();
+            int slot = pool.acquireSpinningSlot(null);
             assertThat(slot).isBetween(0, SharedExecutorPool.MAX_SPINNING_WORKERS - 1);
             assertThat(slots.add(slot)).isTrue();
         }
-        assertThat(pool.acquireSpinningSlot()).isEqualTo(-1);
+        assertThat(pool.acquireSpinningSlot(null)).isEqualTo(-1);
 
         for (int slot : slots)
             pool.releaseSpinningSlot(slot);
@@ -83,7 +83,7 @@ public class SharedExecutorPoolSpinningTest
                 for (int slot = 0; slot < SharedExecutorPool.MAX_SPINNING_WORKERS; slot++)
                 {
                     SEPWorker worker = pool.spinners.get(slot);
-                    if (worker != null && (deadline = worker.spinDeadline()) > 0)
+                    if (worker != null && (deadline = worker.spinDeadline()) != SEPWorker.NOT_SPINNING)
                     {
                         spinner = worker;
                         break;
