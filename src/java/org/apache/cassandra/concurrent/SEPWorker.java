@@ -19,6 +19,7 @@ package org.apache.cassandra.concurrent;
 
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 
@@ -41,6 +42,21 @@ final class SEPWorker extends AtomicReference<SEPWorker.Work> implements Runnabl
     final String workerIdThreadSuffix;
     final Thread thread;
     final SharedExecutorPool pool;
+    /**
+     * The value of {@link #spinDeadlineNanos} while the worker is not registered as spinning.
+     */
+    static final long NOT_SPINNING = Long.MIN_VALUE;
+    /**
+     * This worker's exclusive slot in the pool's spinning registry, or -1 while it has not spun, or if every slot was
+     * already owned. It is only written by this worker and read by it again when it ends.
+     */
+    int spinningSlot = -1;
+    /**
+     * The time at which this worker will wake up from its current spin, or {@link #NOT_SPINNING} when it is not
+     * registered as spinning. It is written only by this worker and claimed (reset to {@link #NOT_SPINNING}) by
+     * whichever thread wants to hand it some work.
+     */
+    private final AtomicLong spinDeadlineNanos = new AtomicLong(NOT_SPINNING);
 
     // prevStopCheck stores the value of pool.stopCheck after we last incremented it; if it hasn't changed,
     // we know nobody else was spinning in the interval, so we increment our soleSpinnerSpinTime accordingly,
@@ -346,14 +362,22 @@ final class SEPWorker extends AtomicReference<SEPWorker.Work> implements Runnabl
 
         long start = nanoTime();
 
-        // place ourselves in the spinning collection; if we clash with another thread just exit
-        Long target = start + sleep;
-        if (pool.spinning.putIfAbsent(target, this) != null)
-            return;
+        // our first spin registers us with the pool, which bounds the registry by the workers that are spinning rather
+        // than by the workers that exist
+        int slot = spinningSlot;
+        if (slot < 0)
+            slot = spinningSlot = pool.acquireSpinningSlot(this);
+
+        // publish our scheduled wake-up so that a producer can hand us work instead of starting a new worker; a producer
+        // that claims it resets the deadline, so this is the allocation-free equivalent of the spinning collection
+        long target = start + sleep;
+        if (slot >= 0)
+            spinDeadlineNanos.set(target);
         LockSupport.parkNanos(sleep);
 
-        // remove ourselves (if haven't been already) - we should be at or near the front, so should be cheap-ish
-        pool.spinning.remove(target, this);
+        // unregister ourselves unless a producer already claimed us
+        if (slot >= 0)
+            spinDeadlineNanos.compareAndSet(target, NOT_SPINNING);
 
         // finish timing and grab spinningTime (before we finish timing so it is under rather than overestimated)
         long end = nanoTime();
@@ -365,6 +389,24 @@ final class SEPWorker extends AtomicReference<SEPWorker.Work> implements Runnabl
         else
             soleSpinnerSpinTime = 0;
         prevStopCheck = stopCheck;
+    }
+
+    /**
+     * Returns the time at which this worker will wake up from its current spin, or {@link #NOT_SPINNING} if it is not
+     * registered as spinning.
+     */
+    long spinDeadline()
+    {
+        return spinDeadlineNanos.get();
+    }
+
+    /**
+     * Unregisters this worker's spin if it is still the one registered with {@code deadline}, so that only one thread
+     * can hand work to a given spin.
+     */
+    boolean claimSpin(long deadline)
+    {
+        return spinDeadlineNanos.compareAndSet(deadline, NOT_SPINNING);
     }
 
     private static final long stopCheckInterval = TimeUnit.MILLISECONDS.toNanos(10L);

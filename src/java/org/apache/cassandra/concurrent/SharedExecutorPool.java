@@ -28,6 +28,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.concurrent.locks.LockSupport;
 import java.util.stream.Stream;
 
@@ -77,10 +78,16 @@ public class SharedExecutorPool
     final AtomicInteger spinningCount = new AtomicInteger();
     // see SEPWorker.maybeStop() - used to self coordinate stopping of threads
     final AtomicLong stopCheck = new AtomicLong();
+
+    /**
+     * The number of workers that may register themselves as spinning at the same time. Each worker keeps its slot
+     * for its whole lifetime, so a slot is only ever written by its owner and by the threads that claim its spin.
+     */
+    static final int MAX_SPINNING_WORKERS = 64;
+    // the slots currently owned by a worker, as a bit mask; workers without a slot do not register their spins
+    final AtomicLong spinningSlots = new AtomicLong();
     // the collection of threads that are (most likely) in a spinning state - new workers are scheduled from here first
-    // TODO: consider using a queue partially-ordered by scheduled wake-up time
-    // (a full-fledged correctly ordered SkipList is overkill)
-    final ConcurrentSkipListMap<Long, SEPWorker> spinning = new ConcurrentSkipListMap<>();
+    final AtomicReferenceArray<SEPWorker> spinners = new AtomicReferenceArray<>(MAX_SPINNING_WORKERS);
     // the collection of threads that have been asked to stop/deschedule - new workers are scheduled from here last
     final ConcurrentSkipListMap<Long, SEPWorker> descheduled = new ConcurrentSkipListMap<>();
     // All SEPWorkers that are currently running
@@ -98,14 +105,91 @@ public class SharedExecutorPool
         this.threadGroup = threadGroup;
     }
 
+    /**
+     * Takes an exclusive spinning slot for {@code worker}, or -1 if every slot is already owned. Slots are taken on
+     * the first spin rather than on construction, so a pool with more workers than slots only loses the handoff of
+     * its spin for the workers that cannot be registered.
+     */
+    int acquireSpinningSlot(SEPWorker worker)
+    {
+        while (true)
+        {
+            long mask = spinningSlots.get();
+            if (mask == -1L)
+                return -1;
+            int slot = Long.numberOfTrailingZeros(~mask);
+            if (spinningSlots.compareAndSet(mask, mask | (1L << slot)))
+            {
+                spinners.set(slot, worker);
+                return slot;
+            }
+        }
+    }
+
+    /**
+     * Releases a spinning slot, which must no longer be registered.
+     */
+    void releaseSpinningSlot(int slot)
+    {
+        if (slot < 0)
+            return;
+        spinners.set(slot, null);
+        spinningSlots.updateAndGet(mask -> mask & ~(1L << slot));
+    }
+
+    /**
+     * Takes the registered spinning worker whose scheduled wake-up is the earliest, if any is still spinning.
+     * The claimed worker is unregistered, exactly as removing it from the previous spinning collection did, so that
+     * it does not expect to be handed any further work by this mechanism.
+     */
+    private SEPWorker pollSpinningWorker()
+    {
+        // the registry is only consulted when a worker is spinning, which keeps the common case to a single read
+        if (spinningCount.get() == 0)
+            return null;
+
+        // a claim can lose against the worker waking up and unregistering itself, in which case we look again
+        for (int attempt = 0; attempt < 4; attempt++)
+        {
+            long mask = spinningSlots.get();
+            if (mask == 0)
+                return null;
+
+            SEPWorker earliest = null;
+            long earliestDeadline = Long.MAX_VALUE;
+            for (long remaining = mask; remaining != 0; remaining &= remaining - 1)
+            {
+                SEPWorker worker = spinners.get(Long.numberOfTrailingZeros(remaining));
+                if (worker == null)
+                    continue;
+                long deadline = worker.spinDeadline();
+                if (deadline == SEPWorker.NOT_SPINNING || deadline >= earliestDeadline)
+                    continue;
+                earliest = worker;
+                earliestDeadline = deadline;
+            }
+
+            if (earliest == null)
+                return null;
+            if (earliest.claimSpin(earliestDeadline))
+                return earliest;
+        }
+        return null;
+    }
+
     void schedule(Work work)
     {
         // we try to hand-off our work to the spinning queue before the descheduled queue, even though we expect it to be empty
         // all we're doing here is hoping to find a worker without work to do, but it doesn't matter too much what we find;
         // we atomically set the task so even if this were a collection of all workers it would be safe, and if they are both
         // empty we schedule a new thread
+        SEPWorker spinner;
+        while (null != (spinner = pollSpinningWorker()))
+            if (spinner.assign(work, false))
+                return;
+
         Map.Entry<Long, SEPWorker> e;
-        while (null != (e = spinning.pollFirstEntry()) || null != (e = descheduled.pollFirstEntry()))
+        while (null != (e = descheduled.pollFirstEntry()))
             if (e.getValue().assign(work, false))
                 return;
 
@@ -119,6 +203,7 @@ public class SharedExecutorPool
     void workerEnded(SEPWorker worker)
     {
         allWorkers.remove(worker);
+        releaseSpinningSlot(worker.spinningSlot);
     }
 
     public Stream<? extends DebuggableTaskRunner> workers()
@@ -175,7 +260,12 @@ public class SharedExecutorPool
         while (null != (e = descheduled.pollFirstEntry()))
             e.getValue().assign(Work.SPINNING, false);
 
-        while (null != (e = spinning.pollFirstEntry()))
-            LockSupport.unpark(e.getValue().thread);
+        long mask = spinningSlots.get();
+        for (long remaining = mask; remaining != 0; remaining &= remaining - 1)
+        {
+            SEPWorker worker = spinners.get(Long.numberOfTrailingZeros(remaining));
+            if (worker != null)
+                LockSupport.unpark(worker.thread);
+        }
     }
 }
