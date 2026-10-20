@@ -19,8 +19,10 @@
 package org.apache.cassandra.db.marshal;
 
 import java.io.IOException;
+import java.nio.BufferOverflowException;
 import java.nio.ByteBuffer;
 import java.nio.FloatBuffer;
+import java.nio.ReadOnlyBufferException;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.Charset;
 import java.util.UUID;
@@ -66,7 +68,34 @@ public class ByteBufferAccessor implements ValueAccessor<ByteBuffer>
     @Override
     public void write(ByteBuffer value, ByteBuffer out)
     {
-        out.put(value.duplicate());
+        // Equivalent to out.put(value.duplicate()), but without the per-call wrapper the duplicate
+        // allocates: value's position is left untouched and out's position advances by the copied length.
+        // Copying is on the hot path of cell cloning (ByteBufferCloner) and serialization.
+        int length = value.remaining();
+        // Buffer.put(ByteBuffer) rejects a read-only destination regardless of the source length
+        if (out.isReadOnly())
+            throw new ReadOnlyBufferException();
+        if (length == 0)
+            return;
+        if (length > out.remaining())
+            throw new BufferOverflowException();
+        // A read-only heap buffer has no accessible array and no address, so it must not take the
+        // FastByteOperations path, which would treat it as a direct buffer
+        if (!value.isDirect() && !value.hasArray())
+        {
+            out.put(value.duplicate());
+            return;
+        }
+        // FastByteOperations copies with Unsafe, which is not safe when the two buffers share storage
+        if (value.hasArray() && out.hasArray() && value.array() == out.array())
+        {
+            System.arraycopy(value.array(), value.arrayOffset() + value.position(),
+                             out.array(), out.arrayOffset() + out.position(), length);
+            out.position(out.position() + length);
+            return;
+        }
+        FastByteOperations.copy(value, value.position(), out, out.position(), length);
+        out.position(out.position() + length);
     }
 
     @Override
