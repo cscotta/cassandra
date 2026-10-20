@@ -50,6 +50,8 @@ import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.db.BufferClusteringBound;
 import org.apache.cassandra.db.Clusterable;
 import org.apache.cassandra.db.Clustering;
+import org.apache.cassandra.db.ClusteringBound;
+import org.apache.cassandra.db.ClusteringComparator;
 import org.apache.cassandra.db.ClusteringPrefix;
 import org.apache.cassandra.db.DeletionTime;
 import org.apache.cassandra.db.Slice;
@@ -82,6 +84,7 @@ public class PartitionImplementationTest
 {
     private static final String KEYSPACE = "PartitionImplementationTest";
     private static final String CF = "Standard";
+    private static final String CF_TWO_CLUSTERING = "TwoClustering";
 
     private static final int ENTRIES = 250;
     private static final int TESTS = 1000;
@@ -90,6 +93,7 @@ public class PartitionImplementationTest
     private static final int TIMESTAMP = KEY_RANGE + 1;
 
     private static TableMetadata metadata;
+    private static TableMetadata twoClusteringMetadata;
     private Random rand = new Random(2);
 
     @BeforeClass
@@ -105,7 +109,15 @@ public class PartitionImplementationTest
                          .addStaticColumn("static_col", AsciiType.instance)
                          .build();
 
-        SchemaLoader.createKeyspace(KEYSPACE, KeyspaceParams.simple(1), metadata);
+        twoClusteringMetadata =
+            TableMetadata.builder(KEYSPACE, CF_TWO_CLUSTERING)
+                         .addPartitionKeyColumn("pk", AsciiType.instance)
+                         .addClusteringColumn("ck1", AsciiType.instance)
+                         .addClusteringColumn("ck2", AsciiType.instance)
+                         .addRegularColumn("col", AsciiType.instance)
+                         .build();
+
+        SchemaLoader.createKeyspace(KEYSPACE, KeyspaceParams.simple(1), metadata, twoClusteringMetadata);
     }
 
     public static BufferClusteringBound inclusiveStartOf(ClusteringPrefix<ByteBuffer> prefix)
@@ -338,6 +350,8 @@ public class PartitionImplementationTest
                              partition.unfilteredIterator(ColumnFilter.all(metadata), slices, false));
         assertIteratorsEqual(streamOf(slice(sortedContent, slices.get(0))).map(colFilter).iterator(),
                              partition.unfilteredIterator(cf, slices, false));
+        // single clustering slices, as produced by a names query
+        testPointSlices(sortedContent, partition, cf, colFilter);
         // randomly multi-sliced
         assertIteratorsEqual(slice(sortedContent, multiSlices),
                              partition.unfilteredIterator(ColumnFilter.all(metadata), multiSlices, false));
@@ -368,6 +382,91 @@ public class PartitionImplementationTest
         testSlicingOfIterators(sortedContent, partition, cf, false);
         testSlicingOfIterators(sortedContent, partition, ColumnFilter.all(metadata), true);
         testSlicingOfIterators(sortedContent, partition, cf, true);
+    }
+
+    /**
+     * A names query asks for exact clusterings, i.e. slices whose start and end bound hold that single clustering
+     * ({@link Slice#make(Clustering)}). Iterating them must return exactly the requested row, in both directions,
+     * whether or not that row exists.
+     */
+    private void testPointSlices(NavigableSet<Clusterable> sortedContent,
+                                 Partition partition,
+                                 ColumnFilter cf,
+                                 Function<? super Clusterable, ? extends Clusterable> colFilter)
+    {
+        for (int i = 0; i < KEY_RANGE; i += 13)
+        {
+            Slice point = Slice.make(clustering(i));
+            Slices pointSlice = Slices.with(metadata.comparator, point);
+
+            assertIteratorsEqual(slice(sortedContent, point),
+                                 partition.unfilteredIterator(ColumnFilter.all(metadata), pointSlice, false));
+            assertIteratorsEqual(streamOf(slice(sortedContent, point)).map(colFilter).iterator(),
+                                 partition.unfilteredIterator(cf, pointSlice, false));
+            assertIteratorsEqual(invert(slice(sortedContent, point)),
+                                 partition.unfilteredIterator(ColumnFilter.all(metadata), pointSlice, true));
+        }
+    }
+
+    /**
+     * The single clustering fast path compares the components of the two bounds, and must not treat a slice on a
+     * prefix of the clustering columns as a single clustering. Both cases are exercised here on a table with two
+     * clustering columns, against a reference built from the slice bounds alone.
+     */
+    @Test
+    public void testSliceShapesWithTwoClusteringColumns()
+    {
+        ClusteringComparator comparator = twoClusteringMetadata.comparator;
+        ColumnMetadata defCol = twoClusteringMetadata.getColumn(new ColumnIdentifier("col", true));
+        List<Unfiltered> rows = new ArrayList<>();
+        for (String[] values : new String[][]{ { "a", "a" }, { "a", "b" }, { "b", "a" }, { "c", "c" } })
+        {
+            Row.Builder row = BTreeRow.unsortedBuilder();
+            row.newRow(comparator.make((Object[]) values));
+            row.addCell(BufferCell.live(defCol, TIMESTAMP, ByteBufferUtil.bytes(values[0] + values[1])));
+            rows.add(row.build());
+        }
+
+        AbstractBTreePartition partition;
+        try (UnfilteredRowIterator iter = new Util.UnfilteredSource(twoClusteringMetadata, Util.dk("pk"), null, rows.iterator()))
+        {
+            partition = ImmutableBTreePartition.create(iter);
+        }
+
+        Slice prefixOfA = Slice.make(BufferClusteringBound.inclusiveStartOf(ByteBufferUtil.bytes("a")),
+                                     BufferClusteringBound.inclusiveEndOf(ByteBufferUtil.bytes("a")));
+
+        List<Slice> slices = new ArrayList<>();
+        slices.add(Slice.make(comparator.make("a", "a")));     // first row, a full clustering
+        slices.add(Slice.make(comparator.make("a", "b")));     // last row of the "a" prefix
+        slices.add(Slice.make(comparator.make("b", "a")));
+        slices.add(Slice.make(comparator.make("b", "b")));     // absent clustering
+        slices.add(Slice.make(comparator.make("a", "a"), comparator.make("b", "a")));
+        slices.add(prefixOfA);                                   // prefix slice, spans two rows
+        slices.add(Slice.ALL);
+
+        for (Slice slice : slices)
+        {
+            List<Unfiltered> expected = new ArrayList<>();
+            for (Unfiltered row : rows)
+            {
+                if (slice.includes(comparator, row.clustering()))
+                    expected.add(row);
+            }
+
+            for (boolean reversed : new boolean[]{ false, true })
+            {
+                List<Unfiltered> ordered = new ArrayList<>(expected);
+                if (reversed)
+                    Collections.reverse(ordered);
+                try (UnfilteredRowIterator iter = partition.unfilteredIterator(ColumnFilter.all(twoClusteringMetadata),
+                                                                               Slices.with(comparator, slice),
+                                                                               reversed))
+                {
+                    assertIteratorsEqual(ordered.iterator(), iter);
+                }
+            }
+        }
     }
 
     private void testClusteringsIterator(NavigableSet<Clusterable> sortedContent, Partition partition, ColumnFilter cf, boolean reversed)

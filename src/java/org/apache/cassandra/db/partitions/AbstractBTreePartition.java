@@ -26,6 +26,7 @@ import com.google.common.collect.Iterators;
 
 import org.apache.cassandra.db.Clustering;
 import org.apache.cassandra.db.ClusteringBound;
+import org.apache.cassandra.db.ClusteringComparator;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.DeletionInfo;
 import org.apache.cassandra.db.DeletionTime;
@@ -191,11 +192,64 @@ public abstract class AbstractBTreePartition implements Partition, Iterable<Row>
 
     private UnfilteredRowIterator sliceIterator(ColumnFilter selection, Slice slice, boolean reversed, BTreePartitionData current, Row staticRow)
     {
-        ClusteringBound<?> start = slice.start().isBottom() ? null : slice.start();
-        ClusteringBound<?> end = slice.end().isTop() ? null : slice.end();
-        Iterator<Row> rowIter = BTree.slice(current.tree, metadata().comparator, start, true, end, true, desc(reversed));
+        Iterator<Row> rowIter = sliceRows(current.tree, slice, reversed);
         Iterator<RangeTombstone> deleteIter = current.deletionInfo.rangeIterator(slice, reversed);
         return merge(rowIter, deleteIter, selection, reversed, current, staticRow);
+    }
+
+    /**
+     * The rows of {@code tree} that fall in {@code slice}. When the slice holds a single clustering, which is what
+     * a names query asks for, both of its bounds are that clustering: one bound search then locates the only
+     * candidate row, so the second search for the other bound is not needed.
+     */
+    private Iterator<Row> sliceRows(Object[] tree, Slice slice, boolean reversed)
+    {
+        ClusteringComparator comparator = metadata().comparator;
+        ClusteringBound<?> sliceStart = slice.start();
+        ClusteringBound<?> sliceEnd = slice.end();
+
+        if (isSingleClustering(comparator, sliceStart, sliceEnd))
+        {
+            int index = BTree.ceilIndex(tree, comparator, sliceStart);
+            if (index < BTree.size(tree))
+            {
+                Row row = BTree.findByIndex(tree, index);
+                int cmp = comparator.compare(row, sliceEnd);
+                if (cmp < 0)
+                    return Iterators.singletonIterator(row);
+                // A row whose clustering is a strict prefix of the slice bounds compares as equal to both of
+                // them, so it is not proof of an empty slice: let the general path decide.
+                if (cmp > 0)
+                    return Collections.emptyIterator();
+            }
+            else
+            {
+                return Collections.emptyIterator();
+            }
+        }
+
+        ClusteringBound<?> start = sliceStart.isBottom() ? null : sliceStart;
+        ClusteringBound<?> end = sliceEnd.isTop() ? null : sliceEnd;
+        return BTree.slice(tree, comparator, start, true, end, true, desc(reversed));
+    }
+
+    /**
+     * Whether the slice holds at most one row, i.e. whether both of its bounds are full inclusive clusterings
+     * with the same values. This is what a names query asks for, while {@link Slices#ALL} (whose bounds hold no
+     * value) and a slice on a prefix of the clustering columns both span more than one row.
+     */
+    private static boolean isSingleClustering(ClusteringComparator comparator, ClusteringBound<?> start, ClusteringBound<?> end)
+    {
+        int size = comparator.size();
+        if (size == 0 || start.size() != size || end.size() != size || !start.isInclusive() || !end.isInclusive())
+            return false;
+
+        for (int i = 0; i < size; i++)
+        {
+            if (comparator.compareComponent(i, start, end) != 0)
+                return false;
+        }
+        return true;
     }
 
     private RowAndDeletionMergeIterator merge(Iterator<Row> rowIter, Iterator<RangeTombstone> deleteIter,
