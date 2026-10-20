@@ -20,6 +20,7 @@ package org.apache.cassandra.db.rows;
 
 import java.math.BigInteger;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedList;
@@ -80,6 +81,20 @@ public class RowsTest
     private static final ByteBuffer BB2 = ByteBufferUtil.bytes(2);
     private static final ByteBuffer BB3 = ByteBufferUtil.bytes(3);
     private static final ByteBuffer BB4 = ByteBufferUtil.bytes(4);
+
+    // More regular columns than Row.Merger can merge versions of at once in a single sorted section, so the merge
+    // tests below cover many sources, interleaved column order and grouping versions held by non-adjacent sources.
+    private static final TableMetadata wideMerge =
+        TableMetadata.builder(KEYSPACE, "wide_merge")
+                     .addPartitionKeyColumn("k", IntegerType.instance)
+                     .addClusteringColumn("ck", IntegerType.instance)
+                     .addRegularColumn("a", Int32Type.instance)
+                     .addRegularColumn("b", Int32Type.instance)
+                     .addRegularColumn("d", Int32Type.instance)
+                     .addRegularColumn("e", Int32Type.instance)
+                     .addRegularColumn("f", Int32Type.instance)
+                     .addRegularColumn("g", Int32Type.instance)
+                     .build();
 
     private static class MergedPair<T>
     {
@@ -331,6 +346,191 @@ public class RowsTest
         Row mergedTombstone = mergeRows(liveRow(c1, ts, BB1), rowWithCell(c1, ts + 2, tombstoneCell));
         Assert.assertEquals(Long.MIN_VALUE, mergedTombstone.minLocalDeletionTime());
         Assert.assertTrue(mergedTombstone.hasDeletion(now));
+    }
+
+    private static ColumnMetadata wideColumn(String name)
+    {
+        return wideMerge.getColumn(new ColumnIdentifier(name, false));
+    }
+
+    private static Row wideRow(long ts, Cell<?>... cells)
+    {
+        Row.Builder builder = BTreeRow.unsortedBuilder();
+        builder.newRow(wideMerge.comparator.make(BigInteger.valueOf(1)));
+        builder.addPrimaryKeyLivenessInfo(LivenessInfo.create(ts));
+        for (Cell<?> cell : cells)
+            builder.addCell(cell);
+        return builder.build();
+    }
+
+    private static Row mergeWide(Row... rows)
+    {
+        Row.Merger merger = new Row.Merger(rows.length, false);
+        for (int i = 0; i < rows.length; i++)
+            merger.add(i, rows[i]);
+        return merger.merge(DeletionTime.LIVE);
+    }
+
+    private static List<ColumnMetadata> mergedColumns(Row row)
+    {
+        List<ColumnMetadata> columns = new ArrayList<>();
+        for (ColumnData data : row)
+            columns.add(data.column());
+        return columns;
+    }
+
+    private static long mergedTimestamp(Row row, ColumnMetadata column)
+    {
+        for (ColumnData data : row)
+        {
+            if (data.column().equals(column))
+                return ((Cell<?>) data).timestamp();
+        }
+        return Long.MIN_VALUE;
+    }
+
+    private static ByteBuffer mergedValue(Row row, ColumnMetadata column)
+    {
+        for (ColumnData data : row)
+        {
+            if (data.column().equals(column))
+                return (ByteBuffer) ((Cell<?>) data).value();
+        }
+        return null;
+    }
+
+    @Test
+    public void testMergerManySources()
+    {
+        ColumnMetadata a = wideColumn("a"), b = wideColumn("b"), d = wideColumn("d"),
+                       e = wideColumn("e"), f = wideColumn("f"), g = wideColumn("g");
+
+        // Six sources: disjoint columns interleaved across sources, one source without columns, and one column
+        // whose three versions are held by the first, third and last source.
+        Row r0 = wideRow(1000, BufferCell.live(a, 1000, BB1), BufferCell.live(e, 1000, BB1), BufferCell.live(f, 1000, BB1));
+        Row r1 = wideRow(1001, BufferCell.live(b, 1001, BB2));
+        Row r2 = wideRow(1002, BufferCell.live(d, 1002, BB2), BufferCell.live(f, 1002, BB2));
+        Row r3 = wideRow(1003);
+        Row r4 = wideRow(1004, BufferCell.live(g, 1004, BB4));
+        Row r5 = wideRow(1005, BufferCell.live(f, 1005, BB3));
+
+        Row merged = mergeWide(r0, r1, r2, r3, r4, r5);
+
+        Assert.assertEquals(Lists.newArrayList(a, b, d, e, f, g), mergedColumns(merged));
+        Assert.assertEquals(1000, mergedTimestamp(merged, a));
+        Assert.assertEquals(1001, mergedTimestamp(merged, b));
+        Assert.assertEquals(1002, mergedTimestamp(merged, d));
+        Assert.assertEquals(1000, mergedTimestamp(merged, e));
+        // newest version of f wins, whichever source holds it
+        Assert.assertEquals(1005, mergedTimestamp(merged, f));
+        Assert.assertEquals(BB3, mergedValue(merged, f));
+        Assert.assertEquals(1004, mergedTimestamp(merged, g));
+    }
+
+    @Test
+    public void testMergerReusedAcrossRows()
+    {
+        ColumnMetadata a = wideColumn("a"), b = wideColumn("b"), d = wideColumn("d");
+        Row.Merger merger = new Row.Merger(3, false);
+
+        merger.add(0, wideRow(1000, BufferCell.live(a, 1000, BB1)));
+        merger.add(1, wideRow(1001, BufferCell.live(b, 1001, BB1)));
+        merger.add(2, wideRow(1002, BufferCell.live(d, 1002, BB1)));
+        Assert.assertEquals(Lists.newArrayList(a, b, d), mergedColumns(merger.merge(DeletionTime.LIVE)));
+
+        // fewer sources than the previous row, and the columns of the previous row must not leak into this one
+        merger.clear();
+        merger.add(0, wideRow(1010, BufferCell.live(a, 1010, BB2)));
+        merger.add(2, wideRow(1011, BufferCell.live(d, 1011, BB2)));
+        Row second = merger.merge(DeletionTime.LIVE);
+        Assert.assertEquals(Lists.newArrayList(a, d), mergedColumns(second));
+        Assert.assertEquals(BB2, mergedValue(second, a));
+
+        // a single source; the live active-deletion case is short-circuited by merge(), so use a deletion that
+        // keeps this on the merging path (one source is the OneToOne case of the merge iterator)
+        merger.clear();
+        merger.add(1, wideRow(1020, BufferCell.live(d, 1020, BB3)));
+        Row third = merger.merge(DeletionTime.build(1000, FBUtilities.nowInSeconds()));
+        Assert.assertEquals(Lists.newArrayList(d), mergedColumns(third));
+        Assert.assertEquals(BB3, mergedValue(third, d));
+    }
+
+    @Test
+    public void testMergerManySourcesComplexColumns()
+    {
+        long now = FBUtilities.nowInSeconds();
+        long ts = secondToTs(now);
+
+        // Ten sources (past the in-place merge's source threshold, and past the merge iterator's sorted section):
+        // every source carries a version of the same complex column plus a simple column, so the merged row must
+        // reconcile all of them instead of dropping or double-reducing any version.
+        Row[] rows = new Row[10];
+        for (int i = 0; i < rows.length; i++)
+        {
+            Row.Builder builder = BTreeRow.unsortedBuilder();
+            builder.newRow(c1);
+            builder.addPrimaryKeyLivenessInfo(LivenessInfo.create(ts + i));
+            builder.addCell(BufferCell.live(v, ts + i, ByteBufferUtil.bytes(i)));
+            builder.addCell(BufferCell.live(m, ts + i, ByteBufferUtil.bytes(i), CellPath.create(BB1)));
+            rows[i] = builder.build();
+        }
+
+        Row merged = mergeRows(rows);
+
+        Assert.assertEquals(Lists.newArrayList(v, m), mergedColumns(merged));
+        Assert.assertEquals(ts + 9, mergedTimestamp(merged, v));
+        ComplexColumnData complex = merged.getComplexColumnData(m);
+        Assert.assertNotNull(complex);
+        Assert.assertEquals(1, complex.cellsCount());
+        Assert.assertEquals(ts + 9, complex.iterator().next().timestamp());
+    }
+
+    @Test
+    public void testMergerDropsColumnsShadowedByActiveDeletion()
+    {
+        long now = FBUtilities.nowInSeconds();
+        ColumnMetadata a = wideColumn("a"), b = wideColumn("b");
+
+        Row r0 = wideRow(3000, BufferCell.live(a, 3000, BB1));
+        Row r1 = wideRow(2950, BufferCell.live(b, 2950, BB1));
+
+        Row merged = mergeWide(r0, r1);
+        Assert.assertEquals(Lists.newArrayList(a, b), mergedColumns(merged));
+
+        // the deletion only shadows b, so the merge must emit a alone and skip the fully shadowed column
+        Row.Merger merger = new Row.Merger(2, false);
+        merger.add(0, r0);
+        merger.add(1, r1);
+        Row shadowed = merger.merge(DeletionTime.build(2990, now));
+        Assert.assertEquals(Lists.newArrayList(a), mergedColumns(shadowed));
+        Assert.assertEquals(3000, mergedTimestamp(shadowed, a));
+    }
+
+    @Test
+    public void testMergerGroupsComplexColumnVersions()
+    {
+        long now = FBUtilities.nowInSeconds();
+        long ts = secondToTs(now);
+
+        // two versions of the same complex column, plus a simple column present in both sources
+        Row.Builder b1 = BTreeRow.unsortedBuilder();
+        b1.newRow(c1);
+        b1.addPrimaryKeyLivenessInfo(LivenessInfo.create(ts));
+        b1.addCell(BufferCell.live(v, ts, BB1));
+        b1.addCell(BufferCell.live(m, ts, BB1, CellPath.create(BB1)));
+        Row.Builder b2 = BTreeRow.unsortedBuilder();
+        b2.newRow(c1);
+        b2.addPrimaryKeyLivenessInfo(LivenessInfo.create(ts + 1));
+        b2.addCell(BufferCell.live(v, ts + 1, BB2));
+        b2.addCell(BufferCell.live(m, ts + 1, BB2, CellPath.create(BB2)));
+
+        Row merged = mergeRows(b1.build(), b2.build());
+
+        Assert.assertEquals(Lists.newArrayList(v, m), mergedColumns(merged));
+        Assert.assertEquals(ts + 1, mergedTimestamp(merged, v));
+        ComplexColumnData complex = merged.getComplexColumnData(m);
+        Assert.assertNotNull(complex);
+        Assert.assertEquals(2, complex.cellsCount());
     }
 
     @Test

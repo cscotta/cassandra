@@ -44,6 +44,7 @@ import org.apache.cassandra.service.paxos.Commit;
 import org.apache.cassandra.utils.BiLongAccumulator;
 import org.apache.cassandra.utils.BulkIterator;
 import org.apache.cassandra.utils.ComplexCellMergeIterator;
+import org.apache.cassandra.utils.IteratorWithLowerBound;
 import org.apache.cassandra.utils.LongAccumulator;
 import org.apache.cassandra.utils.ObjectSizes;
 import org.apache.cassandra.utils.RowMergeIterator;
@@ -720,8 +721,14 @@ public interface Row extends Unfiltered, Iterable<ColumnData>, IMeasurableMemory
      */
     public static class Merger
     {
+        // Above this many sources the linear scan of mergeColumnData costs more comparisons per column than the
+        // merge iterator's heap, and the saved allocation is a small part of a wide read, so use the merge iterator.
+        private static final int MAX_SOURCES_FOR_IN_PLACE_MERGE = 8;
+
         private final Row[] rows;
         private final List<Iterator<ColumnData>> columnDataIterators;
+        // Head of each source column-data iterator for the row currently being merged, reused between rows.
+        private final ColumnData[] columnDataHeads;
 
         private Clustering<?> clustering;
         private int rowsToMerge;
@@ -737,6 +744,7 @@ public interface Row extends Unfiltered, Iterable<ColumnData>, IMeasurableMemory
         {
             this.rows = new Row[size];
             this.columnDataIterators = new ArrayList<>(size);
+            this.columnDataHeads = new ColumnData[size];
             this.columnDataReducer = new ColumnDataReducer(size, hasComplex);
         }
 
@@ -745,6 +753,7 @@ public interface Row extends Unfiltered, Iterable<ColumnData>, IMeasurableMemory
             Arrays.fill(dataBuffer, 0, dataBufferSize, null);
             dataBufferSize = 0;
             Arrays.fill(rows, null);
+            Arrays.fill(columnDataHeads, null);
             columnDataIterators.clear();
             rowsToMerge = 0;
             lastRowSet = -1;
@@ -808,16 +817,7 @@ public interface Row extends Unfiltered, Iterable<ColumnData>, IMeasurableMemory
                 dataBuffer = new ColumnData[columnsCountEstimation];
 
             columnDataReducer.setActiveDeletion(activeDeletion);
-            Iterator<ColumnData> merged = RowMergeIterator.get(columnDataIterators, ColumnData.comparator, columnDataReducer);
-            while (merged.hasNext())
-            {
-                ColumnData data = merged.next();
-                if (data != null)
-                {
-                    ensureDataBufferCapacity();
-                    dataBuffer[dataBufferSize++] = data;
-                }
-            }
+            mergeColumnData();
 
             // Because some data might have been shadowed by the 'activeDeletion', we could have an empty row
             if (rowInfo.isEmpty() && rowDeletion.isLive() && dataBufferSize == 0)
@@ -831,6 +831,85 @@ public interface Row extends Unfiltered, Iterable<ColumnData>, IMeasurableMemory
                 return minDeletionTime == Cell.MAX_DELETION_TIME
                        ? BTreeRow.create(clustering, rowInfo, rowDeletion, tree, Cell.MAX_DELETION_TIME)
                        : BTreeRow.create(clustering, rowInfo, rowDeletion, tree);
+            }
+        }
+
+        /**
+         * Merges the source column-data iterators of the current row into {@link #dataBuffer}, in column order,
+         * grouping the versions of each column into a single reduced {@link ColumnData}.
+         *
+         * This is the k-way merge {@link RowMergeIterator} implements, but performed in place over the (tiny)
+         * {@link #columnDataHeads} array: a merge iterator, its heap array and one candidate per source would
+         * otherwise be allocated for every merged row of every partition. The sources are plain row iterators,
+         * never {@link IteratorWithLowerBound}s, so the merge iterator's lower-bound handling does not apply here.
+         */
+        private void mergeColumnData()
+        {
+            final List<Iterator<ColumnData>> iterators = columnDataIterators;
+            final ColumnData[] heads = columnDataHeads;
+            final int sources = iterators.size();
+            assert sources <= heads.length : "clear() is required between merges";
+
+            if (sources > MAX_SOURCES_FOR_IN_PLACE_MERGE)
+            {
+                mergeColumnDataWithIterator();
+                return;
+            }
+
+            for (int i = 0; i < sources; i++)
+            {
+                Iterator<ColumnData> iterator = iterators.get(i);
+                assert !(iterator instanceof IteratorWithLowerBound) : "column-data iterators are never lower-bounded";
+                heads[i] = iterator.hasNext() ? iterator.next() : null;
+            }
+
+            while (true)
+            {
+                ColumnData min = null;
+                for (int i = 0; i < sources; i++)
+                {
+                    ColumnData head = heads[i];
+                    if (head == null)
+                        continue;
+                    if (min == null || ColumnData.comparator.compare(head, min) < 0)
+                        min = head;
+                }
+                if (min == null)
+                    return;
+
+                columnDataReducer.beginColumn();
+                for (int i = 0; i < sources; i++)
+                {
+                    ColumnData head = heads[i];
+                    if (head == null || (head != min && ColumnData.comparator.compare(head, min) != 0))
+                        continue;
+
+                    columnDataReducer.reduce(i, head);
+                    Iterator<ColumnData> iterator = iterators.get(i);
+                    heads[i] = iterator.hasNext() ? iterator.next() : null;
+                }
+
+                ColumnData data = columnDataReducer.mergedColumn();
+                if (data != null)
+                {
+                    ensureDataBufferCapacity();
+                    dataBuffer[dataBufferSize++] = data;
+                }
+            }
+        }
+
+        /** Slow path for reads that merge many sources; see {@link #MAX_SOURCES_FOR_IN_PLACE_MERGE}. */
+        private void mergeColumnDataWithIterator()
+        {
+            Iterator<ColumnData> merged = RowMergeIterator.get(columnDataIterators, ColumnData.comparator, columnDataReducer);
+            while (merged.hasNext())
+            {
+                ColumnData data = merged.next();
+                if (data != null)
+                {
+                    ensureDataBufferCapacity();
+                    dataBuffer[dataBufferSize++] = data;
+                }
             }
         }
 
@@ -874,6 +953,18 @@ public interface Row extends Unfiltered, Iterable<ColumnData>, IMeasurableMemory
             public void setActiveDeletion(DeletionTime activeDeletion)
             {
                 this.activeDeletion = activeDeletion;
+            }
+
+            // Reducer#onKeyChange and Reducer#getReduced are protected to the utils package, so the in-place merge
+            // in Merger drives them through these two adapters.
+            void beginColumn()
+            {
+                onKeyChange();
+            }
+
+            ColumnData mergedColumn()
+            {
+                return getReduced();
             }
 
             public void reduce(int idx, ColumnData data)
