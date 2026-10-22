@@ -213,7 +213,25 @@ public class BTreeRow extends AbstractRow
         // if there are no deleted cells then we can just check if we have at least one cell
         if (!hasDeletion(nowInSec))
             return !BTree.isEmpty(btree);
-        return Iterables.any(cells(), cell -> cell.isLive(nowInSec));
+        // Walk the btree rather than cells(): the latter allocates a capturing lambda and a cell iterator per row,
+        // and this is called for every row of every read that records metrics.
+        for (int i = 0, size = BTree.size(btree); i < size; i++)
+        {
+            ColumnData cd = BTree.findByIndex(btree, i);
+            if (cd.column().isComplex())
+            {
+                for (Cell<?> cell : (ComplexColumnData) cd)
+                {
+                    if (cell.isLive(nowInSec))
+                        return true;
+                }
+            }
+            else if (((Cell<?>) cd).isLive(nowInSec))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     public void apply(Consumer<ColumnData> function)
