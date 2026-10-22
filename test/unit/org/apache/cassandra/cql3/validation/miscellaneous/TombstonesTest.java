@@ -208,6 +208,27 @@ public class TombstonesTest extends CQLTester
         }
     }
 
+    /**
+     * The metrics recorder visits each row's column data in place, so cell tombstones inside a
+     * collection must be counted exactly like simple-column cell tombstones.
+     */
+    @Test
+    public void testCellTombstonesAreCounted() throws Throwable
+    {
+        String tableName = createTable("CREATE TABLE %s (pk int, ck int, a text, b text, m map<int, int>, PRIMARY KEY (pk, ck));");
+        ColumnFamilyStore cfs = Keyspace.open(KEYSPACE).getColumnFamilyStore(tableName);
+
+        execute("INSERT INTO %s (pk, ck, a, b) VALUES (1, 1, 'live', 'gone') USING TIMESTAMP 1000;");
+        execute("UPDATE %s USING TIMESTAMP 1000 SET m[2] = 2 WHERE pk = 1 AND ck = 1;");
+        execute("DELETE b FROM %s USING TIMESTAMP 2000 WHERE pk = 1 AND ck = 1;");
+        execute("DELETE m[1] FROM %s USING TIMESTAMP 2000 WHERE pk = 1 AND ck = 1;");
+
+        execute("SELECT * FROM %s WHERE pk = 1;");
+
+        // one cell tombstone for b, one map entry tombstone for m[1]; live cells are not counted
+        assertEquals(2, cfs.metric.tombstoneScannedHistogram.cf.getSnapshot().getMax());
+    }
+
     @Test
     public void testBeyondWarnThresholdSelect() throws Throwable
     {
