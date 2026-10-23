@@ -70,6 +70,34 @@ public class IntervalTreeTest implements WithQuickTheories
     }
 
     @Test
+    public void testPointSearchIntoConsumerMatchesTheListForm()
+    {
+        List<Interval<Integer, Integer>> intervals = new ArrayList<>();
+        intervals.add(Interval.create(-300, -200));
+        intervals.add(Interval.create(-3, -2));
+        intervals.add(Interval.create(1, 2));
+        intervals.add(Interval.create(3, 6));
+        intervals.add(Interval.create(2, 4));
+        intervals.add(Interval.create(5, 7));
+        intervals.add(Interval.create(1, 3));
+        intervals.add(Interval.create(4, 6));
+        intervals.add(Interval.create(8, 9));
+        intervals.add(Interval.create(15, 20));
+        IntervalTree<Integer, Integer, Interval<Integer, Integer>> tree = IntervalTree.build(intervals);
+
+        for (int point = -301; point <= 21; point++)
+        {
+            List<Integer> collected = new ArrayList<>();
+            tree.search(point, collected::add);
+            assertEquals("point " + point, tree.search(point), collected);
+        }
+
+        List<Integer> empty = new ArrayList<>();
+        IntervalTree.<Integer, Integer, Interval<Integer, Integer>>build(Collections.emptyList()).search(1, empty::add);
+        assertTrue(empty.isEmpty());
+    }
+
+    @Test
     public void testSearch()
     {
         List<Interval<Integer, Integer>> intervals = new ArrayList<>();
