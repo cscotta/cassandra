@@ -1610,6 +1610,15 @@ public class BTree
             reuse(comparator);
         }
 
+        /**
+         * @return the number of value slots this builder currently retains in its backing array, which {@link #reuse()}
+         * clears on every reuse. Callers that pool builders use it to drop the array of an unusually large build.
+         */
+        public int retainedCapacity()
+        {
+            return values.length;
+        }
+
         public void reuse(Comparator<? super V> comparator)
         {
             this.comparator = comparator;
