@@ -730,7 +730,7 @@ public class SinglePartitionReadCommand extends ReadCommand implements SinglePar
         Tracing.trace("Executing single-partition query on {}", cfs.name);
 
         Tracing.trace("Acquiring sstable references");
-        ColumnFamilyStore.ViewFragment view = cfs.select(View.select(SSTableSet.LIVE, partitionKey()));
+        ColumnFamilyStore.ViewFragment view = cfs.select(SSTableSet.LIVE, partitionKey());
         return queryMemtableAndDiskInternal(cfs, view, null, executionController);
     }
 

@@ -2104,6 +2104,22 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean, Memtable.Owner
         return new ViewFragment(sstables, view.getAllMemtables());
     }
 
+    /**
+     * Collects the live sstables that may contain {@code key} directly into the fragment, avoiding the list that
+     * {@link View#select(SSTableSet, DecoratedKey)} materialises and {@link #select(Function)} then copies.
+     */
+    public ViewFragment select(SSTableSet sstableSet, DecoratedKey key)
+    {
+        // only the live set can be selected by key, and this is the only set the caller of this method needs
+        if (sstableSet != SSTableSet.LIVE)
+            throw new IllegalArgumentException("Only SSTableSet.LIVE can be selected by key, got " + sstableSet);
+
+        View view = data.getView();
+        List<SSTableReader> sstables = new ArrayList<>(4);
+        view.select(sstableSet, key, sstables::add);
+        return new ViewFragment(sstables, view.getAllMemtables());
+    }
+
     // WARNING: this returns the set of LIVE sstables only, which may be only partially written
     public List<String> getSSTablesForKey(String key)
     {
