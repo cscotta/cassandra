@@ -43,6 +43,7 @@ import org.apache.cassandra.db.rows.AbstractUnfilteredRowIterator;
 import org.apache.cassandra.db.rows.BTreeRow;
 import org.apache.cassandra.db.rows.BufferCell;
 import org.apache.cassandra.db.rows.Cell;
+import org.apache.cassandra.db.rows.CellPath;
 import org.apache.cassandra.db.rows.ColumnData;
 import org.apache.cassandra.db.rows.ComplexColumnData;
 import org.apache.cassandra.db.rows.EncodingStats;
@@ -365,6 +366,27 @@ public class ReadResponseTest
         assertIteratorsEqual(command, localResponse, inMemoryResponse);
         assertEquals(ByteBufferUtil.bytesToHex(localResponse.digest(command)),
                      ByteBufferUtil.bytesToHex(inMemoryResponse.digest(command)));
+    }
+
+    @Test
+    public void inMemoryResponseDropsCollectionCellsShadowedByARowDeletion()
+    {
+        // The rebuild of a shadowed row walks the row's column data in place, so a collection has to keep the cells
+        // that survive the row deletion, in cell path order, and drop the ones it covers, exactly like the serialized
+        // form does.
+        int key = key();
+        ReadCommand command = command(key, metadataWithCollection);
+        StubRepairedDataInfo rdi = new StubRepairedDataInfo(ByteBufferUtil.EMPTY_BYTE_BUFFER, true);
+        Row row = deletedRowWithPartlyShadowedCollection(metadataWithCollection, 1);
+
+        ReadResponse localResponse = command.createResponse(singlePartitionIterator(rowIterator(command, key, row)), rdi);
+        ReadResponse inMemoryResponse = command.createLocalObjectResponse(singlePartitionIterator(rowIterator(command, key, row)), rdi, true);
+
+        assertIteratorsEqual(command, localResponse, inMemoryResponse);
+        assertEquals(ByteBufferUtil.bytesToHex(localResponse.digest(command)),
+                     ByteBufferUtil.bytesToHex(inMemoryResponse.digest(command)));
+        assertEquals(2, collectionCellCount(localResponse, command));
+        assertEquals(2, collectionCellCount(inMemoryResponse, command));
     }
 
     @Test
@@ -1342,6 +1364,49 @@ public class ReadResponseTest
         builder.addCell(BufferCell.tombstone(col, timestamp, nowInSec));
         builder.addRowDeletion(Row.Deletion.regular(DeletionTime.build(timestamp, nowInSec)));
         return builder.build();
+    }
+
+    private Row deletedRowWithPartlyShadowedCollection(TableMetadata metadata, int clusteringValue)
+    {
+        long nowInSec = FBUtilities.nowInSeconds();
+        ColumnMetadata col = metadata.getColumn(ByteBufferUtil.bytes("coll"));
+
+        Row.Builder builder = BTreeRow.unsortedBuilder();
+        builder.newRow(Clustering.make(ByteBufferUtil.bytes(clusteringValue)));
+        // three collection cells, of which the row deletion added below covers only the middle one
+        builder.addCell(BufferCell.live(col, 30, ByteBufferUtil.bytes(1), cellPath(1)));
+        builder.addCell(BufferCell.live(col, 10, ByteBufferUtil.bytes(2), cellPath(2)));
+        builder.addCell(BufferCell.live(col, 20, ByteBufferUtil.bytes(3), cellPath(3)));
+        builder.addRowDeletion(Row.Deletion.regular(DeletionTime.build(15, nowInSec)));
+        return builder.build();
+    }
+
+    private static CellPath cellPath(int value)
+    {
+        return CellPath.create(ByteBufferUtil.bytes(value));
+    }
+
+    private int collectionCellCount(ReadResponse response, ReadCommand command)
+    {
+        int count = 0;
+        try (UnfilteredPartitionIterator iter = response.makeIterator(command))
+        {
+            assertTrue(iter.hasNext());
+            try (UnfilteredRowIterator partition = iter.next())
+            {
+                while (partition.hasNext())
+                {
+                    Unfiltered unfiltered = partition.next();
+                    if (!unfiltered.isRow())
+                        continue;
+
+                    ColumnData coll = ((Row) unfiltered).getColumnData(metadataWithCollection.getColumn(ByteBufferUtil.bytes("coll")));
+                    if (coll != null)
+                        count += ((ComplexColumnData) coll).cellsCount();
+                }
+            }
+        }
+        return count;
     }
 
     private UnfilteredRowIterator rowIterator(ReadCommand command, int key, Row row)

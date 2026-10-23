@@ -20,6 +20,7 @@ package org.apache.cassandra.db.rows;
 import java.nio.ByteBuffer;
 import java.util.Iterator;
 import java.util.Objects;
+import java.util.function.BiConsumer;
 
 import javax.annotation.Nonnull;
 
@@ -107,6 +108,14 @@ public class ComplexColumnData extends ColumnData implements Iterable<Cell<?>>
     Object[] tree()
     {
         return cells;
+    }
+
+    /**
+     * Visits the cells of this column in cell path order without allocating an iterator.
+     */
+    public <A> void apply(BiConsumer<A, Cell<?>> function, A argument)
+    {
+        BTree.apply(cells, function, argument);
     }
 
     public Iterator<Cell<?>> iterator()

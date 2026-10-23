@@ -21,6 +21,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.BiConsumer;
 
 import com.google.common.annotations.VisibleForTesting;
 
@@ -621,6 +622,9 @@ public abstract class ReadResponse
                 return next;
             }
 
+            private static final BiConsumer<Row.Builder, ColumnData> ADD_COLUMN_DATA = LimitedUnfilteredRowIterator::addColumnData;
+            private static final BiConsumer<Row.Builder, Cell<?>> ADD_CELL = LimitedUnfilteredRowIterator::addCell;
+
             // A row read back from a buffer is rebuilt cell by cell on top of its row deletion using BTreeRow.Builder.
             // The builder silently drops whatever that deletion covers.
             // So, we rebuild here the row in the same way, to avoid a digest mismatch.
@@ -629,26 +633,34 @@ public abstract class ReadResponse
                 if (row.deletion().isLive())
                     return row;
 
-                Row.Builder builder = BTreeRow.sortedBuilder();
+                // Rebuilding allocates a builder (and its cell btree builder) per row, so take both from a
+                // per-thread pool, and walk the row's column data in place instead of through an iterator.
+                Row.Builder builder = BTreeRow.pooledSortedBuilder();
                 builder.newRow(row.clustering());
                 builder.addPrimaryKeyLivenessInfo(row.primaryKeyLivenessInfo());
                 builder.addRowDeletion(row.deletion());
-                for (ColumnData cd : row)
-                {
-                    if (cd.column().isSimple())
-                    {
-                        builder.addCell((Cell<?>) cd);
-                    }
-                    else
-                    {
-                        ComplexColumnData complexData = (ComplexColumnData) cd;
-                        if (!complexData.complexDeletion().isLive())
-                            builder.addComplexDeletion(complexData.column(), complexData.complexDeletion());
-                        for (Cell<?> cell : complexData)
-                            builder.addCell(cell);
-                    }
-                }
+                row.apply(ADD_COLUMN_DATA, builder);
                 return builder.build();
+            }
+
+            // Static, so that adding a row's column data to the rebuild builder allocates nothing.
+            private static void addColumnData(Row.Builder builder, ColumnData cd)
+            {
+                if (cd.column().isSimple())
+                {
+                    builder.addCell((Cell<?>) cd);
+                    return;
+                }
+
+                ComplexColumnData complexData = (ComplexColumnData) cd;
+                if (!complexData.complexDeletion().isLive())
+                    builder.addComplexDeletion(complexData.column(), complexData.complexDeletion());
+                complexData.apply(ADD_CELL, builder);
+            }
+
+            private static void addCell(Row.Builder builder, Cell<?> cell)
+            {
+                builder.addCell(cell);
             }
 
             private Unfiltered overflow(boolean byRowLimit)

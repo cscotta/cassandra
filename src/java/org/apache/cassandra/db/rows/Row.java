@@ -347,12 +347,12 @@ public interface Row extends Unfiltered, Iterable<ColumnData>, IMeasurableMemory
     public long unsharedHeapSize();
 
     /**
-     * Apply a function to every column in a row
+     * Apply a function to every column in a row, in ascending column order.
      */
     public void apply(Consumer<ColumnData> function);
 
     /**
-     * Apply a function to every column in a row
+     * Apply a function to every column in a row, in ascending column order.
      */
     public <A> void apply(BiConsumer<A, ColumnData> function, A arg);
 
