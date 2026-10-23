@@ -43,6 +43,7 @@ import org.apache.cassandra.db.rows.RangeTombstoneMarker;
 import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.RowAndDeletionMergeIterator;
 import org.apache.cassandra.db.rows.RowIterator;
+import org.apache.cassandra.db.rows.RowsOnlyIterator;
 import org.apache.cassandra.db.rows.Rows;
 import org.apache.cassandra.db.rows.Unfiltered;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
@@ -193,8 +194,22 @@ public abstract class AbstractBTreePartition implements Partition, Iterable<Row>
     private UnfilteredRowIterator sliceIterator(ColumnFilter selection, Slice slice, boolean reversed, BTreePartitionData current, Row staticRow)
     {
         Iterator<Row> rowIter = sliceRows(current.tree, slice, reversed);
+        if (!current.deletionInfo.hasRanges())
+            return rowsOnlyIterator(rowIter, selection, reversed, current, staticRow);
+
         Iterator<RangeTombstone> deleteIter = current.deletionInfo.rangeIterator(slice, reversed);
         return merge(rowIter, deleteIter, selection, reversed, current, staticRow);
+    }
+
+    /**
+     * A partition without range tombstones has nothing to merge into its rows, so the rows only need the column
+     * selection and the partition deletion applied. This is what {@link RowAndDeletionMergeIterator} does when its
+     * range source is empty, but without allocating and walking its merge state for every row of the read.
+     */
+    private UnfilteredRowIterator rowsOnlyIterator(Iterator<Row> rowIter, ColumnFilter selection, boolean reversed, BTreePartitionData current, Row staticRow)
+    {
+        return new RowsOnlyIterator(metadata(), partitionKey(), current.deletionInfo.getPartitionDeletion(),
+                                    selection, staticRow, reversed, current.stats, rowIter, canHaveShadowedData());
     }
 
     /**
@@ -358,6 +373,11 @@ public abstract class AbstractBTreePartition implements Partition, Iterable<Row>
         private Iterator<Unfiltered> nextIterator(Clustering<?> next)
         {
             Row nextRow = rowSearcher.next(next);
+            Iterator<Row> rowIterator = nextRow == null ? Collections.emptyIterator() : Iterators.singletonIterator(nextRow);
+
+            if (!current.deletionInfo.hasRanges())
+                return nextRow == null ? null : rowsOnlyIterator(rowIterator, selection, isReverseOrder, current, staticRow);
+
             // rangeCovering() will return original RT covering clustering key, but we want to generate fake RT with
             // given clustering bound to be consistent with fake RT generated from sstable read.
             Iterator<RangeTombstone> deleteIter = current.deletionInfo.rangeIterator(Slice.make(next), isReverseOrder());
@@ -365,7 +385,6 @@ public abstract class AbstractBTreePartition implements Partition, Iterable<Row>
             if (nextRow == null && !deleteIter.hasNext())
                 return null;
 
-            Iterator<Row> rowIterator = nextRow == null ? Collections.emptyIterator() : Iterators.singletonIterator(nextRow);
             return merge(rowIterator, deleteIter, selection, isReverseOrder, current, staticRow);
         }
     }
