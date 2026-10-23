@@ -49,7 +49,7 @@ import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.AsciiType;
 import org.apache.cassandra.db.marshal.Int32Type;
-import org.apache.cassandra.db.partitions.ImmutableBTreePartition;
+import org.apache.cassandra.db.partitions.Partition;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.schema.ColumnMetadata;
@@ -63,9 +63,9 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 /**
- * Checks that the iterator a partition without range tombstones uses ({@link RowsOnlyIterator}) yields exactly
- * what {@link RowAndDeletionMergeIterator} yields with an empty range tombstone source: the same rows, filtered by
- * the column selection and by the partition deletion.
+ * Checks that the iterator a partition without range tombstones uses ({@link RowsOnlyIterator}) yields exactly what
+ * {@link RowAndDeletionMergeIterator} yields with an empty range tombstone source: the same rows, filtered by the
+ * column selection, and by the partition deletion when the partition may hold data that deletion shadows.
  */
 public class RowsOnlyIteratorTest
 {
@@ -75,7 +75,6 @@ public class RowsOnlyIteratorTest
     private DecoratedKey dk;
     private TableMetadata cfm;
     private ColumnMetadata defA;
-    private ColumnMetadata defB;
 
     @BeforeClass
     public static void defineSchema() throws ConfigurationException
@@ -100,45 +99,43 @@ public class RowsOnlyIteratorTest
         ColumnFamilyStore cfs = Keyspace.open(KEYSPACE1).getColumnFamilyStore(CF_STANDARD1);
         cfm = cfs.metadata();
         defA = cfm.getColumn(new ColumnIdentifier("a", true));
-        defB = cfm.getColumn(new ColumnIdentifier("b", true));
     }
 
     @Test
     public void testWholePartition()
     {
-        ImmutableBTreePartition partition = partition(DeletionTime.LIVE);
+        Partition partition = partition(true);
 
         assertMatchesMerge(partition.unfilteredIterator(ColumnFilter.all(cfm), Slices.ALL, false),
-                           rows(0, 1, 2, 3, 4), ColumnFilter.all(cfm), DeletionTime.LIVE, false);
+                           rows(0, 1, 2, 3, 4), ColumnFilter.all(cfm), DeletionTime.LIVE, false, true);
 
         assertMatchesMerge(partition.unfilteredIterator(ColumnFilter.all(cfm), Slices.ALL, true),
-                           rows(4, 3, 2, 1, 0), ColumnFilter.all(cfm), DeletionTime.LIVE, true);
+                           rows(4, 3, 2, 1, 0), ColumnFilter.all(cfm), DeletionTime.LIVE, true, true);
     }
 
     @Test
     public void testSingleRowSlice()
     {
-        ImmutableBTreePartition partition = partition(DeletionTime.LIVE);
+        Partition partition = partition(true);
         Slices slice = Slices.with(cfm.comparator, Slice.make(cfm.comparator.make(2)));
 
         assertMatchesMerge(partition.unfilteredIterator(ColumnFilter.all(cfm), slice, false),
-                           rows(2), ColumnFilter.all(cfm), DeletionTime.LIVE, false);
+                           rows(2), ColumnFilter.all(cfm), DeletionTime.LIVE, false, true);
     }
 
     @Test
     public void testRowsByName()
     {
-        ImmutableBTreePartition partition = partition(DeletionTime.LIVE);
+        Partition partition = partition(true);
 
-        Iterator<Unfiltered> expected = merge(rows(1, 3), ColumnFilter.all(cfm), DeletionTime.LIVE, false);
-        assertEquals(describe(expected),
+        assertEquals(descriptions(rows(1, 3), ColumnFilter.all(cfm), DeletionTime.LIVE, false, true),
                      describe(partition.unfilteredIterator(ColumnFilter.all(cfm), names(1, 3), false)));
     }
 
     @Test
     public void testMissingRowByName()
     {
-        ImmutableBTreePartition partition = partition(DeletionTime.LIVE);
+        Partition partition = partition(true);
 
         Iterator<Unfiltered> actual = partition.unfilteredIterator(ColumnFilter.all(cfm), names(42), false);
         assertFalse(actual.hasNext());
@@ -150,12 +147,11 @@ public class RowsOnlyIteratorTest
     @Test
     public void testColumnSelection()
     {
-        ImmutableBTreePartition partition = partition(DeletionTime.LIVE);
+        Partition partition = partition(true);
         ColumnFilter selection = ColumnFilter.selection(RegularAndStaticColumns.of(defA));
 
-        UnfilteredRowIterator iterator = partition.unfilteredIterator(selection, Slices.ALL, false);
-        List<Unfiltered> actual = collect(iterator);
-        assertEquals(descriptions(rows(0, 1, 2, 3, 4), selection, DeletionTime.LIVE, false), describe(actual));
+        List<Unfiltered> actual = collect(partition.unfilteredIterator(selection, Slices.ALL, false));
+        assertEquals(descriptions(rows(0, 1, 2, 3, 4), selection, DeletionTime.LIVE, false, true), describe(actual));
 
         // and the other column must really be gone, not just equal to the merge output
         for (Unfiltered unfiltered : actual)
@@ -168,20 +164,65 @@ public class RowsOnlyIteratorTest
     }
 
     /**
-     * A partition tombstone that shadows every row leaves nothing to return, exactly as the merge iterator does.
+     * A partition that may hold shadowed data loses the rows and cells its partition deletion shadows, exactly as the
+     * merge iterator does.
      */
     @Test
-    public void testPartitionDeletionShadowsRows()
+    public void testPartitionDeletionShadowsRowsOfAPartitionThatMayHoldShadowedData()
     {
         DeletionTime deletion = DeletionTime.build(1000L, FBUtilities.nowInSeconds());
-        ImmutableBTreePartition partition = partition(deletion);
+        Partition partition = partition(true, deletion, 0L);
 
         UnfilteredRowIterator iterator = partition.unfilteredIterator(ColumnFilter.all(cfm), Slices.ALL, false);
+        assertEquals(descriptions(rows(0, 1, 2, 3, 4), ColumnFilter.all(cfm), deletion, false, true), describe(collect(iterator)));
         assertFalse(iterator.hasNext());
-        assertEquals(descriptions(rows(0, 1, 2, 3, 4), ColumnFilter.all(cfm), deletion, false), describe(collect(iterator)));
-
-        // the deletion time is still reported
         assertEquals(deletion, iterator.partitionLevelDeletion());
+    }
+
+    /**
+     * Only the cells the deletion does not shadow stay, and the fully shadowed rows are skipped, not returned as null.
+     */
+    @Test
+    public void testPartitionDeletionKeepsTheCellsItDoesNotShadow()
+    {
+        DeletionTime deletion = DeletionTime.build(1000L, FBUtilities.nowInSeconds());
+        PartitionUpdate.Builder update = update(true, deletion);
+        update.add(BTreeRow.singleCellRow(cfm.comparator.make(0), makeCell(defA, 0, 5000L)));
+        for (int i = 1; i < 5; i++)
+            update.add(row(i));
+
+        Partition partition = update.build();
+        try (UnfilteredRowIterator iterator = partition.unfilteredIterator(ColumnFilter.all(cfm), Slices.ALL, false))
+        {
+            assertTrue(iterator.hasNext());
+            Unfiltered next = iterator.next();
+            assertEquals(cfm.comparator.make(0), next.clustering());
+            List<Cell<?>> cells = ImmutableList.copyOf(((Row) next).cells());
+            assertEquals(1, cells.size());
+            assertEquals(5000L, cells.get(0).timestamp());
+            assertFalse(iterator.hasNext());
+        }
+    }
+
+    /**
+     * A partition that cannot hold shadowed data keeps its cells: the merge iterator does not apply the partition
+     * deletion to such partitions either, so the rows-only iterator must not either.
+     */
+    @Test
+    public void testPartitionDeletionIsNotAppliedToAPartitionThatCannotHoldShadowedData()
+    {
+        DeletionTime deletion = DeletionTime.build(1000L, FBUtilities.nowInSeconds());
+        Partition partition = partition(false, deletion, 0L);
+
+        List<Unfiltered> actual = collect(partition.unfilteredIterator(ColumnFilter.all(cfm), Slices.ALL, false));
+        assertEquals(descriptions(rows(0, 1, 2, 3, 4), ColumnFilter.all(cfm), deletion, false, false), describe(actual));
+        assertEquals(5, actual.size());
+        for (Unfiltered unfiltered : actual)
+        {
+            Row row = (Row) unfiltered;
+            assertEquals(1, ImmutableList.copyOf(row.cells()).size());
+            assertEquals(0L, row.cells().iterator().next().timestamp());
+        }
     }
 
     /**
@@ -195,13 +236,12 @@ public class RowsOnlyIteratorTest
                                                                   BufferClusteringBound.inclusiveEndOf(bb(1))),
                                                       DeletionTime.build(delTime * 1000L, delTime));
 
-        PartitionUpdate.Builder update = update();
+        PartitionUpdate.Builder update = update(true);
         for (int i = 0; i < 5; i++)
             update.add(row(i));
         update.add(tombstone);
 
-        ImmutableBTreePartition partition = ImmutableBTreePartition.create(update.build().unfilteredIterator());
-
+        Partition partition = update.build();
         try (UnfilteredRowIterator iterator = partition.unfilteredIterator(ColumnFilter.all(cfm), Slices.ALL, false))
         {
             assertEquals(ClusteringPrefix.Kind.INCL_START_BOUND, iterator.next().clustering().kind());
@@ -216,24 +256,40 @@ public class RowsOnlyIteratorTest
         }
     }
 
-    private void assertMatchesMerge(UnfilteredRowIterator actual, Iterator<Row> expectedRows, ColumnFilter selection, DeletionTime deletion, boolean reversed)
+    private void assertMatchesMerge(UnfilteredRowIterator actual, Iterator<Row> expectedRows, ColumnFilter selection,
+                                    DeletionTime deletion, boolean reversed, boolean removeShadowedData)
     {
-        assertEquals(descriptions(expectedRows, selection, deletion, reversed), describe(collect(actual)));
+        assertEquals(descriptions(expectedRows, selection, deletion, reversed, removeShadowedData), describe(collect(actual)));
     }
 
-    private ImmutableBTreePartition partition(DeletionTime deletion)
+    /**
+     * A partition as a memtable or an sstable-backed partition presents it: it may hold data shadowed by its
+     * partition deletion.
+     */
+    private Partition partition(boolean canHaveShadowedData)
     {
-        PartitionUpdate.Builder update = update();
+        return partition(canHaveShadowedData, DeletionTime.LIVE, 0L);
+    }
+
+    private Partition partition(boolean canHaveShadowedData, DeletionTime deletion, long timestamp)
+    {
+        PartitionUpdate.Builder update = update(canHaveShadowedData, deletion);
         for (int i = 0; i < 5; i++)
-            update.add(row(i));
+            update.add(BTreeRow.singleCellRow(cfm.comparator.make(i), makeCell(defA, i, timestamp)));
+        return update.build();
+    }
+
+    private PartitionUpdate.Builder update(boolean canHaveShadowedData)
+    {
+        return update(canHaveShadowedData, DeletionTime.LIVE);
+    }
+
+    private PartitionUpdate.Builder update(boolean canHaveShadowedData, DeletionTime deletion)
+    {
+        PartitionUpdate.Builder update = new PartitionUpdate.Builder(cfm, dk, cfm.regularAndStaticColumns(), 8, canHaveShadowedData);
         if (!deletion.isLive())
             update.addPartitionDeletion(deletion);
-        return ImmutableBTreePartition.create(update.build().unfilteredIterator());
-    }
-
-    private PartitionUpdate.Builder update()
-    {
-        return new PartitionUpdate.Builder(cfm, dk, cfm.regularAndStaticColumns(), 8);
+        return update;
     }
 
     /**
@@ -270,11 +326,11 @@ public class RowsOnlyIteratorTest
         }
     }
 
-    private List<String> descriptions(Iterator<Row> rows, ColumnFilter selection, DeletionTime deletion, boolean reversed)
+    private List<String> descriptions(Iterator<Row> rows, ColumnFilter selection, DeletionTime deletion,
+                                      boolean reversed, boolean removeShadowedData)
     {
-        return describe(collect(merge(rows, selection, deletion, reversed)));
+        return describe(collect(merge(rows, selection, deletion, reversed, removeShadowedData)));
     }
-
 
     private List<String> describe(List<Unfiltered> unfiltereds)
     {
@@ -296,10 +352,11 @@ public class RowsOnlyIteratorTest
         return describe(list);
     }
 
-    private UnfilteredRowIterator merge(Iterator<Row> rows, ColumnFilter selection, DeletionTime deletion, boolean reversed)
+    private UnfilteredRowIterator merge(Iterator<Row> rows, ColumnFilter selection, DeletionTime deletion,
+                                        boolean reversed, boolean removeShadowedData)
     {
         return new RowAndDeletionMergeIterator(cfm, dk, deletion, selection, Rows.EMPTY_STATIC_ROW, reversed,
-                                               EncodingStats.NO_STATS, rows, Collections.emptyIterator(), true);
+                                               EncodingStats.NO_STATS, rows, Collections.emptyIterator(), removeShadowedData);
     }
 
     private Cell<?> makeCell(ColumnMetadata columnMetadata, int value, long timestamp)

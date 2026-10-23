@@ -209,7 +209,7 @@ public abstract class AbstractBTreePartition implements Partition, Iterable<Row>
     private UnfilteredRowIterator rowsOnlyIterator(Iterator<Row> rowIter, ColumnFilter selection, boolean reversed, BTreePartitionData current, Row staticRow)
     {
         return new RowsOnlyIterator(metadata(), partitionKey(), current.deletionInfo.getPartitionDeletion(),
-                                    selection, staticRow, reversed, current.stats, rowIter);
+                                    selection, staticRow, reversed, current.stats, rowIter, canHaveShadowedData());
     }
 
     /**

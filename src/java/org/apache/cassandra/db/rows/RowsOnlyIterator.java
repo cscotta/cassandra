@@ -32,8 +32,14 @@ import org.apache.cassandra.schema.TableMetadata;
 public final class RowsOnlyIterator extends AbstractUnfilteredRowIterator
 {
     private final ColumnFilter selection;
+    private final boolean removeShadowedData;
     private final Iterator<Row> rows;
 
+    /**
+     * @param removeShadowedData whether the partition may hold data shadowed by its partition deletion, in which
+     *                           case that data has to be filtered out of every row (see
+     *                           {@link RowAndDeletionMergeIterator})
+     */
     public RowsOnlyIterator(TableMetadata metadata,
                             DecoratedKey partitionKey,
                             DeletionTime partitionLevelDeletion,
@@ -41,11 +47,13 @@ public final class RowsOnlyIterator extends AbstractUnfilteredRowIterator
                             Row staticRow,
                             boolean isReversed,
                             EncodingStats stats,
-                            Iterator<Row> rows)
+                            Iterator<Row> rows,
+                            boolean removeShadowedData)
     {
         super(metadata, partitionKey, partitionLevelDeletion, selection.fetchedColumns(), staticRow, isReversed, stats);
         this.selection = selection;
         this.rows = rows;
+        this.removeShadowedData = removeShadowedData;
     }
 
     @Override
@@ -54,7 +62,8 @@ public final class RowsOnlyIterator extends AbstractUnfilteredRowIterator
         while (rows.hasNext())
         {
             // a row can be entirely shadowed by the partition deletion, in which case it must not be returned
-            Row next = rows.next().filter(selection, partitionLevelDeletion(), false, metadata());
+            Row next = removeShadowedData ? rows.next().filter(selection, partitionLevelDeletion(), false, metadata())
+                                          : rows.next().filter(selection, metadata());
             if (next != null)
                 return next;
         }
