@@ -50,7 +50,6 @@ import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.db.BufferClusteringBound;
 import org.apache.cassandra.db.Clusterable;
 import org.apache.cassandra.db.Clustering;
-import org.apache.cassandra.db.ClusteringBound;
 import org.apache.cassandra.db.ClusteringComparator;
 import org.apache.cassandra.db.ClusteringPrefix;
 import org.apache.cassandra.db.DeletionTime;
