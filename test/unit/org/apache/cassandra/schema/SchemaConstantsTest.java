@@ -23,6 +23,7 @@ import java.util.Locale;
 
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Sets;
+
 import org.junit.Test;
 
 import org.apache.cassandra.cql3.statements.SelectOptions;
