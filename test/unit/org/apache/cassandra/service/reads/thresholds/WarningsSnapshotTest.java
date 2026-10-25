@@ -31,12 +31,12 @@ import org.quicktheories.impl.Constraint;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.net.ParamType;
 
+import static java.util.Collections.emptySet;
 import static org.apache.cassandra.service.reads.thresholds.WarningsSnapshot.Builder;
 import static org.apache.cassandra.service.reads.thresholds.WarningsSnapshot.Counter;
 import static org.apache.cassandra.service.reads.thresholds.WarningsSnapshot.builder;
 import static org.apache.cassandra.service.reads.thresholds.WarningsSnapshot.empty;
 import static org.apache.cassandra.service.reads.thresholds.WarningsSnapshot.merge;
-import static java.util.Collections.emptySet;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.quicktheories.QuickTheory.qt;
 

@@ -25,6 +25,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BiFunction;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.LongPredicate;
 import java.util.stream.Collectors;
@@ -58,6 +59,8 @@ import org.apache.cassandra.db.partitions.PurgeFunction;
 import org.apache.cassandra.db.partitions.UnfilteredPartitionIterator;
 import org.apache.cassandra.db.partitions.UnfilteredPartitionIterators;
 import org.apache.cassandra.db.rows.Cell;
+import org.apache.cassandra.db.rows.ColumnData;
+import org.apache.cassandra.db.rows.ComplexColumnData;
 import org.apache.cassandra.db.rows.RangeTombstoneBoundMarker;
 import org.apache.cassandra.db.rows.RangeTombstoneMarker;
 import org.apache.cassandra.db.rows.Row;
@@ -657,7 +660,7 @@ public abstract class ReadCommand extends AbstractReadQuery
      */
     private UnfilteredPartitionIterator withMetricsRecording(UnfilteredPartitionIterator iter, final TableMetrics metric, final long startTimeNanos)
     {
-        class MetricRecording extends Transformation<UnfilteredRowIterator>
+        class MetricRecording extends Transformation<UnfilteredRowIterator> implements Consumer<ColumnData>
         {
             private final int failureThreshold = DatabaseDescriptor.getTombstoneFailureThreshold();
             private final int warningThreshold = DatabaseDescriptor.getTombstoneWarnThreshold();
@@ -671,6 +674,8 @@ public abstract class ReadCommand extends AbstractReadQuery
             private int lastReportedTombstones = 0;
 
             private DecoratedKey currentKey;
+            private Clustering<?> currentClustering;
+            private boolean countedCellTombstone;
 
             @Override
             public UnfilteredRowIterator applyToPartition(UnfilteredRowIterator iter)
@@ -693,14 +698,12 @@ public abstract class ReadCommand extends AbstractReadQuery
                 final boolean rowHasDeletion = row.hasDeletion(nowInSec);
                 if (rowHasDeletion) // perf optimization, to avoid iteration if all cells are alive
                 {
-                    for (Cell<?> cell : row.cells())
-                    {
-                        if (!cell.isLive(nowInSec))
-                        {
-                            countTombstone(row.clustering());
-                            hasTombstones = true; // allows to avoid counting an extra tombstone if the whole row expired
-                        }
-                    }
+                    // Visit the column data in place: cells() allocates a capturing method reference plus a cell
+                    // iterator per row, and this runs for every row of every read that records metrics.
+                    currentClustering = row.clustering();
+                    countedCellTombstone = false;
+                    row.apply(this);
+                    hasTombstones = countedCellTombstone; // allows to avoid counting an extra tombstone if the whole row expired
                 }
 
                 if (row.hasLiveData(nowInSec, enforceStrictLiveness))
@@ -714,6 +717,30 @@ public abstract class ReadCommand extends AbstractReadQuery
                 }
 
                 return row;
+            }
+
+            @Override
+            public void accept(ColumnData cd)
+            {
+                final long nowInSec = ReadCommand.this.nowInSec();
+                if (cd.column().isComplex())
+                {
+                    for (Cell<?> cell : (ComplexColumnData) cd)
+                        countCellTombstone(cell, nowInSec);
+                }
+                else
+                {
+                    countCellTombstone((Cell<?>) cd, nowInSec);
+                }
+            }
+
+            private void countCellTombstone(Cell<?> cell, long nowInSec)
+            {
+                if (cell.isLive(nowInSec))
+                    return;
+
+                countTombstone(currentClustering);
+                countedCellTombstone = true;
             }
 
             @Override
@@ -1036,9 +1063,10 @@ public abstract class ReadCommand extends AbstractReadQuery
     private UnfilteredPartitionIterator maybeRecordPurgeableTombstones(UnfilteredPartitionIterator iter,
                                                                        ColumnFamilyStore cfs)
     {
-        class PurgeableTombstonesMetricRecording extends Transformation<UnfilteredRowIterator>
+        class PurgeableTombstonesMetricRecording extends Transformation<UnfilteredRowIterator> implements Consumer<ColumnData>
         {
             private int purgeableTombstones = 0;
+            private boolean countedCellTombstone;
 
             @Override
             public UnfilteredRowIterator applyToPartition(UnfilteredRowIterator iter)
@@ -1062,14 +1090,11 @@ public abstract class ReadCommand extends AbstractReadQuery
 
                 if (isPurgeableCellTombstonesTrackingEnabled())
                 {
-                    for (Cell<?> cell : row.cells())
-                    {
-                        if (!cell.isLive(nowInSec) && isPurgeable(cell.localDeletionTime(), nowInSec))
-                        {
-                            purgeableTombstones++;
-                            hasTombstones = true; // allows to avoid counting an extra tombstone if the whole row expired
-                        }
-                    }
+                    // See MetricRecording#applyToRow: visiting the column data in place avoids a capturing method
+                    // reference and a cell iterator per row.
+                    countedCellTombstone = false;
+                    row.apply(this);
+                    hasTombstones = countedCellTombstone; // allows to avoid counting an extra tombstone if the whole row expired
                 }
 
                 // we replicate the logic is used for non-purged tombstones metric here
@@ -1083,6 +1108,30 @@ public abstract class ReadCommand extends AbstractReadQuery
                 }
 
                 return row;
+            }
+
+            @Override
+            public void accept(ColumnData cd)
+            {
+                final long nowInSec = nowInSec();
+                if (cd.column().isComplex())
+                {
+                    for (Cell<?> cell : (ComplexColumnData) cd)
+                        countPurgeableCell(cell, nowInSec);
+                }
+                else
+                {
+                    countPurgeableCell((Cell<?>) cd, nowInSec);
+                }
+            }
+
+            private void countPurgeableCell(Cell<?> cell, long nowInSec)
+            {
+                if (!cell.isLive(nowInSec) && isPurgeable(cell.localDeletionTime(), nowInSec))
+                {
+                    purgeableTombstones++;
+                    countedCellTombstone = true;
+                }
             }
 
             @Override
