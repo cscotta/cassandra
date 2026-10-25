@@ -18,7 +18,9 @@
 package org.apache.cassandra.db.marshal;
 
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -31,13 +33,22 @@ import com.google.common.collect.ImmutableSet;
 
 import org.junit.Test;
 
+import org.apache.cassandra.db.DeletionTime;
+import org.apache.cassandra.db.rows.ArrayCell;
+import org.apache.cassandra.db.rows.BufferCell;
+import org.apache.cassandra.db.rows.CellPath;
+import org.apache.cassandra.db.rows.ComplexColumnData;
+import org.apache.cassandra.schema.ColumnMetadata;
+import org.apache.cassandra.serializers.CollectionSerializer;
 import org.apache.cassandra.serializers.ListSerializer;
 import org.apache.cassandra.serializers.MapSerializer;
 import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.serializers.SetSerializer;
 import org.apache.cassandra.serializers.TypeSerializer;
 import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.TimeUUID;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.fail;
 
@@ -204,6 +215,144 @@ public class CollectionTypeTest
         assertInvalid(isms, sb);
         // only values are invalid
         assertInvalid(sims, sb);
+    }
+
+    /**
+     * The byte array flavoured native protocol serialization must produce the exact bytes of the buffer flavoured
+     * one, for both buffer backed and array backed cells (the two representations the read path deserializes).
+     */
+    @Test
+    public void testSerializeForNativeProtocolAsByteArrays()
+    {
+        // list<int>: the path is the element timeuuid and the cell value is the packed element
+        CollectionType<?> list = ListType.getInstance(Int32Type.instance, true);
+        List<ByteBuffer> listElements = Arrays.asList(Int32Type.instance.decompose(7),
+                                                      Int32Type.instance.decompose(8),
+                                                      Int32Type.instance.decompose(9));
+        assertNativeProtocolPacking(list,
+                                    ColumnMetadata.regularColumn("ks", "t", "l", list, ColumnMetadata.NO_UNIQUE_ID),
+                                    timeuuidPaths(3),
+                                    listElements,
+                                    listElements);
+
+        // set<text>: the path holds the element and the cell value is empty
+        CollectionType<?> set = SetType.getInstance(UTF8Type.instance, true);
+        List<ByteBuffer> setElements = Arrays.asList(UTF8Type.instance.decompose("aa"),
+                                                    UTF8Type.instance.decompose("bb"),
+                                                    UTF8Type.instance.decompose("cc"));
+        assertNativeProtocolPacking(set,
+                                    ColumnMetadata.regularColumn("ks", "t", "s", set, ColumnMetadata.NO_UNIQUE_ID),
+                                    setElements,
+                                    Arrays.asList(ByteBufferUtil.EMPTY_BYTE_BUFFER,
+                                                  ByteBufferUtil.EMPTY_BYTE_BUFFER,
+                                                  ByteBufferUtil.EMPTY_BYTE_BUFFER),
+                                    setElements);
+
+        // map<text,text>: the path holds the key and the cell value holds the value
+        CollectionType<?> map = MapType.getInstance(UTF8Type.instance, UTF8Type.instance, true);
+        List<ByteBuffer> keys = Arrays.asList(UTF8Type.instance.decompose("k1"), UTF8Type.instance.decompose("k2"));
+        List<ByteBuffer> values = Arrays.asList(UTF8Type.instance.decompose("v1"), UTF8Type.instance.decompose("v2"));
+        assertNativeProtocolPacking(map,
+                                    ColumnMetadata.regularColumn("ks", "t", "m", map, ColumnMetadata.NO_UNIQUE_ID),
+                                    keys,
+                                    values,
+                                    Arrays.asList(keys.get(0), values.get(0), keys.get(1), values.get(1)));
+    }
+
+    /**
+     * Builds a multi-cell collection with the given element paths and values, packs it through both native protocol
+     * entry points and with both cell implementations, and checks that the protocol bytes carry the expected elements.
+     */
+    private void assertNativeProtocolPacking(CollectionType<?> type,
+                                             ColumnMetadata column,
+                                             List<ByteBuffer> paths,
+                                             List<ByteBuffer> values,
+                                             List<ByteBuffer> expectedElements)
+    {
+        ComplexColumnData bufferCells = collectionColumnData(column, paths, values, false);
+        ComplexColumnData arrayCells = collectionColumnData(column, paths, values, true);
+
+        byte[] packed = type.serializeForNativeProtocolAsByteArrays(bufferCells.iterator());
+        assertArrayEquals(ByteBufferUtil.getArray(type.serializeForNativeProtocol(bufferCells.iterator())), packed);
+        // and, in case the two packing methods ever drift apart, compare against the packing method this one replaces
+        assertArrayEquals(type.getSerializer().pack(type.serializedValuesAsByteArrays(bufferCells.iterator()), ByteArrayAccessor.instance),
+                          packed);
+        // the cell implementation must not matter, only the values the cells carry
+        assertArrayEquals(packed, type.serializeForNativeProtocolAsByteArrays(arrayCells.iterator()));
+        assertEquals(expectedElements, unpack(type, packed));
+
+        // an empty collection still carries its (zero) size
+        byte[] packedEmpty = type.serializeForNativeProtocolAsByteArrays(emptyCollection(column).iterator());
+        assertArrayEquals(new byte[4], packedEmpty);
+        assertArrayEquals(ByteBufferUtil.getArray(type.serializeForNativeProtocol(emptyCollection(column).iterator())),
+                          packedEmpty);
+        assertEquals(Collections.emptyList(), unpack(type, packedEmpty));
+    }
+
+    /**
+     * The single pass packing of already serialized values must produce exactly the bytes of the generic packing,
+     * including for a null element (a deleted collection element) and for a collection without elements.
+     */
+    @Test
+    public void testPackAsByteArrayMatchesPack()
+    {
+        CollectionSerializer<?> serializer = ListType.getInstance(Int32Type.instance, true).getSerializer();
+        byte[] one = ByteBufferUtil.getArray(Int32Type.instance.decompose(1));
+        byte[] three = ByteBufferUtil.getArray(Int32Type.instance.decompose(3));
+        List<byte[]> withNull = new ArrayList<>();
+        withNull.add(one);
+        withNull.add(null);
+        withNull.add(three);
+
+        for (List<byte[]> values : Arrays.asList(Collections.<byte[]>emptyList(),
+                                                 Collections.singletonList(one),
+                                                 Arrays.asList(one, three),
+                                                 withNull))
+            assertArrayEquals(serializer.pack(values, ByteArrayAccessor.instance),
+                              serializer.packAsByteArray(values));
+    }
+
+    private static List<ByteBuffer> unpack(CollectionType<?> type, byte[] packed)
+    {
+        return type.getSerializer().unpack(ByteBuffer.wrap(packed));
+    }
+
+    /**
+     * The cell paths of a list are timeuuids, so a list needs distinct ordered paths that its comparator accepts.
+     */
+    private static List<ByteBuffer> timeuuidPaths(int count)
+    {
+        List<ByteBuffer> paths = new ArrayList<>(count);
+        for (int i = 0; i < count; i++)
+            paths.add(TimeUUIDType.instance.decompose(TimeUUID.Generator.nextTimeUUID()));
+        return paths;
+    }
+
+    private static ComplexColumnData collectionColumnData(ColumnMetadata column,
+                                                          List<ByteBuffer> paths,
+                                                          List<ByteBuffer> values,
+                                                          boolean arrayCells)
+    {
+        ComplexColumnData.Builder builder = ComplexColumnData.builder();
+        builder.newColumn(column);
+        for (int i = 0; i < paths.size(); i++)
+        {
+            CellPath path = CellPath.create(paths.get(i));
+            ByteBuffer value = values.get(i);
+            builder.addCell(arrayCells
+                            ? ArrayCell.live(column, 1L, ByteBufferUtil.getArray(value), path)
+                            : BufferCell.live(column, 1L, value, path));
+        }
+        return builder.build();
+    }
+
+    private static ComplexColumnData emptyCollection(ColumnMetadata column)
+    {
+        ComplexColumnData.Builder builder = ComplexColumnData.builder();
+        builder.newColumn(column);
+        // a live empty complex column is not buildable, so mark it deleted instead
+        builder.addComplexDeletion(DeletionTime.build(1L, 0));
+        return builder.build();
     }
 
     private void assertInvalid(TypeSerializer<?> type, ByteBuffer value)

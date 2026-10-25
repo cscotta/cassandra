@@ -189,8 +189,7 @@ public abstract class CollectionType<T> extends MultiElementType<T>
     public byte[] serializeForNativeProtocolAsByteArrays(Iterator<Cell<?>> cells)
     {
         assert isMultiCell();
-        List<byte[]> values = serializedValuesAsByteArrays(cells);
-        return getSerializer().pack(values, ByteArrayAccessor.instance);
+        return getSerializer().packAsByteArray(serializedValuesAsByteArrays(cells));
     }
 
     @Override
