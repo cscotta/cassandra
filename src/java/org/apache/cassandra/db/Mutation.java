@@ -542,7 +542,7 @@ public class Mutation implements IMutation, Supplier<Mutation>
                     if (dob.getLength() < CACHEABLE_MUTATION_SIZE_LIMIT)
                         serialization = new CachedSerialization(dob.unsafeToByteArray());
                     else
-                        serialization = new SizeOnlyCacheableSerialization();
+                        serialization = new SizeOnlyCacheableSerialization(dob.getLength());
                 }
                 catch (IOException e)
                 {
@@ -677,6 +677,19 @@ public class Mutation implements IMutation, Supplier<Mutation>
     private static final class SizeOnlyCacheableSerialization extends Serialization
     {
         private volatile long size;
+
+        SizeOnlyCacheableSerialization()
+        {
+        }
+
+        /**
+         * Build a serialization whose size is already known, so that it does not have to be measured by
+         * iterating the mutation again.
+         */
+        SizeOnlyCacheableSerialization(long size)
+        {
+            this.size = size;
+        }
 
         @Override
         void serialize(PartitionUpdate.PartitionUpdateSerializer serializer, Mutation mutation, DataOutputPlus out, int version) throws IOException
