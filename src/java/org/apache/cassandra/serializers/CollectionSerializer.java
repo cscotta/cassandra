@@ -29,6 +29,7 @@ import com.google.common.collect.Range;
 
 import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.db.marshal.AbstractType;
+import org.apache.cassandra.db.marshal.ByteArrayAccessor;
 import org.apache.cassandra.db.marshal.ByteBufferAccessor;
 import org.apache.cassandra.db.marshal.ValueAccessor;
 import org.apache.cassandra.utils.ByteBufferUtil;
@@ -64,6 +65,29 @@ public abstract class CollectionSerializer<T> extends TypeSerializer<T>
             writeValue(result, value, accessor);
         }
         return accessor.valueOf((ByteBuffer) result.flip());
+    }
+
+    /**
+     * Packs already serialized values into a new byte array.
+     * <p>
+     * {@link #pack(Collection, ValueAccessor)} allocates a {@code ByteBuffer} and then converts it with the
+     * accessor, which copies the packed collection a second time for byte array based accessors. The native
+     * protocol read path packs every multi-cell collection of a result row this way, so this overload writes the
+     * values straight into the result array instead.
+     */
+    public byte[] packAsByteArray(Collection<byte[]> values)
+    {
+        ValueAccessor<byte[]> accessor = ByteArrayAccessor.instance;
+        int size = sizeOfCollectionSize();
+        for (byte[] value : values)
+            size += sizeOfValue(value, accessor);
+
+        byte[] result = new byte[size];
+        ByteBuffer out = ByteBuffer.wrap(result);
+        writeCollectionSize(out, collectionSize(values));
+        for (byte[] value : values)
+            writeValue(out, value, accessor);
+        return result;
     }
 
     public List<ByteBuffer> unpack(ByteBuffer input)
