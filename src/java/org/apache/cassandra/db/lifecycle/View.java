@@ -23,6 +23,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
 
 import javax.annotation.Nullable;
 
@@ -249,6 +250,15 @@ public class View
     {
         assert sstableSet == SSTableSet.LIVE;
         return (view) -> view.intervalTree.search(key);
+    }
+
+    /**
+     * Adds the live sstables that may contain {@code key} to {@code results}.
+     */
+    public void select(SSTableSet sstableSet, DecoratedKey key, Consumer<SSTableReader> results)
+    {
+        assert sstableSet == SSTableSet.LIVE;
+        intervalTree.search(key, results);
     }
 
     /**

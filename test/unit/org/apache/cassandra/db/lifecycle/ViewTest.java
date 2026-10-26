@@ -34,6 +34,7 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 
 import org.apache.cassandra.ServerTestUtils;
+import org.apache.cassandra.db.BufferDecoratedKey;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.PartitionPosition;
 import org.apache.cassandra.db.commitlog.CommitLog;
@@ -82,6 +83,20 @@ public class ViewTest
                     }
                 }
             }
+        }
+    }
+
+    @Test
+    public void testSelectForAKeyMatchesTheIntervalTreeSearch()
+    {
+        ColumnFamilyStore cfs = MockSchema.newCFS();
+        View view = fakeView(0, 5, cfs);
+        for (int i = 0; i < 5; i++)
+        {
+            BufferDecoratedKey key = MockSchema.readerBounds(i);
+            List<SSTableReader> collected = new ArrayList<>();
+            view.select(SSTableSet.LIVE, key, collected::add);
+            Assert.assertEquals("key " + i, view.intervalTree.search(key), collected);
         }
     }
 

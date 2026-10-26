@@ -260,6 +260,18 @@ public class IntervalTree<C extends Comparable<? super C>, D extends Comparable<
         return search(Interval.create(point, point, null));
     }
 
+    /**
+     * Adds the data of the intervals that contain {@code point} to {@code results}, without building an
+     * intermediate list.
+     */
+    public void search(C point, Consumer<D> results)
+    {
+        if (head == null)
+            return;
+
+        head.searchInternal(Interval.create(point, point, null), i -> results.accept(i.data));
+    }
+
     @SuppressWarnings("unchecked")
     private I[] buildUpdatedArrayForUpdate(I[] existingSorted,
                                            I[] removalsSorted,
