@@ -546,9 +546,16 @@ public class BTreeRow extends AbstractRow
      * Purges a single-leaf column data b-tree by walking its keys in order, which avoids allocating a capturing
      * lambda and the generic transform machinery for every purged row. Returns {@code leaf} itself when no column
      * data changed.
+     * <p>
+     * Equivalent to {@link BTree#transformAndFilter(Object[], Function)} for a leaf: keys are visited in ascending
+     * order, {@code null} results are dropped, and the rebuilt array follows the leaf layout ({@code size | 1} slots,
+     * no trailing key) that {@code BTree} expects. Rows whose column data spans more than one node keep using the
+     * generic transform, and holders of a leaf must not rely on overriding
+     * {@link #transformAndFilter(LivenessInfo, Deletion, Function)} to intercept a purge.
      */
     private static Object[] purgeLeaf(Object[] leaf, DeletionPurger purger, long nowInSec)
     {
+        assert BTree.isLeaf(leaf);
         int size = BTree.size(leaf);
         Object[] purged = null;
         int retained = 0;

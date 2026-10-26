@@ -35,10 +35,12 @@ import org.apache.cassandra.db.rows.BufferCell;
 import org.apache.cassandra.db.rows.Cell;
 import org.apache.cassandra.db.rows.CellPath;
 import org.apache.cassandra.db.rows.ColumnData;
+import org.apache.cassandra.db.rows.ComplexColumnData;
 import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.btree.BTree;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -55,7 +57,8 @@ public class BTreeRowPurgeTest
 {
     private static final long NOW = 1000;
     private static final long TS = 500;
-    private static final int COLUMN_COUNT = 40;
+    // one more column than a single leaf holds, so the widest row below must be a multi-node tree
+    private static final int COLUMN_COUNT = BTree.MAX_KEYS + 1;
 
     private static final TableMetadata metadata;
     private static final ColumnMetadata[] intColumns = new ColumnMetadata[COLUMN_COUNT];
@@ -102,9 +105,17 @@ public class BTreeRowPurgeTest
             Row expected = purgeViaGenericTransform(row, purger, nowInSec, enforceStrictLiveness);
             Row actual = row.purge(purger, nowInSec, enforceStrictLiveness);
             if (expected == null)
+            {
                 assertNull("purge(" + enforceStrictLiveness + ") should have dropped the row", actual);
-            else
-                assertEquals("purge(" + enforceStrictLiveness + ") diverged from the generic transform", expected, actual);
+                continue;
+            }
+            assertEquals("purge(" + enforceStrictLiveness + ") diverged from the generic transform", expected, actual);
+            assertEquals("purge(" + enforceStrictLiveness + ") changed the column data count",
+                         expected.columnData().size(), actual.columnData().size());
+            // minLocalDeletionTime is not part of Row.equals but decides whether later purges touch the row
+            for (long now : new long[]{ nowInSec, nowInSec + 1, nowInSec + 100, Long.MAX_VALUE })
+                assertEquals("purge(" + enforceStrictLiveness + ") changed hasDeletion(" + now + ")",
+                             expected.hasDeletion(now), actual.hasDeletion(now));
         }
     }
 
@@ -248,17 +259,53 @@ public class BTreeRowPurgeTest
     @Test
     public void testComplexColumnPurge()
     {
+        // complex columns sort after every simple one
         Row.Builder builder = sortedBuilder();
         builder.addCell(BufferCell.live(intColumns[0], TS, VAL));
+        builder.addCell(BufferCell.live(intColumns[1], TS, VAL));
         builder.addComplexDeletion(mapColumn, DeletionTime.build(TS, NOW - 100));
         builder.addCell(BufferCell.tombstone(mapColumn, TS, NOW - 100, CellPath.create(KEY1)));
         builder.addCell(BufferCell.expiring(mapColumn, TS, 1, NOW - 100, VAL, CellPath.create(KEY2)));
-        builder.addCell(BufferCell.live(intColumns[1], TS, VAL));
         Row row = builder.build();
 
         Row purged = purgeAndAssert(row, DeletionPurger.PURGE_ALL);
         assertNotNull(purged);
         assertEquals(Arrays.asList(intColumns[0], intColumns[1]), columns(purged));
+    }
+
+    @Test
+    public void testPartiallyPurgedComplexColumnKeepsAChangedInstance()
+    {
+        Row.Builder builder = sortedBuilder();
+        builder.addCell(BufferCell.live(intColumns[0], TS, VAL));
+        builder.addComplexDeletion(mapColumn, DeletionTime.build(TS, NOW - 50));
+        builder.addCell(BufferCell.live(mapColumn, TS, VAL, CellPath.create(KEY1)));
+        builder.addCell(BufferCell.tombstone(mapColumn, TS, NOW - 200, CellPath.create(KEY2)));
+        Row row = builder.build();
+
+        // the complex deletion and the live map cell are too young to purge, the tombstone cell is not
+        DeletionPurger purger = (timestamp, localDeletionTime) -> localDeletionTime < NOW - 100;
+        Row purged = purgeAndAssert(row, purger);
+        assertNotNull(purged);
+        assertEquals(Arrays.asList(intColumns[0], mapColumn), columns(purged));
+        Iterator<ColumnData> iter = purged.iterator();
+        iter.next();
+        ComplexColumnData map = (ComplexColumnData) iter.next();
+        assertFalse("the complex deletion is too young to purge", map.complexDeletion().isLive());
+        assertEquals(1, map.cellsCount());
+    }
+
+    @Test
+    public void testRowWithNothingToPurgeIsReturnedUnchanged()
+    {
+        Row.Builder builder = sortedBuilder(LivenessInfo.create(TS), Row.Deletion.regular(DeletionTime.build(TS - 10, NOW - 100)));
+        builder.addCell(BufferCell.live(intColumns[0], TS, VAL));
+        Row row = builder.build();
+
+        // the row has a deletion, so purge runs, but nothing is old enough: the leaf walk must return the row itself
+        DeletionPurger purger = (timestamp, localDeletionTime) -> localDeletionTime < NOW - 200;
+        assertSame(row, row.purge(purger, NOW, false));
+        assertSameResult(row, purger, NOW);
     }
 
     @Test
