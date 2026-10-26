@@ -352,6 +352,16 @@ public class BTreeRow extends AbstractRow
         return BTree.slice(btree, ColumnMetadata.asymmetricColumnDataComparator, BTree.Dir.ASC);
     }
 
+    /**
+     * The row's column data b-tree if it is a single leaf node, {@code null} otherwise. Leaf items are stored in
+     * ascending column order in slots {@code 0..BTree.size(tree)-1}, so callers in this package can walk them by
+     * index instead of allocating a search iterator.
+     */
+    Object[] columnDataLeaf()
+    {
+        return BTree.isLeaf(btree) ? btree : null;
+    }
+
     public Row filter(ColumnFilter filter, TableMetadata metadata)
     {
         return filter(filter, DeletionTime.LIVE, false, metadata);

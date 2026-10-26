@@ -49,6 +49,7 @@ import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.btree.BTree;
 
 import static org.apache.cassandra.db.CellTest.assertCellsEqual;
 
@@ -463,6 +464,78 @@ public class RowsTest
         Row third = merger.merge(DeletionTime.build(1000, FBUtilities.nowInSeconds()));
         Assert.assertEquals(Lists.newArrayList(d), mergedColumns(third));
         Assert.assertEquals(BB3, mergedValue(third, d));
+    }
+
+    private static TableMetadata mergerTable(int columnCount)
+    {
+        TableMetadata.Builder builder = TableMetadata.builder(KEYSPACE, "merger_column_data")
+                                                     .addPartitionKeyColumn("k", IntegerType.instance)
+                                                     .addClusteringColumn("ck", IntegerType.instance);
+        for (int i = 0; i < columnCount; i++)
+            builder.addRegularColumn("c" + i, Int32Type.instance);
+        return builder.build();
+    }
+
+    private static ColumnMetadata mergerColumn(TableMetadata metadata, int i)
+    {
+        return metadata.getColumn(new ColumnIdentifier("c" + i, false));
+    }
+
+    @Test
+    public void testMergerLeafAndMultiNodeColumnData()
+    {
+        // Row.Merger walks a row's column data by index while it is a single leaf node and falls back to a
+        // BTreeSearchIterator once the row is wide enough for a multi-node b-tree; both must merge identically.
+        int leafColumns = 2;
+        int wideColumns = 2 * BTree.MAX_KEYS + 2;
+        TableMetadata metadata = mergerTable(wideColumns);
+        Clustering<?> clustering = metadata.comparator.make(BigInteger.valueOf(1));
+
+        Row.Merger merger = new Row.Merger(2, false);
+        for (int columnCount : new int[]{ leafColumns, wideColumns })
+        {
+            Row.Builder older = BTreeRow.unsortedBuilder();
+            older.newRow(clustering);
+            older.addPrimaryKeyLivenessInfo(LivenessInfo.create(1000));
+            Row.Builder newer = BTreeRow.unsortedBuilder();
+            newer.newRow(clustering);
+            newer.addPrimaryKeyLivenessInfo(LivenessInfo.create(1001));
+            for (int i = 0; i < columnCount; i++)
+            {
+                ColumnMetadata column = mergerColumn(metadata, i);
+                older.addCell(BufferCell.live(column, 1000, BB1));
+                if ((i & 1) == 0)
+                    newer.addCell(BufferCell.live(column, 1001, BB2));
+            }
+
+            Row olderRow = older.build();
+            Row newerRow = newer.build();
+            // the row has to have the shape that takes the path under test, or this proves nothing
+            if (columnCount == leafColumns)
+                Assert.assertNotNull(((BTreeRow) olderRow).columnDataLeaf());
+            else
+                Assert.assertNull(((BTreeRow) olderRow).columnDataLeaf());
+
+            merger.add(0, olderRow);
+            merger.add(1, newerRow);
+            Row merged = merger.merge(DeletionTime.LIVE);
+            merger.clear();
+
+            // the merged row must present the columns in the b-tree's (column name) order, not in insertion order
+            List<ColumnMetadata> expected = new ArrayList<>(columnCount);
+            for (int i = 0; i < columnCount; i++)
+                expected.add(mergerColumn(metadata, i));
+            expected.sort(ColumnMetadata::compareTo);
+            Assert.assertEquals(expected, mergedColumns(merged));
+
+            for (int i = 0; i < columnCount; i++)
+            {
+                ColumnMetadata column = mergerColumn(metadata, i);
+                boolean reconciled = (i & 1) == 0;
+                Assert.assertEquals(reconciled ? 1001 : 1000, mergedTimestamp(merged, column));
+                Assert.assertEquals(reconciled ? BB2 : BB1, mergedValue(merged, column));
+            }
+        }
     }
 
     @Test
