@@ -50,6 +50,7 @@ import org.apache.cassandra.utils.ObjectSizes;
 import org.apache.cassandra.utils.RowMergeIterator;
 import org.apache.cassandra.utils.SearchIterator;
 import org.apache.cassandra.utils.btree.BTree;
+import org.apache.cassandra.utils.btree.BTreeSearchIterator;
 import org.apache.cassandra.utils.btree.UpdateFunction;
 import org.apache.cassandra.utils.memory.Cloner;
 
@@ -727,8 +728,8 @@ public interface Row extends Unfiltered, Iterable<ColumnData>, IMeasurableMemory
         private static final int MAX_SOURCES_FOR_IN_PLACE_MERGE = 8;
 
         private final Row[] rows;
-        private final List<Iterator<ColumnData>> columnDataIterators;
-        // Head of each source column-data iterator for the row currently being merged, reused between rows.
+        private final Source[] sources;
+        // Head of each source column-data cursor for the row currently being merged, reused between rows.
         private final ColumnData[] columnDataHeads;
 
         private Clustering<?> clustering;
@@ -744,7 +745,9 @@ public interface Row extends Unfiltered, Iterable<ColumnData>, IMeasurableMemory
         public Merger(int size, boolean hasComplex)
         {
             this.rows = new Row[size];
-            this.columnDataIterators = new ArrayList<>(size);
+            this.sources = new Source[size];
+            for (int i = 0; i < size; i++)
+                sources[i] = new Source();
             this.columnDataHeads = new ColumnData[size];
             this.columnDataReducer = new ColumnDataReducer(size, hasComplex);
         }
@@ -755,7 +758,8 @@ public interface Row extends Unfiltered, Iterable<ColumnData>, IMeasurableMemory
             dataBufferSize = 0;
             Arrays.fill(rows, null);
             Arrays.fill(columnDataHeads, null);
-            columnDataIterators.clear();
+            for (Source source : sources)
+                source.clear();
             rowsToMerge = 0;
             lastRowSet = -1;
         }
@@ -763,6 +767,7 @@ public interface Row extends Unfiltered, Iterable<ColumnData>, IMeasurableMemory
         public void add(int i, Row row)
         {
             clustering = row.clustering();
+            assert rows[i] == null : "each source index may be added at most once per merge";
             rows[i] = row;
             ++rowsToMerge;
             lastRowSet = i;
@@ -786,8 +791,9 @@ public interface Row extends Unfiltered, Iterable<ColumnData>, IMeasurableMemory
             // expiring data (i.e. this stays at MAX_DELETION_TIME), the merged row can't either, so we can hand the
             // value to BTreeRow.create() below and skip the full btree scan it would otherwise do to recompute it.
             long minDeletionTime = Cell.MAX_DELETION_TIME;
-            for (Row row : rows)
+            for (int i = 0; i < rows.length; i++)
             {
+                Row row = rows[i];
                 if (row == null)
                     continue;
 
@@ -798,7 +804,7 @@ public interface Row extends Unfiltered, Iterable<ColumnData>, IMeasurableMemory
 
                 minDeletionTime = Math.min(minDeletionTime, row.minLocalDeletionTime());
 
-                columnDataIterators.add(row.iterator());
+                sources[i].reset(row);
                 columnsCountEstimation = Math.max(columnsCountEstimation, row.columnCount());
             }
 
@@ -846,28 +852,27 @@ public interface Row extends Unfiltered, Iterable<ColumnData>, IMeasurableMemory
          */
         private void mergeColumnData()
         {
-            final List<Iterator<ColumnData>> iterators = columnDataIterators;
+            final Source[] sources = this.sources;
             final ColumnData[] heads = columnDataHeads;
-            final int sources = iterators.size();
-            assert sources <= heads.length : "clear() is required between merges";
+            final int sourcesCount = rowsToMerge;
+            assert sourcesCount <= heads.length : "clear() is required between merges";
 
-            if (sources > MAX_SOURCES_FOR_IN_PLACE_MERGE)
+            if (sourcesCount > MAX_SOURCES_FOR_IN_PLACE_MERGE)
             {
                 mergeColumnDataWithIterator();
                 return;
             }
 
-            for (int i = 0; i < sources; i++)
+            for (int i = 0; i < heads.length; i++)
             {
-                Iterator<ColumnData> iterator = iterators.get(i);
-                assert !(iterator instanceof IteratorWithLowerBound) : "column-data iterators are never lower-bounded";
-                heads[i] = iterator.hasNext() ? iterator.next() : null;
+                Source source = sources[i];
+                heads[i] = rows[i] != null && source.hasNext() ? source.next() : null;
             }
 
             while (true)
             {
                 ColumnData min = null;
-                for (int i = 0; i < sources; i++)
+                for (int i = 0; i < heads.length; i++)
                 {
                     ColumnData head = heads[i];
                     if (head == null)
@@ -879,15 +884,15 @@ public interface Row extends Unfiltered, Iterable<ColumnData>, IMeasurableMemory
                     return;
 
                 columnDataReducer.beginColumn();
-                for (int i = 0; i < sources; i++)
+                for (int i = 0; i < heads.length; i++)
                 {
                     ColumnData head = heads[i];
                     if (head == null || (head != min && ColumnData.comparator.compare(head, min) != 0))
                         continue;
 
                     columnDataReducer.reduce(i, head);
-                    Iterator<ColumnData> iterator = iterators.get(i);
-                    heads[i] = iterator.hasNext() ? iterator.next() : null;
+                    Source source = sources[i];
+                    heads[i] = source.hasNext() ? source.next() : null;
                 }
 
                 ColumnData data = columnDataReducer.mergedColumn();
@@ -902,7 +907,15 @@ public interface Row extends Unfiltered, Iterable<ColumnData>, IMeasurableMemory
         /** Slow path for reads that merge many sources; see {@link #MAX_SOURCES_FOR_IN_PLACE_MERGE}. */
         private void mergeColumnDataWithIterator()
         {
-            Iterator<ColumnData> merged = RowMergeIterator.get(columnDataIterators, ColumnData.comparator, columnDataReducer);
+            List<Iterator<ColumnData>> iterators = new ArrayList<>(rowsToMerge);
+            for (Row row : rows)
+            {
+                if (row == null)
+                    continue;
+                iterators.add(row.iterator());
+            }
+
+            Iterator<ColumnData> merged = RowMergeIterator.get(iterators, ColumnData.comparator, columnDataReducer);
             while (merged.hasNext())
             {
                 ColumnData data = merged.next();
@@ -919,6 +932,59 @@ public interface Row extends Unfiltered, Iterable<ColumnData>, IMeasurableMemory
             if (dataBufferSize == dataBuffer.length)
                 // increase capacity by 50%, use 4 as a default capacity
                 dataBuffer = Arrays.copyOf(dataBuffer, Math.max(dataBuffer.length + (dataBuffer.length >> 1), 4));
+        }
+
+        /**
+         * Cursor over the column data of one source row of the row currently being merged, reused between rows.
+         *
+         * A row's column data is almost always a single leaf b-tree, whose items are already stored in column order,
+         * so the common case is a plain index walk. Allocating a {@link BTreeSearchIterator} per (row, source) pair
+         * instead costs one object for every source of every merged row, which is the largest remaining per-row
+         * allocation of a multi-source read after the merged row itself. Wider rows (a multi-node b-tree) and other
+         * {@link Row} implementations keep the iterator.
+         */
+        private static final class Source
+        {
+            private Object[] columns;
+            private int next;
+            private int end;
+            private Iterator<ColumnData> iterator;
+
+            void reset(Row row)
+            {
+                Object[] leaf = row instanceof BTreeRow ? ((BTreeRow) row).columnDataLeaf() : null;
+                if (leaf == null)
+                {
+                    columns = null;
+                    iterator = row.iterator();
+                    assert !(iterator instanceof IteratorWithLowerBound) : "column-data iterators are never lower-bounded";
+                }
+                else
+                {
+                    columns = leaf;
+                    iterator = null;
+                    next = 0;
+                    end = BTree.size(leaf);
+                }
+            }
+
+            boolean hasNext()
+            {
+                return columns != null ? next < end : iterator.hasNext();
+            }
+
+            ColumnData next()
+            {
+                return columns != null ? (ColumnData) columns[next++] : iterator.next();
+            }
+
+            void clear()
+            {
+                columns = null;
+                iterator = null;
+                next = 0;
+                end = 0;
+            }
         }
 
         public Clustering<?> mergedClustering()
