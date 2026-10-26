@@ -721,8 +721,9 @@ public interface Row extends Unfiltered, Iterable<ColumnData>, IMeasurableMemory
      */
     public static class Merger
     {
-        // Above this many sources the linear scan of mergeColumnData costs more comparisons per column than the
-        // merge iterator's heap, and the saved allocation is a small part of a wide read, so use the merge iterator.
+        // Above this many sources the linear scan of the in-place column and cell merges costs more comparisons per
+        // column/cell than the merge iterator's heap, and the saved allocation is a small part of a wide read, so use
+        // the merge iterator.
         private static final int MAX_SOURCES_FOR_IN_PLACE_MERGE = 8;
 
         private final Row[] rows;
@@ -941,6 +942,8 @@ public interface Row extends Unfiltered, Iterable<ColumnData>, IMeasurableMemory
             private final ComplexColumnData.Builder complexBuilder;
             private final List<Iterator<Cell<?>>> complexCells;
             private final CellReducer cellReducer;
+            // Head of each source cell iterator for the complex column currently being merged, reused between columns.
+            private final Cell<?>[] cellHeads;
 
             public ColumnDataReducer(int size, boolean hasComplex)
             {
@@ -948,6 +951,7 @@ public interface Row extends Unfiltered, Iterable<ColumnData>, IMeasurableMemory
                 this.complexBuilder = hasComplex ? ComplexColumnData.builder() : null;
                 this.complexCells = hasComplex ? new ArrayList<>(size) : null;
                 this.cellReducer = new CellReducer();
+                this.cellHeads = hasComplex ? new Cell<?>[size] : null;
             }
 
             public void setActiveDeletion(DeletionTime activeDeletion)
@@ -1029,14 +1033,87 @@ public interface Row extends Unfiltered, Iterable<ColumnData>, IMeasurableMemory
                         cellReducer.setActiveDeletion(activeDeletion);
                     }
 
-                    Iterator<Cell<?>> cells = ComplexCellMergeIterator.get(complexCells, Cell.comparator, cellReducer);
-                    while (cells.hasNext())
-                    {
-                        Cell<?> merged = cells.next();
-                        if (merged != null)
-                            complexBuilder.addCell(merged);
-                    }
+                    mergeComplexCells();
                     return complexBuilder.build();
+                }
+            }
+
+            /**
+             * Merges the cell iterators of the complex column in {@link #complexCells}, grouping the versions of each
+             * cell path into a single reduced cell, in place over the (tiny) {@link #cellHeads} array. This is the k-way
+             * merge {@link ComplexCellMergeIterator} implements, but a merge iterator, its heap array and one candidate
+             * per source would otherwise be allocated for every complex column of every merged row.
+             */
+            private void mergeComplexCells()
+            {
+                final List<Iterator<Cell<?>>> iterators = complexCells;
+                final Cell<?>[] heads = cellHeads;
+                final int sources = iterators.size();
+                assert heads != null && sources <= heads.length : "a complex column requires hasComplex and clear() between columns";
+
+                if (sources > MAX_SOURCES_FOR_IN_PLACE_MERGE)
+                {
+                    mergeComplexCellsWithIterator();
+                    return;
+                }
+
+                for (int i = 0; i < heads.length; i++)
+                {
+                    if (i >= sources)
+                    {
+                        // Never read, but do not retain a cell from a preceding, wider column.
+                        heads[i] = null;
+                        continue;
+                    }
+                    Iterator<Cell<?>> iterator = iterators.get(i);
+                    assert !(iterator instanceof IteratorWithLowerBound) : "complex column iterators have no lower bound";
+                    heads[i] = iterator.hasNext() ? iterator.next() : null;
+                }
+
+                // The loop exits only once every head is null, so no cell is retained between columns.
+                while (true)
+                {
+                    Cell<?> min = null;
+                    for (int i = 0; i < sources; i++)
+                    {
+                        Cell<?> head = heads[i];
+                        if (head == null)
+                            continue;
+                        if (min == null || Cell.comparator.compare(head, min) < 0)
+                            min = head;
+                    }
+                    if (min == null)
+                        return;
+
+                    // Reduce the sources of this path in ascending source order; the reduction is a fold over a total
+                    // order (timestamp, liveness, value), so the order only selects which equal instance survives.
+                    cellReducer.beginCell();
+                    for (int i = 0; i < sources; i++)
+                    {
+                        Cell<?> head = heads[i];
+                        if (head == null || (head != min && Cell.comparator.compare(head, min) != 0))
+                            continue;
+
+                        cellReducer.reduce(i, head);
+                        Iterator<Cell<?>> iterator = iterators.get(i);
+                        heads[i] = iterator.hasNext() ? iterator.next() : null;
+                    }
+
+                    Cell<?> merged = cellReducer.mergedCell();
+                    if (merged != null)
+                        complexBuilder.addCell(merged);
+                }
+            }
+
+            /** Slow path for complex columns with many versions; see {@link #MAX_SOURCES_FOR_IN_PLACE_MERGE}. */
+            private void mergeComplexCellsWithIterator()
+            {
+                Iterator<Cell<?>> cells = ComplexCellMergeIterator.get(complexCells, Cell.comparator, cellReducer);
+                while (cells.hasNext())
+                {
+                    Cell<?> merged = cells.next();
+                    if (merged != null)
+                        complexBuilder.addCell(merged);
                 }
             }
 
@@ -1073,6 +1150,18 @@ public interface Row extends Unfiltered, Iterable<ColumnData>, IMeasurableMemory
             protected void onKeyChange()
             {
                 merged = null;
+            }
+
+            // Reducer#onKeyChange and Reducer#getReduced are protected to the utils package, so the in-place merge
+            // in ColumnDataReducer drives them through these two adapters.
+            void beginCell()
+            {
+                onKeyChange();
+            }
+
+            Cell<?> mergedCell()
+            {
+                return getReduced();
             }
         }
     }

@@ -310,6 +310,16 @@ public class RowsTest
         return builder.build();
     }
 
+    private static Row rowWithComplexCells(Clustering<?> c, long ts, Cell<?>... cells)
+    {
+        Row.Builder builder = BTreeRow.unsortedBuilder();
+        builder.newRow(c);
+        builder.addPrimaryKeyLivenessInfo(LivenessInfo.create(ts));
+        for (Cell<?> cell : cells)
+            builder.addCell(cell);
+        return builder.build();
+    }
+
     private static Row mergeRows(Row... rows)
     {
         boolean hasComplex = false;
@@ -531,6 +541,175 @@ public class RowsTest
         ComplexColumnData complex = merged.getComplexColumnData(m);
         Assert.assertNotNull(complex);
         Assert.assertEquals(2, complex.cellsCount());
+    }
+
+    @Test
+    public void testMergerGroupsSameComplexCellPathVersions()
+    {
+        long now = FBUtilities.nowInSeconds();
+        long ts = secondToTs(now);
+
+        // Both sources hold a version of the same map entry (same cell path): the in-place cell merge must reduce them
+        // to a single cell and keep the newer version, while entries held by one source only are emitted once.
+        Row r0 = rowWithComplexCells(c1, ts, BufferCell.live(m, ts, BB1, CellPath.create(BB1)));
+        Row r1 = rowWithComplexCells(c1, ts + 1,
+                                     BufferCell.live(m, ts + 1, BB2, CellPath.create(BB1)),
+                                     BufferCell.live(m, ts + 1, BB3, CellPath.create(BB2)));
+
+        Row merged = mergeRows(r0, r1);
+
+        Assert.assertEquals(Lists.newArrayList(m), mergedColumns(merged));
+        ComplexColumnData complex = merged.getComplexColumnData(m);
+        Assert.assertNotNull(complex);
+        Assert.assertEquals(2, complex.cellsCount());
+
+        Cell<?> firstPath = null, secondPath = null;
+        for (Cell<?> cell : complex)
+        {
+            if (cell.path().equals(CellPath.create(BB1)))
+                firstPath = cell;
+            else if (cell.path().equals(CellPath.create(BB2)))
+                secondPath = cell;
+        }
+        Assert.assertNotNull(firstPath);
+        Assert.assertEquals(ts + 1, firstPath.timestamp());
+        Assert.assertEquals(BB2, firstPath.value());
+        Assert.assertNotNull(secondPath);
+        Assert.assertEquals(ts + 1, secondPath.timestamp());
+    }
+
+    @Test
+    public void testMergerReusedAcrossComplexColumns()
+    {
+        long now = FBUtilities.nowInSeconds();
+        long ts = secondToTs(now);
+        Row.Merger merger = new Row.Merger(3, true);
+
+        merger.add(0, rowWithComplexCells(c1, ts, BufferCell.live(m, ts, BB1, CellPath.create(BB1))));
+        merger.add(1, rowWithComplexCells(c1, ts + 1, BufferCell.live(m, ts + 1, BB2, CellPath.create(BB1))));
+        merger.add(2, rowWithComplexCells(c1, ts + 2, BufferCell.live(m, ts + 2, BB3, CellPath.create(BB2))));
+        ComplexColumnData first = merger.merge(DeletionTime.LIVE).getComplexColumnData(m);
+        Assert.assertNotNull(first);
+        Assert.assertEquals(2, first.cellsCount());
+
+        // fewer sources than the previous row: the cells of the previous row must not leak into this one. A non-live
+        // deletion is required here, a single row with a live deletion is returned without merging.
+        merger.clear();
+        merger.add(0, rowWithComplexCells(c1, ts + 10, BufferCell.live(m, ts + 10, BB4, CellPath.create(BB1))));
+        ComplexColumnData second = merger.merge(DeletionTime.build(ts + 5, now)).getComplexColumnData(m);
+        Assert.assertNotNull(second);
+        Assert.assertEquals(1, second.cellsCount());
+        Assert.assertEquals(ts + 10, second.iterator().next().timestamp());
+
+        // a single source, which the merge iterator served through its one-to-one case
+        merger.clear();
+        merger.add(1, rowWithComplexCells(c1, ts + 20, BufferCell.live(m, ts + 20, BB2, CellPath.create(BB2))));
+        ComplexColumnData third = merger.merge(DeletionTime.build(ts + 15, now)).getComplexColumnData(m);
+        Assert.assertNotNull(third);
+        Assert.assertEquals(1, third.cellsCount());
+        Assert.assertEquals(ts + 20, third.iterator().next().timestamp());
+    }
+
+    @Test
+    public void testMergerDropsComplexCellsShadowedByActiveDeletion()
+    {
+        long now = FBUtilities.nowInSeconds();
+        long ts = secondToTs(now);
+
+        Row r0 = rowWithComplexCells(c1, ts, BufferCell.live(m, ts, BB1, CellPath.create(BB1)));
+        Row r1 = rowWithComplexCells(c1, ts - 100, BufferCell.live(m, ts - 100, BB2, CellPath.create(BB2)));
+
+        Row.Merger merger = new Row.Merger(2, true);
+        merger.add(0, r0);
+        merger.add(1, r1);
+        // only the older entry is shadowed by the active deletion
+        ComplexColumnData complex = merger.merge(DeletionTime.build(ts - 99, now)).getComplexColumnData(m);
+        Assert.assertNotNull(complex);
+        Assert.assertEquals(1, complex.cellsCount());
+        Assert.assertEquals(ts, complex.iterator().next().timestamp());
+    }
+
+    @Test
+    public void testMergerKeepsComplexDeletion()
+    {
+        long now = FBUtilities.nowInSeconds();
+        long ts = secondToTs(now);
+
+        Row.Builder r0 = BTreeRow.unsortedBuilder();
+        r0.newRow(c1);
+        r0.addPrimaryKeyLivenessInfo(LivenessInfo.create(ts));
+        r0.addComplexDeletion(m, DeletionTime.build(ts - 5, now));
+        r0.addCell(BufferCell.live(m, ts, BB1, CellPath.create(BB1)));
+
+        Row.Builder r1 = BTreeRow.unsortedBuilder();
+        r1.newRow(c1);
+        r1.addPrimaryKeyLivenessInfo(LivenessInfo.create(ts + 1));
+        r1.addCell(BufferCell.live(m, ts + 1, BB2, CellPath.create(BB2)));
+
+        Row merged = mergeRows(r0.build(), r1.build());
+
+        ComplexColumnData complex = merged.getComplexColumnData(m);
+        Assert.assertNotNull(complex);
+        Assert.assertEquals(DeletionTime.build(ts - 5, now), complex.complexDeletion());
+        Assert.assertEquals(2, complex.cellsCount());
+    }
+
+    @Test
+    public void testMergerGroupsSameComplexCellPathVersionsManySources()
+    {
+        long now = FBUtilities.nowInSeconds();
+        long ts = secondToTs(now);
+
+        // Both sides of the in-place merge's source threshold: 8 sources take the in-place path, 9 and 10 the merge
+        // iterator slow path. Each must reconcile the versions of the one map entry to its newest value.
+        for (int sources : new int[]{ 8, 9, 10 })
+        {
+            Row[] rows = new Row[sources];
+            for (int i = 0; i < rows.length; i++)
+                rows[i] = rowWithComplexCells(c1, ts + i, BufferCell.live(m, ts + i, ByteBufferUtil.bytes(i), CellPath.create(BB1)));
+
+            Row merged = mergeRows(rows);
+
+            ComplexColumnData complex = merged.getComplexColumnData(m);
+            Assert.assertNotNull(complex);
+            Assert.assertEquals(sources + " sources", 1, complex.cellsCount());
+            Cell<?> cell = complex.iterator().next();
+            Assert.assertEquals(sources + " sources", ts + sources - 1, cell.timestamp());
+            Assert.assertEquals(sources + " sources", ByteBufferUtil.bytes(sources - 1), cell.value());
+        }
+    }
+
+    @Test
+    public void testMergerGroupsMixedComplexPathsAcrossSources()
+    {
+        long now = FBUtilities.nowInSeconds();
+        long ts = secondToTs(now);
+
+        // Two shared paths and one path held by a single source, with the shared versions arriving in different
+        // timestamps per source, so the grouping (not the source order) decides the emitted cells.
+        Row r0 = rowWithComplexCells(c1, ts,
+                                     BufferCell.live(m, ts, BB1, CellPath.create(BB1)),
+                                     BufferCell.live(m, ts, BB2, CellPath.create(BB2)),
+                                     BufferCell.live(m, ts, BB3, CellPath.create(BB3)));
+        Row r1 = rowWithComplexCells(c1, ts + 1,
+                                     BufferCell.live(m, ts + 1, BB2, CellPath.create(BB2)),
+                                     BufferCell.live(m, ts + 1, BB4, CellPath.create(BB1)));
+        Row r2 = rowWithComplexCells(c1, ts + 2,
+                                     BufferCell.live(m, ts + 2, BB4, CellPath.create(BB3)));
+
+        Row merged = mergeRows(r0, r1, r2);
+
+        Map<ByteBuffer, Cell<?>> byPath = new HashMap<>();
+        for (Cell<?> cell : merged.getComplexColumnData(m))
+            Assert.assertNull("duplicate path " + ByteBufferUtil.bytesToHex(cell.path().get(0)), byPath.put(cell.path().get(0), cell));
+
+        Assert.assertEquals(3, byPath.size());
+        Assert.assertEquals(ts + 1, byPath.get(BB1).timestamp());
+        Assert.assertEquals(BB4, byPath.get(BB1).value());
+        Assert.assertEquals(ts + 1, byPath.get(BB2).timestamp());
+        Assert.assertEquals(BB2, byPath.get(BB2).value());
+        Assert.assertEquals(ts + 2, byPath.get(BB3).timestamp());
+        Assert.assertEquals(BB4, byPath.get(BB3).value());
     }
 
     @Test
