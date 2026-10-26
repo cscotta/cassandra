@@ -767,6 +767,7 @@ public interface Row extends Unfiltered, Iterable<ColumnData>, IMeasurableMemory
         public void add(int i, Row row)
         {
             clustering = row.clustering();
+            assert rows[i] == null : "each source index may be added at most once per merge";
             rows[i] = row;
             ++rowsToMerge;
             lastRowSet = i;
@@ -911,9 +912,7 @@ public interface Row extends Unfiltered, Iterable<ColumnData>, IMeasurableMemory
             {
                 if (row == null)
                     continue;
-                Iterator<ColumnData> iterator = row.iterator();
-                assert !(iterator instanceof IteratorWithLowerBound) : "column-data iterators are never lower-bounded";
-                iterators.add(iterator);
+                iterators.add(row.iterator());
             }
 
             Iterator<ColumnData> merged = RowMergeIterator.get(iterators, ColumnData.comparator, columnDataReducer);
@@ -958,6 +957,7 @@ public interface Row extends Unfiltered, Iterable<ColumnData>, IMeasurableMemory
                 {
                     columns = null;
                     iterator = row.iterator();
+                    assert !(iterator instanceof IteratorWithLowerBound) : "column-data iterators are never lower-bounded";
                 }
                 else
                 {

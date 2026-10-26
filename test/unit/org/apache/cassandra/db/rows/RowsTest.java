@@ -500,8 +500,11 @@ public class RowsTest
             Row.Builder newer = BTreeRow.unsortedBuilder();
             newer.newRow(clustering);
             newer.addPrimaryKeyLivenessInfo(LivenessInfo.create(1001));
-            for (int i = 0; i < columnCount; i++)
+            // the leaf case is inserted in descending order, so the ordering assertion below is not vacuous
+            boolean descending = columnCount == leafColumns;
+            for (int k = 0; k < columnCount; k++)
             {
+                int i = descending ? columnCount - 1 - k : k;
                 ColumnMetadata column = mergerColumn(metadata, i);
                 older.addCell(BufferCell.live(column, 1000, BB1));
                 if ((i & 1) == 0)
