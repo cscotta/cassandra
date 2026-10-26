@@ -535,7 +535,55 @@ public class BTreeRow extends AbstractRow
         if (enforceStrictLiveness && newDeletion.isLive() && newInfo.isEmpty())
             return null;
 
-        return transformAndFilter(newInfo, newDeletion, (cd) -> cd.purge(purger, nowInSec));
+        Object[] leaf = columnDataLeaf();
+        if (leaf == null)
+            return transformAndFilter(newInfo, newDeletion, (cd) -> cd.purge(purger, nowInSec));
+
+        return update(newInfo, newDeletion, purgeLeaf(leaf, purger, nowInSec));
+    }
+
+    /**
+     * Purges a single-leaf column data b-tree by walking its keys in order, which avoids allocating a capturing
+     * lambda and the generic transform machinery for every purged row. Returns {@code leaf} itself when no column
+     * data changed.
+     * <p>
+     * Equivalent to {@link BTree#transformAndFilter(Object[], Function)} for a leaf: keys are visited in ascending
+     * order, {@code null} results are dropped, and the rebuilt array follows the leaf layout ({@code size | 1} slots,
+     * no trailing key) that {@code BTree} expects. Rows whose column data spans more than one node keep using the
+     * generic transform, and holders of a leaf must not rely on overriding
+     * {@link #transformAndFilter(LivenessInfo, Deletion, Function)} to intercept a purge.
+     */
+    private static Object[] purgeLeaf(Object[] leaf, DeletionPurger purger, long nowInSec)
+    {
+        assert BTree.isLeaf(leaf);
+        int size = BTree.size(leaf);
+        Object[] purged = null;
+        int retained = 0;
+        for (int i = 0; i < size; i++)
+        {
+            ColumnData cd = (ColumnData) leaf[i];
+            ColumnData result = cd.purge(purger, nowInSec);
+            if (purged == null)
+            {
+                if (result == cd)
+                {
+                    retained++;
+                    continue;
+                }
+                purged = new Object[size | 1];
+                System.arraycopy(leaf, 0, purged, 0, i);
+            }
+            if (result != null)
+                purged[retained++] = result;
+        }
+
+        if (purged == null)
+            return leaf;
+
+        if (retained == 0)
+            return BTree.empty();
+
+        return retained == size ? purged : Arrays.copyOf(purged, retained | 1);
     }
 
     public Row purgeDataOlderThan(long timestamp, boolean enforceStrictLiveness)
