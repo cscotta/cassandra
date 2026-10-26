@@ -530,22 +530,23 @@ public class Mutation implements IMutation, Supplier<Mutation>
             Serialization serialization = mutation.cachedSerializations[versionOrdinal];
             if (serialization == null)
             {
-                serialization = new SizeOnlyCacheableSerialization();
-                long serializedSize = serialization.serializedSize(PartitionUpdate.serializer, mutation, version);
-
-                // Excessively large mutation objects cause GC pressure and huge allocations when serialized.
-                // so we only cache serialized mutations when they are below the defined limit.
-                if (serializedSize < CACHEABLE_MUTATION_SIZE_LIMIT)
+                // The length of the serialized form is both the size of the mutation and the test for whether it
+                // is small enough to cache, so serialize once instead of computing the size with a second walk
+                // over (and a second materialization of) every row of the mutation.
+                try (DataOutputBuffer dob = DataOutputBuffer.scratchBuffer.get())
                 {
-                    try (DataOutputBuffer dob = DataOutputBuffer.scratchBuffer.get())
-                    {
-                        serializeInternal(PartitionUpdate.serializer, mutation, dob, version);
+                    serializeInternal(PartitionUpdate.serializer, mutation, dob, version);
+
+                    // Excessively large mutation objects cause GC pressure and huge allocations when serialized,
+                    // so we only cache serialized mutations when they are below the defined limit.
+                    if (dob.getLength() < CACHEABLE_MUTATION_SIZE_LIMIT)
                         serialization = new CachedSerialization(dob.unsafeToByteArray());
-                    }
-                    catch (IOException e)
-                    {
-                        throw new RuntimeException(e);
-                    }
+                    else
+                        serialization = new SizeOnlyCacheableSerialization(dob.getLength());
+                }
+                catch (IOException e)
+                {
+                    throw new RuntimeException(e);
                 }
                 mutation.cachedSerializations[versionOrdinal] = serialization;
             }
@@ -676,6 +677,19 @@ public class Mutation implements IMutation, Supplier<Mutation>
     private static final class SizeOnlyCacheableSerialization extends Serialization
     {
         private volatile long size;
+
+        SizeOnlyCacheableSerialization()
+        {
+        }
+
+        /**
+         * Build a serialization whose size is already known, so that it does not have to be measured by
+         * iterating the mutation again.
+         */
+        SizeOnlyCacheableSerialization(long size)
+        {
+            this.size = size;
+        }
 
         @Override
         void serialize(PartitionUpdate.PartitionUpdateSerializer serializer, Mutation mutation, DataOutputPlus out, int version) throws IOException
