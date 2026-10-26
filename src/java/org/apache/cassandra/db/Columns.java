@@ -586,11 +586,16 @@ public class Columns extends AbstractCollection<ColumnMetadata> implements Colle
             {
                 try (BTree.FastBuilder<ColumnMetadata> builder = BTree.fastBuilder())
                 {
+                    // walk the superset by index: this runs once per deserialized row, and the at most 63
+                    // column tree does not need a search iterator allocation to be walked in order
+                    Object[] tree = superset.columns;
+                    int supersetSize = superset.size();
                     int firstComplexIdx = 0;
-                    for (ColumnMetadata column : superset)
+                    for (int i = 0 ; i < supersetSize ; i++)
                     {
                         if ((encoded & 1) == 0)
                         {
+                            ColumnMetadata column = BTree.findByIndex(tree, i);
                             builder.add(column);
                             if (column.isSimple())
                                 ++firstComplexIdx;

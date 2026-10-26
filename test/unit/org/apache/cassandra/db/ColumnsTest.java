@@ -46,6 +46,7 @@ import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.MockSchema;
 import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.utils.btree.BTree;
 import org.apache.cassandra.utils.btree.BTreeSet;
 
 import static org.apache.cassandra.utils.ByteBufferUtil.bytes;
@@ -161,6 +162,144 @@ public class ColumnsTest
     {
         for (ColumnsCheck randomColumns : randomHuge())
             testSerializeSubset(randomColumns);
+    }
+
+    /**
+     * The small subset encoding walks the superset in order; it must do so for supersets large enough to
+     * be multi-node trees (but below the 64 column large-subset threshold), and for every distribution of
+     * present and absent columns.
+     */
+    @Test
+    public void testSerializeSubsetOfMultiNodeSuperset() throws IOException
+    {
+        List<ColumnMetadata> definitions = new ArrayList<>();
+        Set<String> usedNames = new HashSet<>();
+        addPartition(names(1, usedNames), definitions);
+        addClustering(names(1, usedNames), definitions);
+        addRegular(names(40, usedNames), definitions);
+        addComplexLast(definitions, 2);
+        Collections.sort(definitions);
+
+        Columns superset = Columns.from(BTreeSet.of(definitions));
+        Assert.assertEquals(44, superset.size());
+        Assert.assertEquals(2, superset.complexColumnCount());
+        // below the 64 column threshold that switches to the large subset encoding, above the default
+        // leaf capacity, so the walk has to cross node boundaries
+        Assert.assertTrue("superset must exceed one leaf", superset.size() > BTree.MAX_KEYS);
+
+        List<List<ColumnMetadata>> subsets = new ArrayList<>();
+        subsets.add(definitions);
+        subsets.add(Collections.emptyList());
+        subsets.add(definitions.subList(0, 1));
+        subsets.add(definitions.subList(definitions.size() - 1, definitions.size()));
+        subsets.add(definitions.subList(1, definitions.size() - 1));
+        subsets.add(definitions.subList(0, definitions.size() / 2));
+        // every other column, so both single and multi column gaps cross node boundaries
+        List<ColumnMetadata> alternating = new ArrayList<>();
+        for (int i = 0 ; i < definitions.size() ; i += 2)
+            alternating.add(definitions.get(i));
+        subsets.add(alternating);
+        // all simple columns only, then all complex columns only
+        List<ColumnMetadata> simple = new ArrayList<>();
+        List<ColumnMetadata> complex = new ArrayList<>();
+        for (ColumnMetadata def : definitions)
+            (def.isSimple() ? simple : complex).add(def);
+        subsets.add(simple);
+        subsets.add(complex);
+
+        for (List<ColumnMetadata> subsetDefinitions : subsets)
+        {
+            Columns subset = subsetDefinitions.isEmpty() ? Columns.NONE : Columns.from(BTreeSet.of(subsetDefinitions));
+            testSerializeSubset(superset, subset, subsetDefinitions);
+        }
+    }
+
+    /**
+     * Decoding a subset bitmap must walk the superset in definition order for supersets on both sides of the
+     * leaf/multi-node boundary, for every kind of column, and for bitmaps that the encoder itself would not
+     * emit (a decoded subset can come from any peer, not just from our own serializer).
+     */
+    @Test
+    public void testDeserializeSubsetBitmapAtLeafBoundaries() throws IOException
+    {
+        List<List<ColumnMetadata>> supersets = new ArrayList<>();
+        for (int size : new int[]{ 32, 33, 63 })
+        {
+            List<ColumnMetadata> definitions = new ArrayList<>();
+            Set<String> usedNames = new HashSet<>();
+            addPartition(names(1, usedNames), definitions);
+            addClustering(names(1, usedNames), definitions);
+            addRegular(names(size - 3, usedNames), definitions);
+            addComplexLast(definitions, 1);
+            supersets.add(definitions);
+        }
+        // the statics-only Columns that SerializationHeader decodes its statics subset from
+        List<ColumnMetadata> statics = new ArrayList<>();
+        Set<String> staticNames = new HashSet<>();
+        for (String name : names(33, staticNames))
+            statics.add(ColumnMetadata.staticColumn(TABLE_METADATA, bytes(name), UTF8Type.instance, ColumnMetadata.NO_UNIQUE_ID));
+        supersets.add(statics);
+
+        for (List<ColumnMetadata> supersetDefinitions : supersets)
+        {
+            Collections.sort(supersetDefinitions);
+            int size = supersetDefinitions.size();
+            Columns superset = Columns.from(BTreeSet.of(supersetDefinitions));
+            Assert.assertEquals(size, superset.size());
+            Assert.assertTrue("superset must exceed one leaf", superset.size() > BTree.MAX_KEYS);
+            Assert.assertEquals(supersetDefinitions.get(size - 1).isComplex(), superset.hasComplex());
+
+            long presentWithinSuperset = (1L << size) - 1;
+            long[] bitmaps = { 0L,
+                               1L,
+                               1L << (size - 1),
+                               0x5555555555555555L & presentWithinSuperset,
+                               presentWithinSuperset ^ (1L << (size / 2)),
+                               presentWithinSuperset & ~0x3L };
+            for (long bitmap : bitmaps)
+            {
+                List<ColumnMetadata> expected = new ArrayList<>();
+                for (int i = 0 ; i < size ; i++)
+                    if ((bitmap & (1L << i)) == 0)
+                        expected.add(supersetDefinitions.get(i));
+
+                Columns actual = deserializeSubset(superset, bitmap);
+                Columns expectedColumns = expected.isEmpty() ? Columns.NONE : Columns.from(BTreeSet.of(expected));
+                Assert.assertEquals("size " + size + " bitmap " + Long.toBinaryString(bitmap), expectedColumns, actual);
+                Assert.assertEquals(expected, Lists.newArrayList(actual));
+                assertContents(actual, expected);
+            }
+
+            // every bit at or beyond the superset size is an error, including for the largest small subset
+            for (long bitmap : new long[]{ -1L, (1L << size) | 1L, (1L << size) | (1L << (size - 1)) })
+                assertInvalidSubset(superset, bitmap);
+        }
+    }
+
+    private static void assertInvalidSubset(Columns superset, long bitmap) throws IOException
+    {
+        try (DataOutputBuffer out = new DataOutputBuffer())
+        {
+            out.writeUnsignedVInt(bitmap);
+            try (DataInputBuffer in = new DataInputBuffer(out.toByteArray()))
+            {
+                Columns.serializer.deserializeSubset(superset, in);
+                Assert.fail("expected an IOException for bitmap " + Long.toBinaryString(bitmap));
+            }
+            catch (IOException e)
+            {
+                Assert.assertTrue(e.getMessage(), e.getMessage().startsWith("Invalid Columns subset bytes"));
+            }
+        }
+    }
+
+    private static Columns deserializeSubset(Columns superset, long bitmap) throws IOException
+    {
+        try (DataOutputBuffer out = new DataOutputBuffer())
+        {
+            out.writeUnsignedVInt(bitmap);
+            return Columns.serializer.deserializeSubset(superset, new DataInputBuffer(out.toByteArray()));
+        }
     }
 
     @Test
@@ -471,6 +610,16 @@ public class ColumnsTest
             usedNames.add(name);
         }
         return names;
+    }
+
+    /**
+     * Adds multi-cell columns named so that they sort after every name produced by {@link #names(int, Set)};
+     * a Columns tree must have all of its simple columns before its complex ones.
+     */
+    private static void addComplexLast(List<ColumnMetadata> results, int count)
+    {
+        for (int i = 0 ; i < count ; i++)
+            results.add(ColumnMetadata.regularColumn(TABLE_METADATA, bytes("zzz_complex_" + i), SetType.getInstance(UTF8Type.instance, true), ColumnMetadata.NO_UNIQUE_ID));
     }
 
     private static void addPartition(List<String> names, List<ColumnMetadata> results)
