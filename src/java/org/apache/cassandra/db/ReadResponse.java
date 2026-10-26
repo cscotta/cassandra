@@ -622,45 +622,12 @@ public abstract class ReadResponse
                 return next;
             }
 
-            private static final BiConsumer<Row.Builder, ColumnData> ADD_COLUMN_DATA = LimitedUnfilteredRowIterator::addColumnData;
-            private static final BiConsumer<Row.Builder, Cell<?>> ADD_CELL = LimitedUnfilteredRowIterator::addCell;
-
-            // A row read back from a buffer is rebuilt cell by cell on top of its row deletion using BTreeRow.Builder.
-            // The builder silently drops whatever that deletion covers.
-            // So, we rebuild here the row in the same way, to avoid a digest mismatch.
+            // A row read back from a buffer is rebuilt cell by cell on top of its row deletion using
+            // BTreeRow.Builder, and the builder silently drops whatever that deletion covers. Rebuild the same way
+            // to avoid a digest mismatch; see ReadResponse.withoutShadowedData.
             private static Row withoutShadowedData(Row row)
             {
-                if (row.deletion().isLive())
-                    return row;
-
-                // Rebuilding allocates a builder (and its cell btree builder) per row, so take both from a
-                // per-thread pool, and walk the row's column data in place instead of through an iterator.
-                Row.Builder builder = BTreeRow.pooledSortedBuilder();
-                builder.newRow(row.clustering());
-                builder.addPrimaryKeyLivenessInfo(row.primaryKeyLivenessInfo());
-                builder.addRowDeletion(row.deletion());
-                row.apply(ADD_COLUMN_DATA, builder);
-                return builder.build();
-            }
-
-            // Static, so that adding a row's column data to the rebuild builder allocates nothing.
-            private static void addColumnData(Row.Builder builder, ColumnData cd)
-            {
-                if (cd.column().isSimple())
-                {
-                    builder.addCell((Cell<?>) cd);
-                    return;
-                }
-
-                ComplexColumnData complexData = (ComplexColumnData) cd;
-                if (!complexData.complexDeletion().isLive())
-                    builder.addComplexDeletion(complexData.column(), complexData.complexDeletion());
-                complexData.apply(ADD_CELL, builder);
-            }
-
-            private static void addCell(Row.Builder builder, Cell<?> cell)
-            {
-                builder.addCell(cell);
+                return ReadResponse.withoutShadowedData(row);
             }
 
             private Unfiltered overflow(boolean byRowLimit)
@@ -739,6 +706,124 @@ public abstract class ReadResponse
         {
             throw new UnsupportedOperationException("InMemoryDataResponse cannot be serialized over the network");
         }
+    }
+
+    private static final BiConsumer<Row.Builder, ColumnData> ADD_COLUMN_DATA = ReadResponse::addColumnData;
+    private static final BiConsumer<Row.Builder, Cell<?>> ADD_CELL = ReadResponse::addCell;
+    private static final BiConsumer<ShadowCheck, ColumnData> FIND_SHADOWED = ReadResponse::findShadowed;
+    private static final BiConsumer<ShadowCheck, Cell<?>> FIND_SHADOWED_CELL = ReadResponse::findShadowedCell;
+    private static final ThreadLocal<ShadowCheck> SHADOW_CHECK = ThreadLocal.withInitial(ShadowCheck::new);
+
+    /**
+     * Rebuilds {@code row} the way a buffer-deserialized row is built, so that whatever the row deletion (or a
+     * complex column deletion) shadows is dropped exactly as the receiving node would drop it.
+     * <p>
+     * The rebuild allocates a row and its column-data b-tree, so only do it when it actually drops something: a
+     * merged row normally carries no cell that its own deletion covers.
+     */
+    static Row withoutShadowedData(Row row)
+    {
+        Row.Deletion deletion = row.deletion();
+        if (deletion.isLive())
+            return row;
+
+        LivenessInfo livenessInfo = row.primaryKeyLivenessInfo();
+        // Rebuilding drops the liveness info the deletion covers, and drops a deletion the liveness info shadows.
+        // An empty liveness info carries no timestamp, so the deletion "covers" it, but dropping it changes nothing.
+        if ((!livenessInfo.isEmpty() && deletion.deletes(livenessInfo)) || deletion.isShadowedBy(livenessInfo))
+            return rebuildWithoutShadowedData(row);
+
+        ShadowCheck check = SHADOW_CHECK.get();
+        check.reset(deletion);
+        row.apply(FIND_SHADOWED, check);
+        return check.shadowed ? rebuildWithoutShadowedData(row) : row;
+    }
+
+    /**
+     * Rebinds the row through a {@link BTreeRow.Builder}, which is what a peer does when it deserializes the row.
+     */
+    @VisibleForTesting
+    static Row rebuildWithoutShadowedData(Row row)
+    {
+        // Rebuilding allocates a builder (and its cell btree builder) per row, so take both from a
+        // per-thread pool, and walk the row's column data in place instead of through an iterator.
+        Row.Builder builder = BTreeRow.pooledSortedBuilder();
+        builder.newRow(row.clustering());
+        builder.addPrimaryKeyLivenessInfo(row.primaryKeyLivenessInfo());
+        builder.addRowDeletion(row.deletion());
+        row.apply(ADD_COLUMN_DATA, builder);
+        return builder.build();
+    }
+
+    // Static, so that adding a row's column data to the rebuild builder allocates nothing.
+    private static void addColumnData(Row.Builder builder, ColumnData cd)
+    {
+        if (cd.column().isSimple())
+        {
+            builder.addCell((Cell<?>) cd);
+            return;
+        }
+
+        ComplexColumnData complexData = (ComplexColumnData) cd;
+        if (!complexData.complexDeletion().isLive())
+            builder.addComplexDeletion(complexData.column(), complexData.complexDeletion());
+        complexData.apply(ADD_CELL, builder);
+    }
+
+    private static void addCell(Row.Builder builder, Cell<?> cell)
+    {
+        builder.addCell(cell);
+    }
+
+    // Walking state for withoutShadowedData(); one per thread so that the check allocates nothing per row.
+    private static final class ShadowCheck
+    {
+        private Row.Deletion deletion;
+        private DeletionTime complexDeletion;
+        private boolean shadowed;
+
+        void reset(Row.Deletion deletion)
+        {
+            this.deletion = deletion;
+            this.complexDeletion = null;
+            this.shadowed = false;
+        }
+    }
+
+    private static void findShadowed(ShadowCheck check, ColumnData cd)
+    {
+        if (check.shadowed)
+            return;
+
+        if (cd.column().isSimple())
+        {
+            findShadowedCell(check, (Cell<?>) cd);
+            return;
+        }
+
+        ComplexColumnData complexData = (ComplexColumnData) cd;
+        DeletionTime complexDeletion = complexData.complexDeletion();
+        if (complexDeletion.isLive())
+        {
+            complexData.apply(FIND_SHADOWED_CELL, check);
+            return;
+        }
+
+        check.complexDeletion = complexDeletion;
+        complexData.apply(FIND_SHADOWED_CELL, check);
+        check.complexDeletion = null;
+    }
+
+    private static void findShadowedCell(ShadowCheck check, Cell<?> cell)
+    {
+        if (check.shadowed)
+            return;
+
+        // Builder.addCell drops the cells the row deletion covers, and the complex column resolver drops the
+        // cells that a complex deletion covers.
+        if (check.deletion.deletes(cell) ||
+            (check.complexDeletion != null && cell.timestamp() < check.complexDeletion.markedForDeleteAt()))
+            check.shadowed = true;
     }
 
     private static class Serializer implements IVersionedSerializer<ReadResponse>
