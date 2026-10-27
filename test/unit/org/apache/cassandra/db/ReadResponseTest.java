@@ -64,10 +64,14 @@ import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.btree.BTree;
 
 import static org.apache.cassandra.utils.Clock.Global.nanoTime;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertNotSame;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -387,6 +391,138 @@ public class ReadResponseTest
                      ByteBufferUtil.bytesToHex(inMemoryResponse.digest(command)));
         assertEquals(2, collectionCellCount(localResponse, command));
         assertEquals(2, collectionCellCount(inMemoryResponse, command));
+    }
+
+    @Test
+    public void withoutShadowedDataRebuildsOnlyWhenTheDeletionShadowsSomething()
+    {
+        // A response row only has to be rebuilt when rebuilding would change it: a cell the row or a complex column
+        // deletion covers. Rows that keep everything must come back as the same instance, and their digest must equal
+        // the rebuilt digest, since that is what every replica compares.
+        // (The liveness-info cases are checked in withoutShadowedData as well, but a row that went through a
+        // BTreeRow.Builder has already been normalised for them, so they cannot be built here.)
+        long now = FBUtilities.nowInSeconds();
+        ColumnMetadata v = metadataWithClustering.getColumn(ByteBufferUtil.bytes("v"));
+        ColumnMetadata s = metadataWithStatic.getColumn(ByteBufferUtil.bytes("s"));
+        ColumnMetadata coll = metadataWithCollection.getColumn(ByteBufferUtil.bytes("coll"));
+        Clustering<?> clustering = Clustering.make(ByteBufferUtil.bytes(1));
+
+        // no deletion at all
+        assertNoRebuild(row(clustering, LivenessInfo.create(10), Row.Deletion.LIVE, BufferCell.live(v, 10, ByteBufferUtil.bytes(1))));
+        // liveness and cell both newer than the row deletion
+        assertNoRebuild(row(clustering, LivenessInfo.create(12), Row.Deletion.regular(DeletionTime.build(5, now)),
+                            BufferCell.live(v, 11, ByteBufferUtil.bytes(1))));
+        // cell exactly at the deletion timestamp is shadowed (DeletionTime.deletes is inclusive)
+        assertRebuild(row(clustering, LivenessInfo.EMPTY, Row.Deletion.regular(DeletionTime.build(10, now)),
+                          BufferCell.live(v, 10, ByteBufferUtil.bytes(1))));
+        assertNoRebuild(row(clustering, LivenessInfo.EMPTY, Row.Deletion.regular(DeletionTime.build(10, now)),
+                            BufferCell.live(v, 11, ByteBufferUtil.bytes(1))));
+        // expiring cell older than the deletion
+        assertRebuild(row(clustering, LivenessInfo.EMPTY, Row.Deletion.regular(DeletionTime.build(10, now)),
+                          BufferCell.expiring(v, 9, 100, now, ByteBufferUtil.bytes(1))));
+        // a static row goes through the same path
+        assertNoRebuild(row(Clustering.STATIC_CLUSTERING, LivenessInfo.EMPTY, Row.Deletion.regular(DeletionTime.build(10, now)),
+                            BufferCell.live(s, 11, ByteBufferUtil.bytes(1))));
+        assertRebuild(row(Clustering.STATIC_CLUSTERING, LivenessInfo.EMPTY, Row.Deletion.regular(DeletionTime.build(10, now)),
+                          BufferCell.live(s, 9, ByteBufferUtil.bytes(1))));
+        // a complex column drops through its own deletion and keeps the rest
+        assertNoRebuild(complexRow(clustering, DeletionTime.build(10, now),
+                                  BufferCell.live(coll, 11, ByteBufferUtil.bytes(1), cellPath(1)),
+                                  BufferCell.live(coll, 12, ByteBufferUtil.bytes(2), cellPath(2))));
+        // a complex deletion older than a cell keeps it, so nothing has to be rebuilt there either
+        assertNoRebuild(complexRow(clustering, DeletionTime.build(10, now),
+                                   BufferCell.live(coll, 10, ByteBufferUtil.bytes(1), cellPath(1)),
+                                   BufferCell.live(coll, 12, ByteBufferUtil.bytes(2), cellPath(2))));
+    }
+
+    private void assertNoRebuild(Row row)
+    {
+        assertSame(row, ReadResponse.withoutShadowedData(row));
+        Row rebuilt = ReadResponse.rebuildWithoutShadowedData(row);
+        assertEquals(row + " / " + rebuilt,
+                     ByteBufferUtil.bytesToHex(ByteBuffer.wrap(rowDigest(row))),
+                     ByteBufferUtil.bytesToHex(ByteBuffer.wrap(rowDigest(rebuilt))));
+    }
+
+    private void assertRebuild(Row row)
+    {
+        Row fast = ReadResponse.withoutShadowedData(row);
+        assertNotSame(row, fast);
+        Row rebuilt = ReadResponse.rebuildWithoutShadowedData(row);
+        assertEquals(row + " / fast " + fast + " / rebuilt " + rebuilt,
+                     ByteBufferUtil.bytesToHex(ByteBuffer.wrap(rowDigest(fast))),
+                     ByteBufferUtil.bytesToHex(ByteBuffer.wrap(rowDigest(rebuilt))));
+        // and returning the row unchanged would have been wrong: the rebuild does change it
+        assertNotEquals(rowDigest(row), rowDigest(rebuilt));
+    }
+
+    @Test
+    public void complexDeletionThatShadowsACellForcesARebuild()
+    {
+        // The walk has to consider complex column deletions, not only the row deletion. A row built through
+        // BTreeRow.Builder has already resolved them away, so build the column data directly, as a merge can leave it.
+        long now = FBUtilities.nowInSeconds();
+        ColumnMetadata coll = metadataWithCollection.getColumn(ByteBufferUtil.bytes("coll"));
+        Clustering<?> clustering = Clustering.make(ByteBufferUtil.bytes(1));
+        DeletionTime rowDeletion = DeletionTime.build(5, now);
+        DeletionTime complexDeletion = DeletionTime.build(10, now);
+
+        // a cell at the complex deletion's own timestamp survives it (the resolver keeps timestamp >= marked)
+        assertNoRebuild(complexRowBuiltDirectly(clustering, coll, rowDeletion, complexDeletion,
+                                                BufferCell.live(coll, 10, ByteBufferUtil.bytes(1), cellPath(1))));
+        // one timestamp below it does not, so the row has to be rebuilt
+        assertRebuild(complexRowBuiltDirectly(clustering, coll, rowDeletion, complexDeletion,
+                                              BufferCell.live(coll, 9, ByteBufferUtil.bytes(1), cellPath(1))));
+        // a partly shadowed collection still has to be rebuilt, keeping the cell above the deletion
+        assertRebuild(complexRowBuiltDirectly(clustering, coll, rowDeletion, complexDeletion,
+                                              BufferCell.live(coll, 9, ByteBufferUtil.bytes(1), cellPath(1)),
+                                              BufferCell.live(coll, 11, ByteBufferUtil.bytes(2), cellPath(2))));
+    }
+
+    // BTreeRow.create keeps the column data as it is, so the complex deletion is still there for the walk to find.
+    private static Row complexRowBuiltDirectly(Clustering<?> clustering, ColumnMetadata column,
+                                               DeletionTime rowDeletion, DeletionTime complexDeletion, Cell<?>... cells)
+    {
+        ComplexColumnData.Builder builder = ComplexColumnData.builder();
+        builder.newColumn(column);
+        for (Cell<?> cell : cells)
+            builder.addCell(cell);
+        builder.addComplexDeletion(complexDeletion);
+        return BTreeRow.create(clustering, LivenessInfo.EMPTY, Row.Deletion.regular(rowDeletion),
+                               BTree.singleton(builder.build()));
+    }
+
+    private static byte[] rowDigest(Row row)
+    {
+        Digest digest = Digest.forReadResponse();
+        row.digest(digest);
+        return digest.digest();
+    }
+
+    private static Row row(Clustering<?> clustering, LivenessInfo liveness, Row.Deletion deletion, Cell<?>... cells)
+    {
+        Row.Builder builder = BTreeRow.unsortedBuilder();
+        builder.newRow(clustering);
+        builder.addPrimaryKeyLivenessInfo(liveness);
+        // the cells are added first so that the row really holds the ones the deletion would cover: the builder
+        // drops a covered cell on the way in, which is what the serialized form does on the way out
+        for (Cell<?> cell : cells)
+            builder.addCell(cell);
+        builder.addRowDeletion(deletion);
+        return builder.build();
+    }
+
+    // Goes through a BTreeRow.Builder, which resolves a complex deletion away before the row is built, so this
+    // helper cannot produce a row whose complex deletion still shadows a cell: see complexRowBuiltDirectly.
+    private static Row complexRow(Clustering<?> clustering, DeletionTime complexDeletion, Cell<?>... cells)
+    {
+        Row.Builder builder = BTreeRow.unsortedBuilder();
+        builder.newRow(clustering);
+        for (Cell<?> cell : cells)
+            builder.addCell(cell);
+        builder.addComplexDeletion(cells[0].column(), complexDeletion);
+        builder.addRowDeletion(Row.Deletion.regular(DeletionTime.build(complexDeletion.markedForDeleteAt() - 100, 100)));
+        return builder.build();
     }
 
     @Test
