@@ -619,12 +619,28 @@ public class BTreeRow extends AbstractRow
     }
 
     private static final TinyThreadLocalPool<Builder> POOL = new TinyThreadLocalPool<>();
+    private static final TinyThreadLocalPool<Builder> SORTED_POOL = new TinyThreadLocalPool<>();
 
     public static Row.Builder pooledUnsortedBuilder() {
-        TinyThreadLocalPool.TinyPool<Builder> pool = POOL.get();
+        return pooledBuilder(POOL, false);
+    }
+
+    /**
+     * Same as {@link #sortedBuilder()}, but the builder, and the cell btree builder it wraps, are taken from a
+     * per-thread pool. Only use it for a build that happens immediately, as the builder is returned to the pool it
+     * was taken from by {@link Builder#build()}.
+     */
+    public static Row.Builder pooledSortedBuilder()
+    {
+        return pooledBuilder(SORTED_POOL, true);
+    }
+
+    private static Row.Builder pooledBuilder(TinyThreadLocalPool<Builder> builderPool, boolean isSorted)
+    {
+        TinyThreadLocalPool.TinyPool<Builder> pool = builderPool.get();
         Builder builder = pool.poll();
         if (builder == null)
-            builder = new Builder(false);
+            builder = new Builder(isSorted);
         builder.pool = pool;
         return builder;
     }
@@ -819,6 +835,9 @@ public class BTreeRow extends AbstractRow
 
     public static class Builder implements Row.Builder
     {
+        // Maximum number of cell slots a pooled builder keeps for reuse; wider rows drop their backing array instead
+        private static final int MAX_RETAINED_CELLS = 256;
+
         // a simple marker class that will sort to the beginning of a run of complex cells to store the deletion time
         private static class ComplexColumnDeletion extends BufferCell
         {
@@ -960,7 +979,12 @@ public class BTreeRow extends AbstractRow
             this.clustering = null;
             this.primaryKeyLivenessInfo = LivenessInfo.EMPTY;
             this.deletion = Deletion.LIVE;
-            this.cells_.reuse();
+            // A pooled builder is kept on its thread, so don't hold on to (and pay to clear on every later use) the
+            // backing array of an unusually wide row.
+            if (cells_ != null && cells_.retainedCapacity() > MAX_RETAINED_CELLS)
+                cells_ = null;
+            else if (cells_ != null)
+                cells_.reuse();
             this.hasComplex = false;
             this.minCellDeletionTime = Cell.MAX_DELETION_TIME;
             if (pool != null)
