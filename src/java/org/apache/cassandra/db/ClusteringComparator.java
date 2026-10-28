@@ -138,6 +138,9 @@ public class ClusteringComparator implements Comparator<Clusterable>
 
     public <V1, V2> int compare(ClusteringPrefix<V1> c1, ClusteringPrefix<V2> c2)
     {
+        if (c1 instanceof NativeClustering || c2 instanceof NativeClustering)
+            return compareWithNative(c1, c2);
+
         int s1 = c1.size();
         int s2 = c2.size();
         int minSize = Math.min(s1, s2);
@@ -153,6 +156,66 @@ public class ClusteringComparator implements Comparator<Clusterable>
             return ClusteringPrefix.Kind.compare(c1.kind(), c2.kind());
 
         return s1 < s2 ? c1.kind().comparedToClustering : -c2.kind().comparedToClustering;
+    }
+
+    /**
+     * Compares two clusterings of which at least one is held off-heap. Every component comparison
+     * reads the off-heap side (or sides) by address, so the {@code NativeData} views that
+     * {@link NativeClustering#get(int)} allocates are not built; ordering is the same as
+     * {@link #compare(ClusteringPrefix, ClusteringPrefix)}, including how null components (which sort
+     * first) and clusterings of different sizes order.
+     */
+    private <V1, V2> int compareWithNative(ClusteringPrefix<V1> c1, ClusteringPrefix<V2> c2)
+    {
+        NativeClustering native1 = c1 instanceof NativeClustering ? (NativeClustering) c1 : null;
+        NativeClustering native2 = c2 instanceof NativeClustering ? (NativeClustering) c2 : null;
+        int s1 = c1.size();
+        int s2 = c2.size();
+        int minSize = Math.min(s1, s2);
+
+        for (int i = 0; i < minSize; i++)
+        {
+            int cmp;
+            if (native1 != null && native2 != null)
+                cmp = native1.compareComponent(i, native2, i, clusteringTypes);
+            else if (native1 != null)
+                cmp = compareNativeTo(i, native1, c2.get(i), c2.accessor());
+            else
+                cmp = compareToNative(i, c1.get(i), c1.accessor(), native2);
+            if (cmp != 0)
+                return cmp;
+        }
+
+        if (s1 == s2)
+            return ClusteringPrefix.Kind.compare(c1.kind(), c2.kind());
+
+        return s1 < s2 ? c1.kind().comparedToClustering : -c2.kind().comparedToClustering;
+    }
+
+    /** Compares off-heap component {@code i} of {@code left} with a value that is not off-heap. */
+    private <V> int compareNativeTo(int i, NativeClustering left, V right, ValueAccessor<V> rightAccessor)
+    {
+        // as in compareComponent, the type of a component is only looked up once a value must be compared
+        int leftLength = left.nativeLength(i);
+        if (leftLength < 0)
+            return right == null ? 0 : -1;
+        if (right == null)
+            return 1;
+
+        return clusteringTypes[i].compareNativeTo(left.nativeAddress(i), leftLength, right, rightAccessor);
+    }
+
+    /** Compares a value that is not off-heap with off-heap component {@code i} of {@code right}. */
+    private <V> int compareToNative(int i, V left, ValueAccessor<V> leftAccessor, NativeClustering right)
+    {
+        // as in compareComponent, the type of a component is only looked up once a value must be compared
+        int rightLength = right.nativeLength(i);
+        if (rightLength < 0)
+            return left == null ? 0 : 1;
+        if (left == null)
+            return -1;
+
+        return clusteringTypes[i].compareToNative(left, leftAccessor, right.nativeAddress(i), rightLength);
     }
 
     public static int compare(ClusteringDescriptor c1, ClusteringDescriptor c2)
