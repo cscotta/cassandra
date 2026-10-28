@@ -228,6 +228,84 @@ public class NativeClustering implements Clustering<NativeData>, IndexedValueHol
         return builder.build(address, length);
     }
 
+    /**
+     * Compares this clustering's component {@code i} with {@code other}'s component {@code j} using
+     * the type {@code types[i]}, reading both values straight from their off-heap address instead of
+     * allocating the {@link NativeData} views that {@link #get(int)} would produce. Nulls order as in
+     * {@link ClusteringComparator#compareComponent(int, Object, ValueAccessor, Object, ValueAccessor)},
+     * and as there the type is only looked up once both components are known not to be null.
+     */
+    public int compareComponent(int i, NativeClustering other, int j, AbstractType<?>[] types)
+    {
+        int size = size();
+        if (i >= size)
+            throw new IndexOutOfBoundsException();
+
+        int metadataSize = (size * 2) + 4;
+        long bitmapStart = peer + metadataSize;
+        int b = NativeEndianMemoryUtil.getByte(bitmapStart + (i >>> 3));
+        boolean isNull = (b & (1 << (i & 7))) != 0;
+
+        int otherSize = other.size();
+        if (j >= otherSize)
+            throw new IndexOutOfBoundsException();
+
+        int otherMetadataSize = (otherSize * 2) + 4;
+        long otherBitmapStart = other.peer + otherMetadataSize;
+        int otherB = NativeEndianMemoryUtil.getByte(otherBitmapStart + (j >>> 3));
+        boolean otherIsNull = (otherB & (1 << (j & 7))) != 0;
+
+        if (isNull)
+            return otherIsNull ? 0 : -1;
+        if (otherIsNull)
+            return 1;
+
+        int startOffset = NativeEndianMemoryUtil.getUnsignedShort(peer + 2 + i * 2);
+        int endOffset = NativeEndianMemoryUtil.getUnsignedShort(peer + 4 + i * 2);
+        long dataStart = bitmapStart + ((size + 7) >>> 3);
+
+        int otherStartOffset = NativeEndianMemoryUtil.getUnsignedShort(other.peer + 2 + j * 2);
+        int otherEndOffset = NativeEndianMemoryUtil.getUnsignedShort(other.peer + 4 + j * 2);
+        long otherDataStart = otherBitmapStart + ((otherSize + 7) >>> 3);
+
+        return types[i].compareNative(dataStart + startOffset, endOffset - startOffset,
+                                      otherDataStart + otherStartOffset, otherEndOffset - otherStartOffset);
+    }
+
+    /**
+     * The length of component {@code i}, or -1 if it is null. Reading the length rather than calling
+     * {@link #get(int)} lets {@link ClusteringComparator} compare a component against a value that is
+     * not held off-heap without allocating the view.
+     */
+    int nativeLength(int i)
+    {
+        int size = size();
+        if (i >= size)
+            throw new IndexOutOfBoundsException();
+
+        if (isNull(peer, size, i))
+            return -1;
+
+        return NativeEndianMemoryUtil.getUnsignedShort(peer + 4 + i * 2)
+               - NativeEndianMemoryUtil.getUnsignedShort(peer + 2 + i * 2);
+    }
+
+    /**
+     * The address of component {@code i}'s data. Only meaningful when {@link #nativeLength(int)} of the
+     * same component is not negative; a zero length addresses the start of an empty component, which is
+     * never dereferenced.
+     */
+    long nativeAddress(int i)
+    {
+        int size = size();
+        if (i >= size)
+            throw new IndexOutOfBoundsException();
+
+        int metadataSize = (size * 2) + 4;
+        long bitmapStart = peer + metadataSize;
+        return bitmapStart + ((size + 7) >>> 3) + NativeEndianMemoryUtil.getUnsignedShort(peer + 2 + i * 2);
+    }
+
     public NativeData[] getRawValues()
     {
         NativeData[] values = new NativeData[size()];

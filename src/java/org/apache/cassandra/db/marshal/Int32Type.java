@@ -34,6 +34,7 @@ import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.bytecomparable.ByteComparable;
 import org.apache.cassandra.utils.bytecomparable.ByteSource;
 import org.apache.cassandra.utils.bytecomparable.ByteSourceInverse;
+import org.apache.cassandra.utils.memory.BigEndianMemoryUtil;
 
 public class Int32Type extends NumberType<Integer>
 {
@@ -68,6 +69,52 @@ public class Int32Type extends NumberType<Integer>
             return diff;
 
         return ValueAccessor.compare(left, accessorL, right, accessorR);
+    }
+
+    /**
+     * Every valid int is four bytes, so the ordering of two such values is the ordering of their
+     * (sign-extended, big-endian) decodes. Other lengths are not valid ints and keep the byte-wise
+     * comparison of {@link #compareCustom}, so ordering of any malformed content is unchanged.
+     * <p>
+     * Int values are always stored big-endian, as the off-heap and networking paths assume; for a
+     * little-endian heap buffer the {@code super} paths remain the authority.
+     */
+    @Override
+    public int compareNative(long addressLeft, int lengthLeft, long addressRight, int lengthRight)
+    {
+        if (lengthLeft == 0 || lengthRight == 0)
+            return Boolean.compare(lengthRight == 0, lengthLeft == 0);
+
+        if (lengthLeft == 4 && lengthRight == 4)
+            return Integer.compare(BigEndianMemoryUtil.getInt(addressLeft), BigEndianMemoryUtil.getInt(addressRight));
+
+        return super.compareNative(addressLeft, lengthLeft, addressRight, lengthRight);
+    }
+
+    @Override
+    public <V> int compareNativeTo(long leftAddress, int leftLength, V right, ValueAccessor<V> rightAccessor)
+    {
+        boolean rightIsEmpty = rightAccessor.isEmpty(right);
+        if (leftLength == 0 || rightIsEmpty)
+            return Boolean.compare(rightIsEmpty, leftLength == 0);
+
+        if (leftLength == 4 && rightAccessor.size(right) == 4)
+            return Integer.compare(BigEndianMemoryUtil.getInt(leftAddress), rightAccessor.getInt(right, 0));
+
+        return super.compareNativeTo(leftAddress, leftLength, right, rightAccessor);
+    }
+
+    @Override
+    public <V> int compareToNative(V left, ValueAccessor<V> leftAccessor, long rightAddress, int rightLength)
+    {
+        boolean leftIsEmpty = leftAccessor.isEmpty(left);
+        if (leftIsEmpty || rightLength == 0)
+            return Boolean.compare(rightLength == 0, leftIsEmpty);
+
+        if (leftAccessor.size(left) == 4 && rightLength == 4)
+            return Integer.compare(leftAccessor.getInt(left, 0), BigEndianMemoryUtil.getInt(rightAddress));
+
+        return super.compareToNative(left, leftAccessor, rightAddress, rightLength);
     }
 
     @Override

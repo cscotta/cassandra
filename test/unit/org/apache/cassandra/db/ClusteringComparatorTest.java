@@ -20,7 +20,10 @@ package org.apache.cassandra.db;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
 
 import org.junit.Ignore;
 import org.junit.Test;
@@ -30,6 +33,10 @@ import org.apache.cassandra.db.marshal.Int32Type;
 import org.apache.cassandra.db.marshal.LongType;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.concurrent.ImmediateFuture;
+import org.apache.cassandra.utils.memory.MemtablePool;
+import org.apache.cassandra.utils.memory.NativeAllocator;
+import org.apache.cassandra.utils.memory.NativePool;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotEquals;
@@ -151,6 +158,138 @@ public class ClusteringComparatorTest
                          compare == 0,
                          compareCluster == 0);
         }
+    }
+
+    /**
+     * Two off-heap clusterings must order exactly like the equivalent heap clusterings, component by
+     * component as well as overall, including negative values (whose ordering comes from the sign bit),
+     * empty values and nulls.
+     */
+    @Test
+    public void nativeComparisonMatchesHeapComparison() throws InterruptedException, java.util.concurrent.TimeoutException
+    {
+        AbstractType<?>[] types = { Int32Type.instance, Int32Type.instance };
+        ClusteringComparator comparator = new ClusteringComparator(types);
+        MemtablePool pool = new NativePool(1L << 24, 1L << 24, 1.0f, () -> ImmediateFuture.success(false));
+        NativeAllocator allocator = (NativeAllocator) pool.newAllocator("test");
+        try
+        {
+            List<Clustering<ByteBuffer>> heap = new ArrayList<>();
+            heap.add(Clustering.make(ByteBufferUtil.bytes(Integer.MIN_VALUE), ByteBufferUtil.bytes(-1)));
+            heap.add(Clustering.make(ByteBufferUtil.bytes(Integer.MIN_VALUE), ByteBufferUtil.bytes(0)));
+            heap.add(Clustering.make(ByteBufferUtil.bytes(-1), ByteBufferUtil.bytes(-1)));
+            heap.add(Clustering.make(ByteBufferUtil.bytes(-1), ByteBufferUtil.bytes(Integer.MAX_VALUE)));
+            heap.add(Clustering.make(ByteBufferUtil.bytes(0), ByteBufferUtil.bytes(0)));
+            heap.add(Clustering.make(ByteBufferUtil.bytes(1), ByteBufferUtil.bytes(0)));
+            heap.add(Clustering.make(ByteBufferUtil.bytes(Integer.MAX_VALUE), ByteBufferUtil.bytes(Integer.MAX_VALUE)));
+            heap.add(Clustering.make(ByteBufferUtil.EMPTY_BYTE_BUFFER, ByteBufferUtil.bytes(1)));
+            heap.add(Clustering.make(ByteBufferUtil.bytes(1), ByteBufferUtil.EMPTY_BYTE_BUFFER));
+            heap.add(Clustering.make(ByteBufferUtil.EMPTY_BYTE_BUFFER, ByteBufferUtil.EMPTY_BYTE_BUFFER));
+            heap.add(Clustering.make((ByteBuffer) null, ByteBufferUtil.bytes(-1)));
+            heap.add(Clustering.make(ByteBufferUtil.bytes(-1), (ByteBuffer) null));
+            heap.add(Clustering.make((ByteBuffer) null, (ByteBuffer) null));
+
+            for (Clustering<ByteBuffer> left : heap)
+            {
+                NativeClustering nativeLeft = new NativeClustering(allocator, null, left);
+                for (Clustering<ByteBuffer> right : heap)
+                {
+                    NativeClustering nativeRight = new NativeClustering(allocator, null, right);
+
+                    int expected = signum(comparator.compare(left, right));
+                    // the ClusteringPrefix overload is the one a b-tree search uses, and the only one that
+                    // dispatches to the address-based comparison
+                    assertEquals(expected, signum(comparator.compare((ClusteringPrefix<?>) nativeLeft,
+                                                                   (ClusteringPrefix<?>) nativeRight)));
+                    // the Clustering overload keeps the materializing loop: cross-check that both agree
+                    assertEquals(expected, signum(comparator.compare(nativeLeft, nativeRight)));
+                    // mixed sides: the heap side of a memtable search and the off-heap rows it is compared with
+                    assertEquals(expected, signum(comparator.compare((ClusteringPrefix<?>) left,
+                                                                   (ClusteringPrefix<?>) nativeRight)));
+                    assertEquals(expected, signum(comparator.compare((ClusteringPrefix<?>) nativeLeft,
+                                                                   (ClusteringPrefix<?>) right)));
+
+                    for (int i = 0; i < types.length; i++)
+                    {
+                        int component = comparator.compareComponent(i, nativeLeft.get(i), nativeLeft.accessor(),
+                                                                   nativeRight.get(i), nativeRight.accessor());
+                        assertEquals(signum(component),
+                                     signum(nativeLeft.compareComponent(i, nativeRight, i, types)));
+                    }
+                }
+            }
+        }
+        finally
+        {
+            pool.shutdownAndWait(10, TimeUnit.SECONDS);
+        }
+    }
+
+    /**
+     * The same equivalence for clustering columns whose type does not override the address-based
+     * comparison (so the default, view-materializing implementation runs), for clusterings of
+     * different sizes, and against bounds.
+     */
+    @Test
+    public void nativeComparisonMatchesHeapComparisonForOtherShapes() throws InterruptedException, java.util.concurrent.TimeoutException
+    {
+        AbstractType<?>[] types = { LongType.instance, Int32Type.instance };
+        ClusteringComparator comparator = new ClusteringComparator(types);
+        MemtablePool pool = new NativePool(1L << 24, 1L << 24, 1.0f, () -> ImmediateFuture.success(false));
+        NativeAllocator allocator = (NativeAllocator) pool.newAllocator("test");
+        try
+        {
+            List<Clustering<ByteBuffer>> heap = new ArrayList<>();
+            heap.add(Clustering.make(ByteBufferUtil.bytes(Long.MIN_VALUE), ByteBufferUtil.bytes(-1)));
+            heap.add(Clustering.make(ByteBufferUtil.bytes(-1L), ByteBufferUtil.bytes(-1)));
+            heap.add(Clustering.make(ByteBufferUtil.bytes(0L), ByteBufferUtil.bytes(0)));
+            heap.add(Clustering.make(ByteBufferUtil.bytes(1L), ByteBufferUtil.bytes(0)));
+            heap.add(Clustering.make(ByteBufferUtil.bytes(Long.MAX_VALUE), ByteBufferUtil.bytes(Integer.MAX_VALUE)));
+            heap.add(Clustering.make(ByteBufferUtil.EMPTY_BYTE_BUFFER, ByteBufferUtil.bytes(0)));
+            heap.add(Clustering.make((ByteBuffer) null, ByteBufferUtil.bytes(0)));
+            // shorter than the comparator: exercises the size-mismatch tail
+            heap.add(Clustering.make(ByteBufferUtil.bytes(0L)));
+
+            List<ClusteringPrefix<?>> bounds = new ArrayList<>();
+            bounds.add(ClusteringBound.create(comparator, true, true,
+                                              ByteBufferUtil.bytes(0L), ByteBufferUtil.bytes(0)));
+            bounds.add(ClusteringBound.create(comparator, false, false,
+                                              ByteBufferUtil.bytes(1L), ByteBufferUtil.bytes(0)));
+
+            for (Clustering<ByteBuffer> left : heap)
+            {
+                NativeClustering nativeLeft = new NativeClustering(allocator, null, left);
+                for (Clustering<ByteBuffer> right : heap)
+                {
+                    NativeClustering nativeRight = new NativeClustering(allocator, null, right);
+                    // the ClusteringPrefix overload is the reference here: unlike compare(Clustering, Clustering)
+                    // it also orders clusterings of different sizes
+                    int expected = signum(comparator.compare((ClusteringPrefix<?>) left, (ClusteringPrefix<?>) right));
+                    assertEquals(expected, signum(comparator.compare((ClusteringPrefix<?>) nativeLeft,
+                                                                   (ClusteringPrefix<?>) nativeRight)));
+                    assertEquals(expected, signum(comparator.compare((ClusteringPrefix<?>) left,
+                                                                   (ClusteringPrefix<?>) nativeRight)));
+                    assertEquals(expected, signum(comparator.compare((ClusteringPrefix<?>) nativeLeft,
+                                                                   (ClusteringPrefix<?>) right)));
+                }
+
+                for (ClusteringPrefix<?> bound : bounds)
+                {
+                    int expected = signum(comparator.compare((ClusteringPrefix<?>) left, bound));
+                    assertEquals(expected, signum(comparator.compare((ClusteringPrefix<?>) nativeLeft, bound)));
+                    assertEquals(-expected, signum(comparator.compare((ClusteringPrefix<?>) bound, nativeLeft)));
+                }
+            }
+        }
+        finally
+        {
+            pool.shutdownAndWait(10, TimeUnit.SECONDS);
+        }
+    }
+
+    private static int signum(int value)
+    {
+        return value == 0 ? 0 : (value < 0 ? -1 : 1);
     }
 
     private static ByteBuffer clusteringOfLongAsBuffer(AbstractType<?>[] types, long v1) throws IOException

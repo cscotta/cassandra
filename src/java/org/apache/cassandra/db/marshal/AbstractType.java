@@ -241,6 +241,40 @@ public abstract class AbstractType<T> implements Comparator<ByteBuffer>, Assignm
     }
 
     /**
+     * Compares two values held off-heap, addressed by their memory address and length, without
+     * materializing a {@link NativeData} view of either side. A length of 0 denotes an empty value.
+     *
+     * The default implementation builds both views and defers to
+     * {@link #compare(Object, ValueAccessor, Object, ValueAccessor)}, so it is exactly equivalent to
+     * comparing the same values as {@link NativeData} objects. Types that can decode a value straight
+     * from its address override it to skip the views on compare-heavy paths (the memtable b-tree
+     * search and merge); overrides must sort identically to the default for every pair of values.
+     */
+    public int compareNative(long addressLeft, int lengthLeft, long addressRight, int lengthRight)
+    {
+        return compare(new AddressBasedNativeData(addressLeft, lengthLeft), NativeAccessor.instance,
+                       new AddressBasedNativeData(addressRight, lengthRight), NativeAccessor.instance);
+    }
+
+    /**
+     * As {@link #compareNative}, with the off-heap value on the left and a value held however its
+     * accessor says on the right.
+     */
+    public <V> int compareNativeTo(long leftAddress, int leftLength, V right, ValueAccessor<V> rightAccessor)
+    {
+        return compare(new AddressBasedNativeData(leftAddress, leftLength), NativeAccessor.instance, right, rightAccessor);
+    }
+
+    /**
+     * As {@link #compareNative}, with the off-heap value on the right and a value held however its
+     * accessor says on the left.
+     */
+    public <V> int compareToNative(V left, ValueAccessor<V> leftAccessor, long rightAddress, int rightLength)
+    {
+        return compare(left, leftAccessor, new AddressBasedNativeData(rightAddress, rightLength), NativeAccessor.instance);
+    }
+
+    /**
      * Implement IFF ComparisonType is CUSTOM
      *
      * Compares the byte representation of two instances of this class,
