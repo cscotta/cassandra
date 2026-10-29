@@ -206,7 +206,7 @@ final class PartitionKeyRestrictions extends RestrictionSetWrapper
             ByteBuffer singleValue = r.bindSingleColumnValue(options);
             if (singleValue != null)
             {
-                validatePartitionKey(singleValue);
+                validateSingleColumnPartitionKey(singleValue);
                 return Collections.singletonList(singleValue);
             }
 
@@ -261,7 +261,7 @@ final class PartitionKeyRestrictions extends RestrictionSetWrapper
     /**
      * Same as {@link #validatePartitionKey(ClusteringElements)} for a single column partition key.
      */
-    private void validatePartitionKey(ByteBuffer value)
+    private void validateSingleColumnPartitionKey(ByteBuffer value)
     {
         validatePartitionKeyValue(value, 0);
     }

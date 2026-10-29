@@ -101,16 +101,19 @@ public interface SingleRestriction extends Restriction
     List<ClusteringElements> values(FunctionContext context);
 
     /**
-     * Binds and returns the single value selected by this restriction when it is an {@code EQ} on a single column
-     * with a single term, or {@code null} when the restriction has any other shape.
+     * Binds and returns the single value selected by this restriction when it is an {@code EQ} on one column with a
+     * single non terminal term (a bind marker or a function call, i.e. the values that need binding at execution
+     * time), or {@code null} when the restriction has any other shape.
      * <p>
      * {@link #values(FunctionContext)} always wraps its result in {@link ClusteringElements}, which is needed to build
      * clustering prefixes but is pure overhead for the common case of a one column partition key restriction, where
      * only the bound value is used. Callers that can work with a single value may use this method and fall back to
-     * {@code values} when it returns {@code null}.
+     * {@code values} when it returns {@code null}. Restriction shapes that this method does not cover are not an
+     * error: the general path remains correct, it only allocates the wrapper.
      *
      * @param context the query options
-     * @return the bound value, or {@code null} if this restriction is not a single column {@code EQ} with a single term
+     * @return the bound value, or {@code null} if this restriction is not a single column {@code EQ} with one bindable
+     * term
      */
     default ByteBuffer bindSingleColumnValue(FunctionContext context)
     {

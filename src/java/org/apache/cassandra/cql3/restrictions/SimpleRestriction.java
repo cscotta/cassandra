@@ -259,8 +259,9 @@ public final class SimpleRestriction implements SingleRestriction
     @Override
     public ByteBuffer bindSingleColumnValue(FunctionContext context)
     {
-        // only a plain equality on one column with one bound term can be answered without a ClusteringElements;
-        // token, map element and multi column expressions keep using the general path
+        // only a plain equality on one column with one bindable term can be answered without a ClusteringElements;
+        // token, map element (already excluded by the kind check, kept as a guard) and multi column expressions keep
+        // using the general path
         if (operator != Operator.EQ
             || columnsExpression.kind() != ColumnsExpression.Kind.SINGLE_COLUMN
             || columnsExpression.isMapElementExpression()

@@ -63,6 +63,20 @@ public class PartitionKeySingleValueBindingTest extends CQLTester
     }
 
     @Test
+    public void testNullAndUnsetPartitionKeyValues() throws Throwable
+    {
+        createTable("CREATE TABLE %s (pk text PRIMARY KEY, v int)");
+
+        // a null bound value must be rejected the same way the general path rejects it, it is never a valid key
+        assertInvalidThrow(InvalidRequestException.class, "SELECT v FROM %s WHERE pk = ?", (String) null);
+        assertInvalidThrow(InvalidRequestException.class, "INSERT INTO %s (pk, v) VALUES (?, ?)", (String) null, 1);
+        assertInvalidThrow(InvalidRequestException.class, "DELETE FROM %s WHERE pk = ?", (String) null);
+
+        // and an unset bound value as well
+        assertInvalidThrow(InvalidRequestException.class, "SELECT v FROM %s WHERE pk = ?", unset());
+    }
+
+    @Test
     public void testCompositePartitionKey() throws Throwable
     {
         createTable("CREATE TABLE %s (pk1 int, pk2 text, v int, PRIMARY KEY ((pk1, pk2)))");
