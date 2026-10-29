@@ -17,6 +17,7 @@
  */
 package org.apache.cassandra.cql3.restrictions;
 
+import java.nio.ByteBuffer;
 import java.util.List;
 
 import com.google.common.collect.RangeSet;
@@ -98,6 +99,23 @@ public interface SingleRestriction extends Restriction
      * @throws UnsupportedOperationException if the operator is not an {@code EQ} or an {@code IN}.
      */
     List<ClusteringElements> values(FunctionContext context);
+
+    /**
+     * Binds and returns the single value selected by this restriction when it is an {@code EQ} on a single column
+     * with a single term, or {@code null} when the restriction has any other shape.
+     * <p>
+     * {@link #values(FunctionContext)} always wraps its result in {@link ClusteringElements}, which is needed to build
+     * clustering prefixes but is pure overhead for the common case of a one column partition key restriction, where
+     * only the bound value is used. Callers that can work with a single value may use this method and fall back to
+     * {@code values} when it returns {@code null}.
+     *
+     * @param context the query options
+     * @return the bound value, or {@code null} if this restriction is not a single column {@code EQ} with a single term
+     */
+    default ByteBuffer bindSingleColumnValue(FunctionContext context)
+    {
+        return null;
+    }
 
     /**
      * Removes the ranges of values not selected by this restriction from the specified {@code RangeSet} if the operator is an operator selecting ranges of data.

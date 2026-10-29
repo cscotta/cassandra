@@ -200,6 +200,16 @@ final class PartitionKeyRestrictions extends RestrictionSetWrapper
         if (restrictions.size() == 1 && !restrictions.hasIN())
         {
             SingleRestriction r = restrictions.lastRestriction();
+
+            // a single column equality selects exactly one value, so the ClusteringElements wrapper that the general
+            // path builds around it is not needed here
+            ByteBuffer singleValue = r.bindSingleColumnValue(options);
+            if (singleValue != null)
+            {
+                validatePartitionKey(singleValue);
+                return Collections.singletonList(singleValue);
+            }
+
             List<ClusteringElements> values = r.values(options);
             if (values.size() == 1)
             {
@@ -240,18 +250,30 @@ final class PartitionKeyRestrictions extends RestrictionSetWrapper
     {
         int sum = 0;
         for (ByteBuffer columnValue : partitionKey)
-        {
-            int size = columnValue != null ? columnValue.remaining() : 0;
-            if (size > FBUtilities.MAX_UNSIGNED_SHORT)
-                throw new InvalidRequestException(String.format("Key length of %d is longer than maximum of %d",
-                                                                size,
-                                                                FBUtilities.MAX_UNSIGNED_SHORT));
-            sum += size;
-        }
+            sum = validatePartitionKeyValue(columnValue, sum);
+
         if (sum > FBUtilities.MAX_UNSIGNED_SHORT)
             throw new InvalidRequestException(String.format("Key length of %d is longer than maximum of %d",
                                                             sum,
                                                             FBUtilities.MAX_UNSIGNED_SHORT));
+    }
+
+    /**
+     * Same as {@link #validatePartitionKey(ClusteringElements)} for a single column partition key.
+     */
+    private void validatePartitionKey(ByteBuffer value)
+    {
+        validatePartitionKeyValue(value, 0);
+    }
+
+    private static int validatePartitionKeyValue(ByteBuffer columnValue, int sum)
+    {
+        int size = columnValue != null ? columnValue.remaining() : 0;
+        if (size > FBUtilities.MAX_UNSIGNED_SHORT)
+            throw new InvalidRequestException(String.format("Key length of %d is longer than maximum of %d",
+                                                            size,
+                                                            FBUtilities.MAX_UNSIGNED_SHORT));
+        return sum + size;
     }
 
     private List<ByteBuffer> toByteBuffers(SortedSet<? extends ClusteringPrefix<?>> clusterings)
