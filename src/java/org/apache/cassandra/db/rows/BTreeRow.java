@@ -994,7 +994,9 @@ public class BTreeRow extends AbstractRow
         {
             if (cells_ == null)
             {
-                cells_ = BTree.builder(ColumnData.comparator);
+                // most rows hold a handful of cells; the array grows on demand, and reset() only retains it up to
+                // MAX_RETAINED_CELLS, so a small initial capacity costs at most a copy for an unusually wide row
+                cells_ = BTree.builder(ColumnData.comparator, 4);
                 cells_.auto(false);
             }
             return cells_;

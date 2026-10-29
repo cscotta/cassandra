@@ -266,13 +266,11 @@ public class UnfilteredRowIteratorSerializer
         final SerializationHeader sHeader = header.sHeader;
         return new AbstractUnfilteredRowIterator(metadata, header.key, header.partitionDeletion, sHeader.columns(), header.staticRow, header.isReversed, sHeader.stats())
         {
-            private final Row.Builder builder = BTreeRow.sortedBuilder();
-
             protected Unfiltered computeNext()
             {
                 try
                 {
-                    Unfiltered unfiltered = UnfilteredSerializer.serializer.deserialize(in, sHeader, helper, builder);
+                    Unfiltered unfiltered = UnfilteredSerializer.serializer.deserialize(in, sHeader, helper);
                     return unfiltered == null ? endOfData() : unfiltered;
                 }
                 catch (IOException e)

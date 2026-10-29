@@ -48,8 +48,6 @@ public class UnfilteredDeserializer
     private boolean isReady;
     private boolean isDone;
 
-    private final Row.Builder builder;
-
     private UnfilteredDeserializer(TableMetadata metadata,
                                    DataInputPlus in,
                                    SerializationHeader header,
@@ -60,7 +58,6 @@ public class UnfilteredDeserializer
         this.helper = helper;
         this.header = header;
         this.clusteringDeserializer = new ClusteringPrefix.Deserializer(metadata.comparator, in, header);
-        this.builder = BTreeRow.sortedBuilder();
     }
 
     public static UnfilteredDeserializer create(TableMetadata metadata,
@@ -143,6 +140,8 @@ public class UnfilteredDeserializer
         }
         else
         {
+            // one row per call: take the builder (and its cell array) from the per-thread pool, which build() refills
+            Row.Builder builder = BTreeRow.pooledSortedBuilder();
             builder.newRow(clusteringDeserializer.deserializeNextClustering());
             return UnfilteredSerializer.serializer.deserializeRowBody(in, header, helper, nextFlags, nextExtendedFlags, builder);
         }
