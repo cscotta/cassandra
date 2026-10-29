@@ -20,6 +20,7 @@
  */
 package org.apache.cassandra.utils.memory;
 
+import java.nio.ByteBuffer;
 import java.util.Iterator;
 
 import org.apache.cassandra.db.BufferDecoratedKey;
@@ -59,7 +60,24 @@ public abstract class EnsureOnHeap extends Transformation
 
         public DecoratedKey applyToPartitionKey(DecoratedKey key)
         {
+            // A key that owns its heap array is not a view of memory a memtable or an sstable releases: the trie
+            // memtable materializes the keys it returns on the heap, and a mutation's key is a wrapped bound value.
+            // Copying those keys repeats the bytes of every source of a read, and the key of a read is asked for more
+            // than once. A key that is a view of a larger buffer (a pooled request buffer, a composite key slice) is
+            // still copied, because that buffer may be recycled while the key is retained.
+            if (ownsHeapArray(key.getKey()))
+                return key;
+
             return new BufferDecoratedKey(key.getToken(), HeapCloner.instance.clone(key.getKey()));
+        }
+
+        private static boolean ownsHeapArray(ByteBuffer bytes)
+        {
+            return bytes.hasArray()
+                   && bytes.arrayOffset() == 0
+                   && bytes.position() == 0
+                   && bytes.limit() == bytes.capacity()
+                   && bytes.array().length == bytes.capacity();
         }
 
         public Row applyToRow(Row row)
