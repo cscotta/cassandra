@@ -40,9 +40,11 @@ public class BufferPools
 
     /**
      * Used by client-server or inter-node requests, buffers should be released immediately after use.
+     * These buffers are allocated and freed in tight per-request cycles, so each local pool keeps one fully
+     * freed chunk rather than handing it back to the global pool and asking for it again on the next request.
      */
     private static final long NETWORKING_MEMORY_USAGE_THRESHOLD = DatabaseDescriptor.getNetworkingCacheSizeInMiB() * 1024L * 1024L;
-    private static final BufferPool NETWORKING_POOL = new BufferPool("networking", NETWORKING_MEMORY_USAGE_THRESHOLD, false);
+    private static final BufferPool NETWORKING_POOL = new BufferPool("networking", NETWORKING_MEMORY_USAGE_THRESHOLD, false, true);
 
     static
     {

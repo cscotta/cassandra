@@ -1066,6 +1066,121 @@ public class BufferPoolTest
         assertEquals(0, bufferPool.usedSizeInBytes());
     }
 
+    @Test
+    public void testRetainFreeChunk()
+    {
+        BufferPool retainingPool = new BufferPool("test_retained_pool", 8 * 1024 * 1024, false, true);
+        CountingDebug debug = new CountingDebug();
+        retainingPool.debug(debug, null);
+
+        // a single chunk is kept locally and refilled instead of being returned to the global pool per allocation
+        for (int i = 0; i < 32; i++)
+        {
+            ByteBuffer buffer = retainingPool.getAtLeast(4096, BufferType.OFF_HEAP);
+            assertNotNull(buffer);
+            retainingPool.put(buffer);
+        }
+        assertEquals(1, debug.acquired);
+        assertEquals(0, debug.recycled);
+        assertEquals(0, retainingPool.usedSizeInBytes());
+        assertTrue(retainingPool.unsafeCurrentChunk().isFree());
+
+        // the retained chunk serves the next allocation without another round trip through the global pool
+        ByteBuffer buffer = retainingPool.getAtLeast(4096, BufferType.OFF_HEAP);
+        assertEquals(1, debug.acquired);
+        assertEquals(4096, buffer.capacity());
+        assertEquals(4096, retainingPool.usedSizeInBytes());
+        retainingPool.put(buffer);
+        assertEquals(1, debug.acquired);
+        assertEquals(0, retainingPool.usedSizeInBytes());
+
+        // the retained chunk is not lost: releasing the pool returns it to the global pool
+        retainingPool.releaseLocal();
+        assertEquals(1, debug.recycled);
+        assertEquals(0, retainingPool.unsafeNumChunks());
+    }
+
+    @Test
+    public void testRetainFreeChunkInTinyPool()
+    {
+        BufferPool retainingPool = new BufferPool("test_retained_tiny_pool", 8 * 1024 * 1024, false, true);
+        CountingDebug debug = new CountingDebug();
+        retainingPool.debug(debug, null);
+
+        // tiny allocations are served by a nested pool, which retains its own last freed chunk
+        for (int i = 0; i < 32; i++)
+        {
+            ByteBuffer buffer = retainingPool.getAtLeast(64, BufferType.OFF_HEAP);
+            assertNotNull(buffer);
+            retainingPool.put(buffer);
+        }
+        assertEquals(1, debug.acquired);
+        assertEquals(0, debug.recycled);
+        assertEquals(0, retainingPool.usedSizeInBytes());
+    }
+
+    @Test
+    public void testRetainFreeChunkReleasesSurplusChunks()
+    {
+        BufferPool retainingPool = new BufferPool("test_retained_pool_surplus", 8 * 1024 * 1024, false, true);
+        CountingDebug debug = new CountingDebug();
+        retainingPool.debug(debug, null);
+
+        // two fully occupied chunks; freeing both must return all but one to the global pool
+        ByteBuffer first = retainingPool.get(BufferPool.NORMAL_CHUNK_SIZE, BufferType.OFF_HEAP);
+        ByteBuffer second = retainingPool.get(BufferPool.NORMAL_CHUNK_SIZE, BufferType.OFF_HEAP);
+        assertEquals(2, debug.acquired);
+
+        retainingPool.put(first);
+        retainingPool.put(second);
+
+        assertEquals(1, debug.recycled);
+        assertEquals(1, retainingPool.unsafeNumChunks());
+        assertEquals(0, retainingPool.usedSizeInBytes());
+    }
+
+    @Test
+    public void testReleasesFreeChunkByDefault()
+    {
+        CountingDebug debug = new CountingDebug();
+        bufferPool.debug(debug, null);
+
+        ByteBuffer buffer = bufferPool.getAtLeast(4096, BufferType.OFF_HEAP);
+        bufferPool.put(buffer);
+
+        assertEquals(1, debug.acquired);
+        assertEquals(1, debug.recycled);
+        assertNull(bufferPool.unsafeCurrentChunk());
+    }
+
+    private static class CountingDebug implements BufferPool.Debug
+    {
+        int acquired;
+        int recycled;
+
+        @Override
+        public void registerNormal(BufferPool.Chunk chunk)
+        {
+        }
+
+        @Override
+        public void acquire(BufferPool.Chunk chunk)
+        {
+            ++acquired;
+        }
+
+        @Override
+        public void recycleNormal(BufferPool.Chunk oldVersion, BufferPool.Chunk newVersion)
+        {
+            ++recycled;
+        }
+
+        @Override
+        public void recyclePartial(BufferPool.Chunk chunk)
+        {
+        }
+    }
+
     private BufferPool.Chunk allocate(int num, int bufferSize, List<ByteBuffer> buffers)
     {
         for (int i = 0; i < num; i++)
