@@ -17,6 +17,7 @@
  */
 package org.apache.cassandra.service.reads;
 
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -78,7 +79,9 @@ public class ReadCallback<E extends Endpoints<E>, P extends ReplicaPlan.ForRead<
     private static final AtomicIntegerFieldUpdater<ReadCallback> failuresUpdater
             = newUpdater(ReadCallback.class, "failures");
     private volatile int failures = 0;
-    private final Map<InetAddressAndPort, RequestFailureReason> failureReasonByEndpoint;
+    // Created on the first reported failure: a read that succeeds records none, and this map is the
+    // only per-read object of the callback that the happy path never touches.
+    private volatile Map<InetAddressAndPort, RequestFailureReason> failureReasonByEndpoint;
     private volatile WarningContext warningContext;
     private static final AtomicReferenceFieldUpdater<ReadCallback, WarningContext> warningsUpdater
         = AtomicReferenceFieldUpdater.newUpdater(ReadCallback.class, WarningContext.class, "warningContext");
@@ -89,7 +92,6 @@ public class ReadCallback<E extends Endpoints<E>, P extends ReplicaPlan.ForRead<
         this.resolver = resolver;
         this.requestTime = requestTime;
         this.replicaPlan = replicaPlan;
-        this.failureReasonByEndpoint = new ConcurrentHashMap<>();
         // we don't support read repair (or rapid read protection) for range scans yet (CASSANDRA-6897)
         assert !(command instanceof PartitionRangeReadCommand) || replicaPlan().readQuorum() >= replicaPlan().contacts().size();
 
@@ -100,6 +102,31 @@ public class ReadCallback<E extends Endpoints<E>, P extends ReplicaPlan.ForRead<
     protected P replicaPlan()
     {
         return replicaPlan.get();
+    }
+
+    /**
+     * The reasons reported by the replicas that failed, created on first use. Reads that see a failure are rare,
+     * so allocating the map eagerly is one throwaway object per read; the volatile field publishes a map created
+     * by a callback thread to the threads inspecting the failures after a timeout.
+     */
+    private Map<InetAddressAndPort, RequestFailureReason> failureReasons()
+    {
+        Map<InetAddressAndPort, RequestFailureReason> reasons = failureReasonByEndpoint;
+        if (reasons != null)
+            return reasons;
+        synchronized (this)
+        {
+            reasons = failureReasonByEndpoint;
+            if (reasons == null)
+                failureReasonByEndpoint = reasons = new ConcurrentHashMap<>();
+            return reasons;
+        }
+    }
+
+    private Map<InetAddressAndPort, RequestFailureReason> failureReasonsOrEmpty()
+    {
+        Map<InetAddressAndPort, RequestFailureReason> reasons = failureReasonByEndpoint;
+        return reasons != null ? reasons : Collections.emptyMap();
     }
 
     public ConsistencyLevel consistencyLevel()
@@ -154,7 +181,12 @@ public class ReadCallback<E extends Endpoints<E>, P extends ReplicaPlan.ForRead<
         // see CASSANDRA-17828
         boolean timedout = !signaled;
         if (failed)
-            timedout = RequestCallback.isTimeout(new HashMap<>(failureReasonByEndpoint));
+        {
+            // onFailure records the reason before it increments the failure count, so a failed read always has at
+            // least one reason; an empty map can only mean no failure was reported and must not read as a timeout.
+            Map<InetAddressAndPort, RequestFailureReason> reasons = failureReasonsOrEmpty();
+            timedout = !reasons.isEmpty() && RequestCallback.isTimeout(new HashMap<>(reasons));
+        }
         WarningContext warnings = warningContext;
         // save the snapshot so abort state is not changed between now and when mayAbort gets called
         WarningsSnapshot snapshot = null;
@@ -183,12 +215,12 @@ public class ReadCallback<E extends Endpoints<E>, P extends ReplicaPlan.ForRead<
         }
 
         if (snapshot != null)
-            snapshot.maybeAbort(command, replicaPlan().consistencyLevel(), received, replicaPlan().readQuorum(), resolver.isDataPresent(), failureReasonByEndpoint);
+            snapshot.maybeAbort(command, replicaPlan().consistencyLevel(), received, replicaPlan().readQuorum(), resolver.isDataPresent(), failureReasonsOrEmpty());
 
         // failures keeps incrementing, and this.failureReasonByEndpoint keeps getting new entries after signaling.
         // Simpler to reason about what happened by copying this.failureReasonByEndpoint and then inferring
         // failures from it
-        final Map<InetAddressAndPort, RequestFailureReason> failureReasonByEndpoint = ImmutableMap.copyOf(this.failureReasonByEndpoint);
+        final Map<InetAddressAndPort, RequestFailureReason> failureReasonByEndpoint = ImmutableMap.copyOf(failureReasonsOrEmpty());
         int transactionRetryErrors = 0;
         int coordinatorBehindErrors = 0;
         for (RequestFailureReason reason : failureReasonByEndpoint.values())
@@ -281,7 +313,8 @@ public class ReadCallback<E extends Endpoints<E>, P extends ReplicaPlan.ForRead<
     {
         assertWaitingFor(from);
                 
-        failureReasonByEndpoint.put(from, failure.reason);
+        // record the reason before incrementing the failure count: fail() relies on a counted failure having one
+        failureReasons().put(from, failure.reason);
 
         if (replicaPlan().readQuorum() + failuresUpdater.incrementAndGet(this) > replicaPlan().contacts().size())
             condition.signalAll();
