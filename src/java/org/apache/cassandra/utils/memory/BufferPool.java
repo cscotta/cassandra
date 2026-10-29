@@ -98,7 +98,8 @@ import static org.apache.cassandra.utils.memory.MemoryUtil.isExactlyDirect;
  *       <ul>
  *         <li>used to serve allocation size that is larger than half of NORMAL_ALLOCATION_UNIT but less than NORMAL_CHUNK_SIZE</li>
  *         <li>when there is insufficient space in the local queue, it will request global pool for more normal chunks</li>
- *         <li>when normal chunk is recycled either fully or partially, it will be passed to global pool to be used by other pools</li>
+ *         <li>when normal chunk is recycled either fully or partially, it will be passed to global pool to be used by other pools,
+ *             unless the pool retains free chunks, in which case it keeps its last fully freed chunk for reuse</li>
  *       </ul>
  *     </li>
  *     <li>Tiny Pool:
@@ -168,6 +169,13 @@ public class BufferPool
     /** Allow partially freed chunk to be recycled for allocation*/
     private final boolean recyclePartially;
 
+    /**
+     * Keep the last fully freed chunk in its local pool instead of returning it to the global pool, which would
+     * re-acquire it on the next allocation of a pool that allocates and frees in a tight cycle. At most one chunk
+     * per local pool is retained, so the extra resident memory is bounded by the number of pools (128 KiB each).
+     */
+    private final boolean retainFreeChunk;
+
     /** A thread local pool of chunks, where chunks come from the global pool */
     private final FastThreadLocal<LocalPool> localPool = new FastThreadLocal<LocalPool>()
     {
@@ -190,12 +198,18 @@ public class BufferPool
 
     public BufferPool(String name, long memoryUsageThreshold, boolean recyclePartially)
     {
+        this(name, memoryUsageThreshold, recyclePartially, false);
+    }
+
+    public BufferPool(String name, long memoryUsageThreshold, boolean recyclePartially, boolean retainFreeChunk)
+    {
         this.name = name;
         this.memoryUsageThreshold = memoryUsageThreshold;
         this.readableMemoryUsageThreshold = prettyPrintMemory(memoryUsageThreshold);
         this.globalPool = new GlobalPool();
         this.metrics = new BufferPoolMetrics(name, this);
         this.recyclePartially = recyclePartially;
+        this.retainFreeChunk = retainFreeChunk;
         this.localPoolCleaner = executorFactory().infiniteLoop("LocalPool-Cleaner-" + name, this::cleanupOneReference, UNSAFE);
     }
 
@@ -781,12 +795,14 @@ public class BufferPool
          */
         private LocalPool tinyPool;
         private final int tinyLimit;
+        private final boolean retainFreeChunk;
         private boolean recycleWhenFree = true;
 
         public LocalPool()
         {
             this.parent = globalPool;
             this.tinyLimit = TINY_ALLOCATION_LIMIT;
+            this.retainFreeChunk = BufferPool.this.retainFreeChunk;
             this.reuseObjects = new ArrayDeque<>();
             localPoolReferences.add(leakRef = new LocalPoolRef(this, localPoolRefQueue));
         }
@@ -801,6 +817,7 @@ public class BufferPool
                 return buffer == null ? null : new Chunk(parent, buffer);
             };
             this.tinyLimit = 0; // we only currently permit one layer of nesting (which brings us down to 32 byte allocations, so is plenty)
+            this.retainFreeChunk = parent.retainFreeChunk;
             this.reuseObjects = parent.reuseObjects; // we share the same ByteBuffer object reuse pool, as we both have the same exclusive access to it
             localPoolReferences.add(leakRef = new LocalPoolRef(this, localPoolRefQueue));
         }
@@ -840,7 +857,11 @@ public class BufferPool
 
             long free = chunk.free(buffer);
 
-            if (free == -1L && owner == this && owningThread == Thread.currentThread() && recycleWhenFree)
+            // A pool that retains free chunks keeps its last one: the chunk is typically refilled by the next
+            // allocation, and returning it to the parent costs a queue round trip and a fresh Chunk each time.
+            // The queue is only inspected on the owning thread, which the preceding conditions have established.
+            if (free == -1L && owner == this && owningThread == Thread.currentThread() && recycleWhenFree
+                && !(retainFreeChunk && chunks.count == 1))
             {
                 // The chunk was fully freed, and we're the owner - let's release the chunk from this pool
                 // and give it back to the parent.
