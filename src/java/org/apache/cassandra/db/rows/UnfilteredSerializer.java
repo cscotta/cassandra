@@ -442,7 +442,9 @@ public class UnfilteredSerializer
      * @param in the input from which to deserialize.
      * @param header serialization header corresponding to the serialized data.
      * @param helper the helper to use for deserialization.
-     * @param builder a row builder, passed here so we don't allocate a new one for every new row.
+     * @param builder a row builder, passed here so we don't allocate a new one for every new row. It must not come
+     * from {@link BTreeRow#pooledSortedBuilder()}: a pooled builder returns itself to its pool as soon as it builds a
+     * row, so it serves one row only. Pass {@code null} to have a builder taken from the pool for each row.
      * @return the deserialized {@link Unfiltered} or {@code null} if we've read the end of a partition. This method is
      * guaranteed to never return empty rows.
      */
@@ -462,6 +464,19 @@ public class UnfilteredSerializer
     }
 
     /**
+     * As {@link #deserialize(DataInputPlus, SerializationHeader, DeserializationHelper, Row.Builder)}, but takes a
+     * sorted row builder from the per-thread pool for each row.
+     * <p>
+     * A builder hands its cell array back to the pool when it builds a row, so an iterator that holds on to one
+     * builder and reads a single row (which is what every point read does) allocates a fresh cell array for it.
+     */
+    public Unfiltered deserialize(DataInputPlus in, SerializationHeader header, DeserializationHelper helper)
+    throws IOException
+    {
+        return deserialize(in, header, helper, null);
+    }
+
+    /**
      * Deserialize a single {@link Unfiltered} from the provided input.
      * <p>
      * <b>WARNING:</b> this can return an empty row because it's possible there is a row serialized, but that row only
@@ -474,9 +489,6 @@ public class UnfilteredSerializer
     private Unfiltered deserializeOne(DataInputPlus in, SerializationHeader header, DeserializationHelper helper, Row.Builder builder)
     throws IOException
     {
-        // It wouldn't be wrong per-se to use an unsorted builder, but it would be inefficient so make sure we don't do it by mistake
-        assert builder.isSorted();
-
         int flags = in.readUnsignedByte();
         if (isEndOfPartition(flags))
             return null;
@@ -493,6 +505,14 @@ public class UnfilteredSerializer
             // deserializeStaticRow should be used for that.
             if (isStatic(extendedFlags))
                 throw new IOException("Corrupt flags value for unfiltered partition (isStatic flag set): " + flags);
+
+            // a null builder asks for one from the per-thread pool, which only holds for the row read here: the
+            // builder hands itself back to the pool when it builds
+            if (builder == null)
+                builder = BTreeRow.pooledSortedBuilder();
+            else
+                // It wouldn't be wrong per-se to use an unsorted builder, but it would be inefficient so make sure we don't do it by mistake
+                assert builder.isSorted();
 
             builder.newRow(Clustering.serializer.deserialize(in, helper.version, header.clusteringTypes()));
             return deserializeRowBody(in, header, helper, flags, extendedFlags, builder);
@@ -557,7 +577,7 @@ public class UnfilteredSerializer
         int flags = in.readUnsignedByte();
         assert !isEndOfPartition(flags) && kind(flags) == Unfiltered.Kind.ROW && isExtended(flags) : flags;
         int extendedFlags = in.readUnsignedByte();
-        Row.Builder builder = BTreeRow.sortedBuilder();
+        Row.Builder builder = BTreeRow.pooledSortedBuilder();
         builder.newRow(Clustering.STATIC_CLUSTERING);
         return deserializeRowBody(in, header, helper, flags, extendedFlags, builder);
     }
