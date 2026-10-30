@@ -22,7 +22,8 @@ package org.apache.cassandra.io.util;
 
 /**
  * Rebufferer for memory-mapped files. Thread-safe and shared among reader instances.
- * This is simply a thin wrapper around MmappedRegions as the buffers there can be used directly after duplication.
+ * This is simply a thin wrapper around MmappedRegions as the buffers there can be used directly: position-mutating
+ * readers duplicate them first, and readers that only read at absolute positions (the trie walkers) use them as they are.
  */
 class MmapRebufferer extends AbstractReaderFileProxy implements Rebufferer, RebuffererFactory
 {

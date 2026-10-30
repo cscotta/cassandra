@@ -49,6 +49,20 @@ public interface Rebufferer extends ReaderFileProxy
          */
         ByteBuffer buffer();
 
+        /**
+         * Returns the buffer to read from when the caller only performs absolute reads. The returned buffer must not be
+         * modified in any way (no writes, and no changes to its position, limit or byte order), because the holder may
+         * hand the very same buffer to other readers; its limit is the size of the available data, as for
+         * {@link #buffer()}, and it must not be used after {@link #release()}.
+         * <p>
+         * Implementations that already hold such a buffer return it directly, so a reader that walks a mapped file does
+         * not have to pay for a copy of it; the default implementation returns {@link #buffer()}.
+         */
+        default ByteBuffer sharedBuffer()
+        {
+            return buffer();
+        }
+
         default FloatBuffer floatBuffer()
         {
             throw new UnsupportedOperationException();

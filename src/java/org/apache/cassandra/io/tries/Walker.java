@@ -75,7 +75,8 @@ public class Walker<CONCRETE extends Walker<CONCRETE>> implements AutoCloseable
         try
         {
             bh = source.rebuffer(root);
-            buf = bh.buffer();
+            // only absolute reads are performed on the buffer, so no private copy is needed
+            buf = bh.sharedBuffer();
         }
         catch (Throwable ex)
         {
@@ -99,7 +100,7 @@ public class Walker<CONCRETE extends Walker<CONCRETE>> implements AutoCloseable
             bh.release();
             bh = Rebufferer.EMPTY; // prevents double release if the call below fails
             bh = source.rebuffer(position);
-            buf = bh.buffer();
+            buf = bh.sharedBuffer();
             curOffset = position - bh.offset();
             assert curOffset >= 0 && curOffset < buf.limit() : String.format("Invalid offset: %d, buf: %s, bh: %s", curOffset, buf, bh);
         }

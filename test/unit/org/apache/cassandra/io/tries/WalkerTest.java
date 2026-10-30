@@ -32,6 +32,7 @@ import org.junit.Test;
 
 import org.apache.cassandra.io.sstable.format.Version;
 import org.apache.cassandra.io.sstable.format.bti.BtiFormat;
+import org.apache.cassandra.io.util.ChannelProxy;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.Rebufferer;
 import org.apache.cassandra.io.util.TailOverridingRebufferer;
@@ -42,6 +43,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 
 @SuppressWarnings({"unchecked", "RedundantSuppression"})
 public class WalkerTest extends AbstractTrieTestBase
@@ -274,6 +276,187 @@ public class WalkerTest extends AbstractTrieTestBase
         }
     }
 
+
+    /**
+     * A walker only reads at absolute positions, so it must take the buffer holder's shared buffer (the mapped
+     * region's own buffer) instead of asking for a private copy that a position-mutating reader would need.
+     */
+    @Test
+    public void testWalkerReadsTheSharedBuffer() throws IOException
+    {
+        DataOutputBuffer buf = new DataOutputBufferPaged();
+        long rootPos = makeTrie(buf).complete();
+
+        try (Walker<?> walker = new Walker<>(new SharedOnlyRebufferer(buf.asNewBuffer()), rootPos))
+        {
+            walker.goMin(rootPos);
+            assertEquals(1, walker.payloadFlags());
+            walker.goMax(rootPos);
+            assertEquals(12, walker.payloadFlags());
+        }
+    }
+
+    /**
+     * The walker must take the shared buffer in {@code go()} as well, i.e. not only when it is created. The first
+     * window only covers the root node, so walking the trie from the root has to re-buffer.
+     */
+    @Test
+    public void testWalkerReadsTheSharedBufferAfterRebuffer() throws IOException
+    {
+        DataOutputBuffer buf = new DataOutputBufferPaged();
+        long rootPos = makeTrie(buf).complete();
+
+        RootOnlyFirstWindowRebufferer source = new RootOnlyFirstWindowRebufferer(buf.asNewBuffer(), rootPos);
+        try (Walker<?> walker = new Walker<>(source, rootPos))
+        {
+            walker.goMin(rootPos);
+            assertEquals(1, walker.payloadFlags());
+            walker.goMax(rootPos);
+            assertEquals(12, walker.payloadFlags());
+        }
+        assertTrue("the walk must re-buffer, not only use the buffer from the constructor", source.rebufferCalls > 1);
+    }
+
+    /**
+     * Serves a window that contains just the root node on the first call, and the whole trie after that. It only
+     * implements {@link Rebufferer.BufferHolder#sharedBuffer()}, so moving off the root fails unless the walker asks for
+     * the shared buffer there too.
+     */
+    private static class RootOnlyFirstWindowRebufferer implements Rebufferer
+    {
+        private final ByteBuffer data;
+        private final int root;
+        int rebufferCalls;
+
+        RootOnlyFirstWindowRebufferer(ByteBuffer data, long root)
+        {
+            this.data = data;
+            this.root = (int) root;
+        }
+
+        public BufferHolder rebuffer(long position)
+        {
+            if (++rebufferCalls == 1)
+            {
+                ByteBuffer rootOnly = data.duplicate();
+                rootOnly.position(root).limit(data.limit());
+                return new WindowHolder(root, rootOnly.slice());
+            }
+
+            return new WindowHolder(0, data);
+        }
+
+        public ChannelProxy channel()
+        {
+            return null;
+        }
+
+        public long fileLength()
+        {
+            return data.limit();
+        }
+
+        public double getCrcCheckChance()
+        {
+            return 0;
+        }
+
+        public void close()
+        {
+        }
+
+        public void closeReader()
+        {
+        }
+
+        private static class WindowHolder implements Rebufferer.BufferHolder
+        {
+            private final long offset;
+            private final ByteBuffer window;
+
+            WindowHolder(long offset, ByteBuffer window)
+            {
+                this.offset = offset;
+                this.window = window;
+            }
+
+            public ByteBuffer buffer()
+            {
+                throw new AssertionError("the walker must not ask for a private copy of the buffer");
+            }
+
+            public ByteBuffer sharedBuffer()
+            {
+                return window;
+            }
+
+            public long offset()
+            {
+                return offset;
+            }
+
+            public void release()
+            {
+            }
+        }
+    }
+
+    private static class SharedOnlyRebufferer implements Rebufferer, Rebufferer.BufferHolder
+    {
+        private final ByteBuffer buffer;
+
+        SharedOnlyRebufferer(ByteBuffer buffer)
+        {
+            this.buffer = buffer;
+        }
+
+        public ByteBuffer buffer()
+        {
+            throw new AssertionError("the walker must not ask for a private copy of the buffer");
+        }
+
+        public ByteBuffer sharedBuffer()
+        {
+            return buffer;
+        }
+
+        public long offset()
+        {
+            return 0;
+        }
+
+        public void release()
+        {
+        }
+
+        public BufferHolder rebuffer(long position)
+        {
+            return this;
+        }
+
+        public ChannelProxy channel()
+        {
+            return null;
+        }
+
+        public long fileLength()
+        {
+            return buffer.remaining();
+        }
+
+        public double getCrcCheckChance()
+        {
+            return 0;
+        }
+
+        public void close()
+        {
+        }
+
+        public void closeReader()
+        {
+        }
+    }
 
     private IncrementalTrieWriter<Integer> makeTrie(DataOutputBuffer out) throws IOException
     {

@@ -20,6 +20,7 @@ package org.apache.cassandra.io.util;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.Arrays;
 import java.util.Random;
 
@@ -97,6 +98,49 @@ public class MmappedRegionsTest
         assert ret.exists();
         assert ret.length() >= buffer.capacity();
         return ret;
+    }
+
+    @Test
+    public void testSharedBufferReturnsTheMappedBufferWithoutACopy()
+    {
+        ByteBuffer buffer = ByteBuffer.allocateDirect(64);
+        MmappedRegions.Region region = new MmappedRegions.Region(128, buffer);
+
+        // readers that only read at absolute positions (the trie walkers) use the mapped buffer directly
+        assertThat(region.sharedBuffer()).isSameAs(buffer);
+
+        // readers that move the position still get their own buffer, and it cannot affect the mapped one
+        ByteBuffer copy = region.buffer();
+        assertThat(copy).isNotSameAs(buffer);
+        copy.position(8).limit(16);
+        assertEquals(0, buffer.position());
+        assertEquals(buffer.capacity(), buffer.limit());
+        assertEquals(128, region.offset());
+        assertEquals(128 + buffer.capacity(), region.end());
+    }
+
+    @Test
+    public void testSharedBufferOfAMappedRegion() throws Exception
+    {
+        ByteBuffer buffer = allocateBuffer(8192);
+        try (ChannelProxy channel = new ChannelProxy(writeFile("testSharedBufferMapped", buffer));
+             MmappedRegions regions = MmappedRegions.map(channel, buffer.capacity(), 4096))
+        {
+            MmappedRegions.Region region = regions.floor(0);
+            ByteBuffer shared = region.sharedBuffer();
+
+            // the mapped regions are read-only big-endian buffers, which is what the trie readers need
+            assertThat(shared).isSameAs(region.buffer);
+            assertTrue(shared.isReadOnly());
+            assertEquals(ByteOrder.BIG_ENDIAN, shared.order());
+            assertEquals(0, shared.position());
+
+            // position-mutating readers still get their own view, and it cannot affect what a walker reads
+            ByteBuffer movableView = region.buffer();
+            movableView.position(16);
+            assertEquals(0, shared.position());
+            assertEquals(movableView.getInt(16), shared.getInt(16));
+        }
     }
 
     @Test
