@@ -272,6 +272,16 @@ public class MmappedRegions extends SharedCloseableImpl
         }
 
         @Override
+        public ByteBuffer sharedBuffer()
+        {
+            // the mapped buffer is read-only, its position is 0 and its limit is its capacity, and nobody changes them
+            // (readers that move the position ask for buffer() and get a duplicate), so the readers that ask for the
+            // shared buffer (the trie walkers) can only read it at absolute positions; closing the regions unmaps it and
+            // invalidates any duplicate just the same, so sharing it does not shorten the lifetime of the mapping
+            return buffer;
+        }
+
+        @Override
         public FloatBuffer floatBuffer()
         {
             // this does an implicit duplicate(), so we need to expose it directly to avoid doing it twice unnecessarily
