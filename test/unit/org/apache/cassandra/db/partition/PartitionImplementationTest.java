@@ -68,6 +68,7 @@ import org.apache.cassandra.db.rows.RangeTombstoneBoundaryMarker;
 import org.apache.cassandra.db.rows.RangeTombstoneMarker;
 import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.Row.Deletion;
+import org.apache.cassandra.db.rows.RowsOnlyIterator;
 import org.apache.cassandra.db.rows.Unfiltered;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
 import org.apache.cassandra.exceptions.ConfigurationException;
@@ -78,6 +79,7 @@ import org.apache.cassandra.utils.ByteBufferUtil;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 public class PartitionImplementationTest
 {
@@ -526,6 +528,105 @@ public class PartitionImplementationTest
         return clusterings;
     }
 
+    /**
+     * A names query that names a single clustering is served by one lookup in the partition's tree instead of an
+     * iterator over the requested clusterings. It must return exactly what that clustering addresses: the row with
+     * the column selection applied, merged with the range tombstones that cover it, and nothing at all for a
+     * clustering the partition does not hold.
+     */
+    @Test
+    public void testSingleClusteringNamesQuery()
+    {
+        testSingleClusteringNamesQuery(false);
+    }
+
+    /**
+     * The same queries on a partition that holds range tombstones, so a query for a covered clustering has to merge
+     * the deletion with the row rather than just return it.
+     */
+    @Test
+    public void testSingleClusteringNamesQueryWithTombstones()
+    {
+        testSingleClusteringNamesQuery(true);
+    }
+
+    private void testSingleClusteringNamesQuery(boolean withTombstones)
+    {
+        ClusteringComparator comparator = twoClusteringMetadata.comparator;
+        ColumnMetadata defCol = twoClusteringMetadata.getColumn(new ColumnIdentifier("col", true));
+
+        List<Unfiltered> content = new ArrayList<>();
+        for (String[] values : new String[][]{ { "a", "a" }, { "a", "b" }, { "a", "c" }, { "c", "a" }, { "c", "c" } })
+        {
+            Row.Builder row = BTreeRow.unsortedBuilder();
+            row.newRow(comparator.make((Object[]) values));
+            row.addCell(BufferCell.live(defCol, TIMESTAMP, ByteBufferUtil.bytes(values[0] + values[1])));
+            content.add(row.build());
+        }
+
+        if (withTombstones)
+        {
+            // Strictly covers the (a, b) and (a, c) rows; neither bound is a clustering the queries below ask for,
+            // so the boundaries themselves do not decide the expected markers.
+            DeletionTime deletion = DeletionTime.build(TIMESTAMP, TIMESTAMP);
+            content.add(RangeTombstoneBoundMarker.inclusiveOpen(false, comparator.make("a", "b0"), deletion));
+            content.add(RangeTombstoneBoundMarker.inclusiveClose(false, comparator.make("a", "c0"), deletion));
+        }
+        content.sort(comparator);
+
+        AbstractBTreePartition partition;
+        try (UnfilteredRowIterator iter = new Util.UnfilteredSource(twoClusteringMetadata, Util.dk("pk"), null, content.iterator()))
+        {
+            partition = ImmutableBTreePartition.create(iter);
+        }
+
+        NavigableSet<Clusterable> sortedContent = new TreeSet<>(comparator);
+        sortedContent.addAll(content);
+
+        ColumnFilter cf = ColumnFilter.selectionBuilder().add(defCol).build();
+        Function<? super Clusterable, ? extends Clusterable> colFilter = x -> x instanceof Row ? ((Row) x).filter(cf, twoClusteringMetadata) : x;
+        Clustering<?> absent = comparator.make("b", "b");
+
+        String[][] probes = { { "a", "a" }, { "a", "b" }, { "a", "c" }, { "a", "d" }, { "b", "a" },
+                              { "c", "a" }, { "c", "b" }, { "c", "c" }, { "d", "a" } };
+        for (boolean reversed : new boolean[]{ false, true })
+        {
+            for (String[] values : probes)
+            {
+                Clustering<?> clustering = comparator.make((Object[]) values);
+                // A reversed names query is given its clusterings in the order it iterates them, like
+                // ClusteringIndexNamesFilter does.
+                NavigableSet<Clustering<?>> single = new TreeSet<>(reversed ? comparator.reversed() : comparator);
+                single.add(clustering);
+                // The same clustering requested together with one the partition does not hold, which keeps the
+                // general path, so the two paths are also compared against each other.
+                NavigableSet<Clustering<?>> withAbsent = new TreeSet<>(reversed ? comparator.reversed() : comparator);
+                withAbsent.add(clustering);
+                withAbsent.add(absent);
+
+                try (UnfilteredRowIterator iter = partition.unfilteredIterator(cf, single, reversed))
+                {
+                    // Pin the fast path this test exists for: with no range tombstone to merge, a names query for
+                    // one clustering returns the rows-only iterator, not the general ClusteringsIterator.
+                    if (!withTombstones)
+                        assertTrue("expected the rows-only iterator, got " + iter.getClass().getName(),
+                                   iter instanceof RowsOnlyIterator);
+                    assertIteratorsEqual(streamOf(directed(slice(sortedContent, Slice.make(clustering)), reversed)).map(colFilter).iterator(),
+                                         iter, twoClusteringMetadata);
+                }
+                try (UnfilteredRowIterator iter = partition.unfilteredIterator(ColumnFilter.all(twoClusteringMetadata), single, reversed))
+                {
+                    assertIteratorsEqual(directed(slice(sortedContent, Slice.make(clustering)), reversed), iter, twoClusteringMetadata);
+                }
+                try (UnfilteredRowIterator iter = partition.unfilteredIterator(cf, withAbsent, reversed))
+                {
+                    assertIteratorsEqual(streamOf(directed(slice(sortedContent, Slice.make(clustering)), reversed)).map(colFilter).iterator(),
+                                         iter, twoClusteringMetadata);
+                }
+            }
+        }
+    }
+
     private void testSlicingOfIterators(NavigableSet<Clusterable> sortedContent, AbstractBTreePartition partition, ColumnFilter cf, boolean reversed)
     {
         Function<? super Clusterable, ? extends Clusterable> colFilter = x -> x instanceof Row ? ((Row) x).filter(cf, metadata) : x;
@@ -603,12 +704,17 @@ public class PartitionImplementationTest
 
     private void assertIteratorsEqual(Iterator<? extends Clusterable> it1, Iterator<? extends Clusterable> it2)
     {
+        assertIteratorsEqual(it1, it2, metadata);
+    }
+
+    private void assertIteratorsEqual(Iterator<? extends Clusterable> it1, Iterator<? extends Clusterable> it2, TableMetadata table)
+    {
         Clusterable[] a1 = (Clusterable[]) Iterators.toArray(it1, Clusterable.class);
         Clusterable[] a2 = (Clusterable[]) Iterators.toArray(it2, Clusterable.class);
         if (Arrays.equals(a1, a2))
             return;
-        String a1s = Stream.of(a1).map(x -> "\n" + (x instanceof Unfiltered ? ((Unfiltered) x).toString(metadata) : x.toString())).collect(Collectors.toList()).toString();
-        String a2s = Stream.of(a2).map(x -> "\n" + (x instanceof Unfiltered ? ((Unfiltered) x).toString(metadata) : x.toString())).collect(Collectors.toList()).toString();
+        String a1s = Stream.of(a1).map(x -> "\n" + (x instanceof Unfiltered ? ((Unfiltered) x).toString(table) : x.toString())).collect(Collectors.toList()).toString();
+        String a2s = Stream.of(a2).map(x -> "\n" + (x instanceof Unfiltered ? ((Unfiltered) x).toString(table) : x.toString())).collect(Collectors.toList()).toString();
         assertArrayEquals("Arrays differ. Expected " + a1s + " was " + a2s, a1, a2);
     }
 
