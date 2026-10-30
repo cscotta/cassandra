@@ -550,6 +550,61 @@ public class PartitionImplementationTest
         testSingleClusteringNamesQuery(true);
     }
 
+    /**
+     * A response partition is built from the rows of a read. A partition that holds exactly one row is built as a
+     * singleton tree instead of through a btree builder, so pin the content of the partitions that are built at the
+     * boundary of that fast path: nothing, one row, two rows, and one row next to range tombstone markers.
+     */
+    @Test
+    public void testBuildResponsePartition()
+    {
+        ClusteringComparator comparator = twoClusteringMetadata.comparator;
+        ColumnMetadata defCol = twoClusteringMetadata.getColumn(new ColumnIdentifier("col", true));
+
+        Row rowA = row(comparator, defCol, "a", "a");
+        Row rowB = row(comparator, defCol, "a", "b");
+        DeletionTime deletion = DeletionTime.build(TIMESTAMP, TIMESTAMP);
+
+        List<List<Unfiltered>> contents = new ArrayList<>();
+        contents.add(Collections.emptyList());
+        contents.add(Collections.singletonList(rowA));
+        contents.add(Arrays.asList(rowA, rowB));
+        contents.add(Arrays.asList(rowA,
+                                    RangeTombstoneBoundMarker.inclusiveOpen(false, comparator.make("a", "a0"), deletion),
+                                    rowB,
+                                    RangeTombstoneBoundMarker.inclusiveClose(false, comparator.make("a", "c0"), deletion)));
+        // a marker first, so the consumed element is not a row and the general path has to keep it
+        contents.add(Arrays.asList(RangeTombstoneBoundMarker.inclusiveOpen(false, comparator.make("a", "a0"), deletion),
+                                    rowB,
+                                    RangeTombstoneBoundMarker.inclusiveClose(false, comparator.make("a", "c0"), deletion)));
+        contents.add(Collections.singletonList(RangeTombstoneBoundMarker.inclusiveOpen(false, comparator.make("a", "a0"), deletion)));
+
+        for (List<Unfiltered> content : contents)
+        {
+            List<Unfiltered> sorted = new ArrayList<>(content);
+            sorted.sort(comparator);
+
+            AbstractBTreePartition partition;
+            try (UnfilteredRowIterator iter = new Util.UnfilteredSource(twoClusteringMetadata, Util.dk("pk"), null, sorted.iterator()))
+            {
+                partition = ImmutableBTreePartition.create(iter);
+            }
+
+            try (UnfilteredRowIterator expected = new Util.UnfilteredSource(twoClusteringMetadata, Util.dk("pk"), null, sorted.iterator()))
+            {
+                assertIteratorsEqual(partition.unfilteredIterator(), expected, twoClusteringMetadata);
+            }
+        }
+    }
+
+    private static Row row(ClusteringComparator comparator, ColumnMetadata defCol, String c1, String c2)
+    {
+        Row.Builder builder = BTreeRow.unsortedBuilder();
+        builder.newRow(comparator.make(c1, c2));
+        builder.addCell(BufferCell.live(defCol, TIMESTAMP, ByteBufferUtil.bytes(c1 + c2)));
+        return builder.build();
+    }
+
     private void testSingleClusteringNamesQuery(boolean withTombstones)
     {
         ClusteringComparator comparator = twoClusteringMetadata.comparator;

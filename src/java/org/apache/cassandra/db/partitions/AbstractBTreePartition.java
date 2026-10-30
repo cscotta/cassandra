@@ -426,13 +426,24 @@ public abstract class AbstractBTreePartition implements Partition, Iterable<Row>
         RegularAndStaticColumns columns = iterator.columns();
         boolean reversed = iterator.isReverseOrder();
 
-        BTree.Builder<Row> builder = BTree.builder(metadata.comparator, initialRowCapacity);
-        builder.auto(!ordered);
         MutableDeletionInfo.Builder deletionBuilder = MutableDeletionInfo.builder(iterator.partitionLevelDeletion(), metadata.comparator, reversed);
 
-        while (iterator.hasNext())
+        Unfiltered first = iterator.hasNext() ? iterator.next() : null;
+        if (first == null)
+            return new BTreePartitionData(columns, BTree.empty(), deletionBuilder.build(), iterator.staticRow(), iterator.stats());
+
+        // A point read's response partition holds a single row: a singleton tree avoids the builder and the
+        // initial row array it allocates for every read.
+        if (first.kind() == Unfiltered.Kind.ROW && !iterator.hasNext())
+            return new BTreePartitionData(columns, BTree.singleton((Row) first), deletionBuilder.build(), iterator.staticRow(), iterator.stats());
+
+        BTree.Builder<Row> builder = BTree.builder(metadata.comparator, initialRowCapacity);
+        builder.auto(!ordered);
+
+        while (first != null || iterator.hasNext())
         {
-            Unfiltered unfiltered = iterator.next();
+            Unfiltered unfiltered = first != null ? first : iterator.next();
+            first = null;
             if (unfiltered.kind() == Unfiltered.Kind.ROW)
                 builder.add((Row)unfiltered);
             else
