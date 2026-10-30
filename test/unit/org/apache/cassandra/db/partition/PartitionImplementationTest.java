@@ -573,6 +573,11 @@ public class PartitionImplementationTest
                                     RangeTombstoneBoundMarker.inclusiveOpen(false, comparator.make("a", "a0"), deletion),
                                     rowB,
                                     RangeTombstoneBoundMarker.inclusiveClose(false, comparator.make("a", "c0"), deletion)));
+        // a marker first, so the consumed element is not a row and the general path has to keep it
+        contents.add(Arrays.asList(RangeTombstoneBoundMarker.inclusiveOpen(false, comparator.make("a", "a0"), deletion),
+                                    rowB,
+                                    RangeTombstoneBoundMarker.inclusiveClose(false, comparator.make("a", "c0"), deletion)));
+        contents.add(Collections.singletonList(RangeTombstoneBoundMarker.inclusiveOpen(false, comparator.make("a", "a0"), deletion)));
 
         for (List<Unfiltered> content : contents)
         {
