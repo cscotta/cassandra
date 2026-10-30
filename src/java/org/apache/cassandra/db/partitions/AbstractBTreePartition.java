@@ -157,14 +157,40 @@ public abstract class AbstractBTreePartition implements Partition, Iterable<Row>
     @Override
     public UnfilteredRowIterator unfilteredIterator(ColumnFilter selection, NavigableSet<Clustering<?>> clusteringsInQueryOrder, boolean reversed)
     {
-        Row staticRow = staticRow(holder(), selection, false);
+        BTreePartitionData current = holder();
+        Row staticRow = staticRow(current, selection, false);
         if (clusteringsInQueryOrder.isEmpty())
         {
-            DeletionTime partitionDeletion = holder().deletionInfo.getPartitionDeletion();
+            DeletionTime partitionDeletion = current.deletionInfo.getPartitionDeletion();
             return UnfilteredRowIterators.noRowsIterator(metadata(), partitionKey(), staticRow, partitionDeletion, reversed);
         }
 
-        return new ClusteringsIterator(selection, clusteringsInQueryOrder, reversed, holder(), staticRow);
+        // A query that names a single row only needs one lookup in the partition's tree; the general path also
+        // allocates a search iterator over that tree and an iterator over the requested clusterings to look one
+        // key up, on every source of the read.
+        if (clusteringsInQueryOrder.size() == 1)
+            return singleClusteringIterator(selection, clusteringsInQueryOrder.first(), reversed, current, staticRow);
+
+        return new ClusteringsIterator(selection, clusteringsInQueryOrder, reversed, current, staticRow);
+    }
+
+    /**
+     * The unmerged content of {@code clustering} in {@code current}, which is what a names query for a single
+     * clustering asks for. Absent rows are handled the same way as {@link ClusteringsIterator} handles them: with
+     * no range tombstone to merge there is nothing to iterate, and with one the merge iterator has to see both.
+     */
+    private UnfilteredRowIterator singleClusteringIterator(ColumnFilter selection, Clustering<?> clustering, boolean reversed, BTreePartitionData current, Row staticRow)
+    {
+        Row row = (Row) BTree.find(current.tree, metadata().comparator, clustering);
+        Iterator<Row> rowIter = row == null ? Collections.emptyIterator() : Iterators.singletonIterator(row);
+        if (!current.deletionInfo.hasRanges())
+            return rowsOnlyIterator(rowIter, selection, reversed, current, staticRow);
+
+        Iterator<RangeTombstone> deleteIter = current.deletionInfo.rangeIterator(Slice.make(clustering), reversed);
+        if (row == null && !deleteIter.hasNext())
+            return rowsOnlyIterator(rowIter, selection, reversed, current, staticRow);
+
+        return merge(rowIter, deleteIter, selection, reversed, current, staticRow);
     }
 
     public UnfilteredRowIterator unfilteredIterator()
