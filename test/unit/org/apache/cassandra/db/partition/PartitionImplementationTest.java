@@ -79,6 +79,7 @@ import org.apache.cassandra.utils.ByteBufferUtil;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 public class PartitionImplementationTest
@@ -577,7 +578,6 @@ public class PartitionImplementationTest
         contents.add(Arrays.asList(RangeTombstoneBoundMarker.inclusiveOpen(false, comparator.make("a", "a0"), deletion),
                                     rowB,
                                     RangeTombstoneBoundMarker.inclusiveClose(false, comparator.make("a", "c0"), deletion)));
-        contents.add(Collections.singletonList(RangeTombstoneBoundMarker.inclusiveOpen(false, comparator.make("a", "a0"), deletion)));
 
         for (List<Unfiltered> content : contents)
         {
@@ -594,6 +594,18 @@ public class PartitionImplementationTest
             {
                 assertIteratorsEqual(partition.unfilteredIterator(), expected, twoClusteringMetadata);
             }
+        }
+
+        // An unpaired open bound is not representable in a partition's deletion info, which holds closed range
+        // tombstones, so a partition built from a single open marker keeps nothing. That is the contract the read path
+        // relies on: unpaired bounds are closed before a response partition is built (see RTBoundCloser), so this only
+        // pins the behaviour of the builder itself.
+        List<Unfiltered> openOnly = Collections.singletonList(RangeTombstoneBoundMarker.inclusiveOpen(false, comparator.make("a", "a0"), deletion));
+        try (UnfilteredRowIterator iter = new Util.UnfilteredSource(twoClusteringMetadata, Util.dk("pk"), null, openOnly.iterator());
+             UnfilteredRowIterator built = ImmutableBTreePartition.create(iter).unfilteredIterator())
+        {
+            assertFalse(built.hasNext());
+            assertTrue(built.partitionLevelDeletion().isLive());
         }
     }
 
