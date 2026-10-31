@@ -19,7 +19,9 @@ package org.apache.cassandra.cql3.restrictions;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
+import java.util.NavigableSet;
 
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -29,9 +31,11 @@ import org.apache.cassandra.cql3.ColumnsExpression;
 import org.apache.cassandra.cql3.Operator;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.cql3.terms.Constants;
+import org.apache.cassandra.cql3.terms.Marker;
 import org.apache.cassandra.cql3.terms.MultiElements;
 import org.apache.cassandra.cql3.terms.Term;
 import org.apache.cassandra.cql3.terms.Terms;
+import org.apache.cassandra.db.Clustering;
 import org.apache.cassandra.db.ClusteringBound;
 import org.apache.cassandra.db.Slice;
 import org.apache.cassandra.db.Slices;
@@ -42,10 +46,13 @@ import org.apache.cassandra.db.marshal.ReversedType;
 import org.apache.cassandra.db.marshal.TupleType;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
 import static java.util.Arrays.asList;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 public class ClusteringColumnRestrictionsTest
@@ -210,6 +217,144 @@ public class ClusteringColumnRestrictionsTest
     {
         ClusteringColumnRestrictions restrictionSet = restrictions(tableMetadata, restrictions);
         assertSameSlices(restrictionSet.genericSlices(QueryOptions.DEFAULT), restrictionSet.slices(QueryOptions.DEFAULT));
+    }
+
+    /**
+     * A complete single value equality key must be built directly from the bound values, and has to produce the same
+     * clustering as the general cartesian product path.
+     */
+    @Test
+    public void testValuesAsClusteringWithFullEqualityIsBuiltDirectly()
+    {
+        ByteBuffer value0 = ByteBufferUtil.bytes(1);
+        ByteBuffer value1 = ByteBufferUtil.bytes(2);
+        ByteBuffer value2 = ByteBufferUtil.bytes(3);
+        QueryOptions options = QueryOptions.forInternalCalls(asList(value0, value1, value2));
+
+        for (Sort sort0 : Sort.values())
+        for (Sort sort1 : Sort.values())
+        for (Sort sort2 : Sort.values())
+        {
+            TableMetadata tableMetadata = newTableMetadata(sort0, sort1, sort2);
+            ClusteringColumnRestrictions restrictionSet = restrictions(tableMetadata,
+                    newSingleTermEq(tableMetadata, 0, 0),
+                    newSingleTermEq(tableMetadata, 1, 1),
+                    newSingleTermEq(tableMetadata, 2, 2));
+
+            // the direct path has to be the one answering a complete single value equality key
+            NavigableSet<Clustering<?>> clusterings = restrictionSet.singleValueClustering(options);
+            assertNotNull(clusterings);
+            assertEquals(1, clusterings.size());
+
+            Clustering<?> clustering = clusterings.first();
+            assertEquals(3, clustering.size());
+            assertEquals(value0, clustering.get(0));
+            assertEquals(value1, clustering.get(1));
+            assertEquals(value2, clustering.get(2));
+
+            assertClusteringsMatchGeneric(restrictionSet, options);
+        }
+    }
+
+    /**
+     * The direct single value path must not diverge from the generic cartesian product path, and must not answer
+     * restrictions it does not cover.
+     */
+    @Test
+    public void testValuesAsClusteringMatchesGenericPath()
+    {
+        ByteBuffer value0 = ByteBufferUtil.bytes(1);
+        ByteBuffer value1 = ByteBufferUtil.bytes(2);
+        ByteBuffer value2 = ByteBufferUtil.bytes(3);
+        QueryOptions options = QueryOptions.forInternalCalls(asList(value0, value1));
+
+        for (Sort sort0 : Sort.values())
+        for (Sort sort1 : Sort.values())
+        {
+            TableMetadata tableMetadata = newTableMetadata(sort0, sort1);
+
+            ClusteringColumnRestrictions fullEquality = restrictions(tableMetadata,
+                    newSingleTermEq(tableMetadata, 0, 0),
+                    newSingleTermEq(tableMetadata, 1, 1));
+            assertNotNull(fullEquality.singleValueClustering(options));
+            assertClusteringsMatchGeneric(fullEquality, options);
+
+            // an empty IN selects nothing on both paths
+            ClusteringColumnRestrictions emptyIn = restrictions(tableMetadata,
+                    newSingleRestriction(tableMetadata, 0, Operator.IN));
+            assertNull(emptyIn.singleValueClustering(options));
+            assertClusteringsMatchGeneric(emptyIn, options);
+
+            // a multi column equality covering the rest of the key is a complete key as well, but it has to be
+            // rejected before any term is bound
+            TableMetadata threeColumns = newTableMetadata(sort0, sort1, sort0);
+            ClusteringColumnRestrictions multiColumnSuffix = restrictions(threeColumns,
+                    newSingleTermEq(threeColumns, 0, 0),
+                    newMultiEq(threeColumns, 1, value1, value2));
+            assertNull(multiColumnSuffix.singleValueClustering(options));
+            assertClusteringsMatchGeneric(multiColumnSuffix, options);
+
+            // an IN, a partial key and the multi column shapes stay on the general path (a slice is not a shape
+            // this method accepts: the general path asserts on it, and slices are built by slices())
+            for (ClusteringColumnRestrictions generic : asList(
+                    restrictions(tableMetadata,
+                                 newSingleTermEq(tableMetadata, 0, 0),
+                                 newSingleRestriction(tableMetadata, 1, Operator.IN, value1, value2)),
+                    restrictions(tableMetadata,
+                                 newSingleRestriction(tableMetadata, 0, Operator.IN, value0),
+                                 newSingleTermEq(tableMetadata, 1, 1)),
+                    restrictions(tableMetadata,
+                                 newSingleTermEq(tableMetadata, 0, 0)),
+                    restrictions(tableMetadata, newMultiEq(tableMetadata, 0, value0, value1)),
+                    restrictions(tableMetadata, newMultiIN(tableMetadata, 0,
+                                                           asList(value0, value1), asList(value1, value2)))))
+            {
+                assertNull(generic.singleValueClustering(options));
+                assertClusteringsMatchGeneric(generic, options);
+            }
+        }
+    }
+
+    /**
+     * A table without clustering columns, and a single clustering column, are complete keys of the direct path as
+     * well, and must agree with the general path.
+     */
+    @Test
+    public void testValuesAsClusteringMatchesGenericPathOnShortKeys()
+    {
+        ByteBuffer value0 = ByteBufferUtil.bytes(1);
+        QueryOptions options = QueryOptions.forInternalCalls(asList(value0));
+
+        TableMetadata noClusteringColumns = newTableMetadata();
+        assertClusteringsMatchGeneric(restrictions(noClusteringColumns), options);
+
+        for (Sort sort : Sort.values())
+        {
+            TableMetadata oneClusteringColumn = newTableMetadata(sort);
+            ClusteringColumnRestrictions oneColumn = restrictions(oneClusteringColumn,
+                    newSingleTermEq(oneClusteringColumn, 0, 0));
+            assertNotNull(oneColumn.singleValueClustering(options));
+            assertClusteringsMatchGeneric(oneColumn, options);
+        }
+    }
+
+    private static void assertClusteringsMatchGeneric(ClusteringColumnRestrictions restrictionSet, QueryOptions options)
+    {
+        ClientState state = ClientState.forInternalCalls();
+        NavigableSet<Clustering<?>> expected = restrictionSet.valuesAsClusteringGeneric(options, state);
+        NavigableSet<Clustering<?>> actual = restrictionSet.valuesAsClustering(options, state);
+
+        assertEquals(expected.size(), actual.size());
+        Iterator<Clustering<?>> expectedIt = expected.iterator();
+        Iterator<Clustering<?>> actualIt = actual.iterator();
+        while (expectedIt.hasNext())
+        {
+            Clustering<?> expectedClustering = expectedIt.next();
+            Clustering<?> actualClustering = actualIt.next();
+            assertEquals(expectedClustering.size(), actualClustering.size());
+            for (int i = 0; i < expectedClustering.size(); i++)
+                assertEquals(expectedClustering.get(i), actualClustering.get(i));
+        }
     }
 
     private static void assertSameSlices(Slices expected, Slices actual)
@@ -1743,6 +1888,22 @@ public class ClusteringColumnRestrictionsTest
     {
         ColumnMetadata column = getClusteringColumnDefinition(tableMetadata, index);
         return new SimpleRestriction(ColumnsExpression.singleColumn(column, tableMetadata), operator, toTerms(values), false);
+    }
+
+    /**
+     * Creates the restriction a {@code clustering_0 = ?} predicate prepares into, i.e. an equality whose terms hold
+     * the bind marker of the given index.
+     *
+     * @param tableMetadata the column family meta data
+     * @param index the clustering column index
+     * @param bindIndex the index of the bind marker in the query options
+     * @return a new <code>SimpleRestriction</code> instance for the specified clustering column
+     */
+    private static Restriction newSingleTermEq(TableMetadata tableMetadata, int index, int bindIndex)
+    {
+        ColumnMetadata column = getClusteringColumnDefinition(tableMetadata, index);
+        Terms terms = Terms.of(new Marker.Raw(bindIndex).prepare(tableMetadata.keyspace, column));
+        return new SimpleRestriction(ColumnsExpression.singleColumn(column, tableMetadata), Operator.EQ, terms, false);
     }
 
     /**
