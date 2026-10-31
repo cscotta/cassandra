@@ -331,6 +331,12 @@ public class MmappedRegions extends SharedCloseableImpl
         private long[] offsets;
 
         /**
+         * An array of region holders, synchronized with offsets. Regions are immutable once mapped, so a
+         * lookup can return the same holder instead of wrapping the offset and buffer every time.
+         */
+        private Region[] regions;
+
+        /**
          * The maximum file length we have mapped
          */
         private long length;
@@ -345,6 +351,7 @@ public class MmappedRegions extends SharedCloseableImpl
             this.channel = channel.sharedCopy();
             this.buffers = new ByteBuffer[REGION_ALLOC_SIZE];
             this.offsets = new long[REGION_ALLOC_SIZE];
+            this.regions = new Region[REGION_ALLOC_SIZE];
             this.length = 0;
             this.last = -1;
         }
@@ -354,6 +361,7 @@ public class MmappedRegions extends SharedCloseableImpl
             this.channel = original.channel;
             this.buffers = original.buffers;
             this.offsets = original.offsets;
+            this.regions = original.regions;
             this.length = original.length;
             this.last = original.last;
         }
@@ -377,7 +385,7 @@ public class MmappedRegions extends SharedCloseableImpl
             if (idx < 0)
                 idx = -(idx + 2); // round down to entry at insertion point
 
-            return new Region(offsets[idx], buffers[idx]);
+            return regions[idx];
         }
 
         private long getPosition()
@@ -395,8 +403,10 @@ public class MmappedRegions extends SharedCloseableImpl
             {
                 offsets = Arrays.copyOf(offsets, offsets.length + REGION_ALLOC_SIZE);
                 buffers = Arrays.copyOf(buffers, buffers.length + REGION_ALLOC_SIZE);
+                regions = Arrays.copyOf(regions, regions.length + REGION_ALLOC_SIZE);
             }
 
+            regions[last] = new Region(pos, buffer);
             offsets[last] = pos;
             buffers[last] = buffer;
         }

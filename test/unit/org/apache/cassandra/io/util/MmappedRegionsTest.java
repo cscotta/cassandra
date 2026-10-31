@@ -192,6 +192,36 @@ public class MmappedRegionsTest
     }
 
     @Test
+    public void testFloorReturnsTheSameHolderForTheSameSegment() throws Exception
+    {
+        ByteBuffer buffer = allocateBuffer(2048);
+        try (ChannelProxy channel = new ChannelProxy(writeFile("testFloorReturnsTheSameHolder", buffer));
+             MmappedRegions regions = MmappedRegions.empty(channel))
+        {
+            regions.extend(1024, 1024);
+            MmappedRegions.Region first = regions.floor(0);
+            assertThat(regions.floor(1023)).isSameAs(first);
+
+            // extending appends a holder and leaves the existing ones in place
+            regions.extend(2048, 1024);
+            assertThat(regions.floor(512)).isSameAs(first);
+            MmappedRegions.Region second = regions.floor(1024);
+            assertThat(second).isNotSameAs(first);
+            assertEquals(1024, second.offset());
+            assertEquals(2048, second.end());
+            assertThat(regions.floor(2047)).isSameAs(second);
+
+            // the shared holder still exposes the mapped bytes, and a caller's view cannot move it
+            ByteBuffer copy = second.buffer();
+            assertEquals(1024, copy.capacity());
+            assertEquals(buffer.get(1024), copy.get(0));
+            copy.position(16);
+            assertEquals(0, second.buffer().position());
+            assertEquals(0, second.sharedBuffer().position());
+        }
+    }
+
+    @Test
     public void testSmallSegmentSize() throws Exception
     {
         MmappedRegions.MAX_SEGMENT_SIZE = 1024;

@@ -21,6 +21,7 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.nio.ByteBuffer;
+import java.util.concurrent.atomic.AtomicReference;
 
 import com.google.common.annotations.VisibleForTesting;
 
@@ -77,6 +78,15 @@ public class PartitionIndex implements SharedCloseable
     private final DecoratedKey first;
     private final DecoratedKey last;
     private final long root;
+
+    /**
+     * One idle {@link Reader}, kept so that a lookup does not have to re-create the walker and the rebufferer
+     * of an mmapped index file. A reader is used by one thread at a time and only handed back once it is no
+     * longer in use, so a single spare is enough to cover the very high proportion of lookups that find the
+     * index idle.
+     */
+    private final AtomicReference<Reader> spareReader = new AtomicReference<>();
+    private volatile boolean closed;
 
     public static final long NOT_FOUND = Long.MIN_VALUE;
     public static final int FOOTER_LENGTH = 3 * 8;
@@ -271,18 +281,41 @@ public class PartitionIndex implements SharedCloseable
     @Override
     public void close()
     {
+        releaseSpareReader();
         fh.close();
     }
 
     @Override
     public Throwable close(Throwable accumulate)
     {
+        releaseSpareReader();
         return fh.close(accumulate);
+    }
+
+    private void releaseSpareReader()
+    {
+        closed = true;
+        Reader reader = spareReader.getAndSet(null);
+        if (reader != null)
+            reader.releaseResources();
     }
 
     public Reader openReader()
     {
-        return new Reader(this);
+        Reader reader = spareReader.getAndSet(null);
+        return reader != null ? reader : new Reader(this);
+    }
+
+    private void recycle(Reader reader)
+    {
+        if (closed || !spareReader.compareAndSet(null, reader))
+            reader.releaseResources();
+    }
+
+    @VisibleForTesting
+    boolean hasSpareReader()
+    {
+        return spareReader.get() != null;
     }
 
     protected IndexPosIterator allKeysIterator()
@@ -327,9 +360,28 @@ public class PartitionIndex implements SharedCloseable
      */
     public static class Reader extends Walker<Reader>
     {
+        private final PartitionIndex index;
+
         protected Reader(PartitionIndex index)
         {
             super(index.instantiateRebufferer(), index.root);
+            this.index = index;
+        }
+
+        /**
+         * Hands this reader back to its index so that the next lookup can reuse the walker instead of
+         * allocating a new one; the buffer it holds is released either way.
+         */
+        @Override
+        public void close()
+        {
+            releaseBuffer();
+            index.recycle(this);
+        }
+
+        void releaseResources()
+        {
+            super.close();
         }
 
         /**

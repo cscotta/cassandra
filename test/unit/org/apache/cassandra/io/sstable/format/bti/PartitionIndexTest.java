@@ -30,6 +30,9 @@ import java.util.Optional;
 import java.util.Random;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
@@ -206,6 +209,102 @@ public class PartitionIndexTest
                 DecoratedKey key = generateRandomKey();
                 assertEquals(eq(keys, key), eq(keys, key, reader.exactCandidate(key)));
             }
+        }
+    }
+
+    /**
+     * A reader that is closed is handed back to the index and reused by the next lookup, so it has to answer
+     * exactly as a freshly created one would, whatever state the previous walk left it in.
+     */
+    @Test
+    public void testReaderIsReusedAndResetsItsState() throws IOException
+    {
+        Pair<List<DecoratedKey>, PartitionIndex> data = generateRandomIndex(COUNT);
+        List<DecoratedKey> keys = data.left;
+        PartitionIndex index = data.right;
+        try
+        {
+            PartitionIndex.Reader previous = null;
+            int step = Math.max(1, keys.size() / 50);
+            for (int i = 0; i < keys.size(); i += step)
+            {
+                try (PartitionIndex.Reader reader = index.openReader())
+                {
+                    assertEquals(i, reader.exactCandidate(keys.get(i)));
+                    DecoratedKey missing = generateRandomKey();
+                    assertEquals(eq(keys, missing), eq(keys, missing, reader.exactCandidate(missing)));
+                    // the last key of the walk is not the one the next lookup starts from
+                    assertEquals(i, reader.exactCandidate(keys.get(i)));
+                    if (previous != null)
+                        assertSame("an idle reader should be reused", previous, reader);
+                    previous = reader;
+                }
+            }
+
+            // a lookup that ran to the end of the trie leaves a different buffer behind, but that is always
+            // reset: the first and the last key still resolve the same way, in either order
+            DecoratedKey first = keys.get(0);
+            DecoratedKey last = keys.get(keys.size() - 1);
+            for (int repeat = 0; repeat < 3; repeat++)
+            {
+                try (PartitionIndex.Reader reader = index.openReader())
+                {
+                    assertEquals(keys.size() - 1, reader.exactCandidate(last));
+                }
+                try (PartitionIndex.Reader reader = index.openReader())
+                {
+                    assertEquals(0, reader.exactCandidate(first));
+                }
+            }
+
+            // an idle reader is parked on the index
+            assertTrue(index.hasSpareReader());
+        }
+        finally
+        {
+            index.close();
+        }
+        // ... but closing the index drops it rather than leaving it pointing at a closed index
+        assertFalse(index.hasSpareReader());
+    }
+
+    /**
+     * The spare reader is shared by every thread reading this index; a reader handed from one thread to
+     * another must answer with its own walk state only.
+     */
+    @Test
+    public void testReaderReuseAcrossThreads() throws Exception
+    {
+        Pair<List<DecoratedKey>, PartitionIndex> data = generateRandomIndex(COUNT / 10);
+        List<DecoratedKey> keys = data.left;
+        int lookups = 2000;
+        ExecutorService executor = Executors.newFixedThreadPool(4);
+        try (PartitionIndex index = data.right)
+        {
+            List<Future<Integer>> results = new ArrayList<>();
+            for (int t = 0; t < 4; t++)
+            {
+                final int thread = t;
+                results.add(executor.submit(() -> {
+                    int mismatches = 0;
+                    for (int n = 0; n < lookups; n++)
+                    {
+                        int i = (thread * 7919 + n * 31) % keys.size();
+                        try (PartitionIndex.Reader reader = index.openReader())
+                        {
+                            if (reader.exactCandidate(keys.get(i)) != i)
+                                mismatches++;
+                        }
+                    }
+                    return mismatches;
+                }));
+            }
+            for (Future<Integer> result : results)
+                assertEquals(0, (int) result.get());
+        }
+        finally
+        {
+            executor.shutdownNow();
         }
     }
 
