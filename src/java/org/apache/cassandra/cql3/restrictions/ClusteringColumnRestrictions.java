@@ -131,6 +131,10 @@ final class ClusteringColumnRestrictions extends RestrictionSetWrapper
     @Nullable
     NavigableSet<Clustering<?>> singleValueClustering(QueryOptions options)
     {
+        // walked in column order from the set's cached array: this runs for every request, and the map's iterator
+        // would be allocated twice per call
+        SingleRestriction[] allRestrictions = restrictions.restrictionArray();
+
         // one map entry per clustering column: covers full keys only, any IN or slice shape has to go through the
         // builder (an IN also has to be guarded, and a slice does not select clusterings at all)
         if (restrictions.size() != comparator.size() || restrictions.hasIN())
@@ -138,7 +142,7 @@ final class ClusteringColumnRestrictions extends RestrictionSetWrapper
 
         // check every shape before binding anything: a term is bound when bindSingleColumnValue is called, and an
         // impure term (a UDF) must not be evaluated for a value the fallback discards
-        for (SingleRestriction restriction : restrictions)
+        for (SingleRestriction restriction : allRestrictions)
         {
             if (!restriction.isEQ() || restriction.isMultiColumn() || !restriction.isColumnLevel())
                 return null;
@@ -146,7 +150,7 @@ final class ClusteringColumnRestrictions extends RestrictionSetWrapper
 
         ByteBuffer[] values = new ByteBuffer[comparator.size()];
         int count = 0;
-        for (SingleRestriction restriction : restrictions)
+        for (SingleRestriction restriction : allRestrictions)
         {
             ByteBuffer value = restriction.bindSingleColumnValue(options);
             if (value == null)

@@ -70,6 +70,13 @@ final class RestrictionSet implements Restrictions, Iterable<SingleRestriction>
      */
     private final NavigableMap<ColumnMetadata, SingleRestriction> restrictions;
 
+    /**
+     * The values of {@link #restrictions} in column order. The set is immutable, so the array is shared, which lets
+     * request paths walk the restrictions without allocating an iterator. A multi column restriction appears once per
+     * column it covers; {@link #iterator()} returns the de-duplicated view.
+     */
+    private final SingleRestriction[] allRestrictions;
+
     private final SingleRestriction lastRestriction;
 
 
@@ -105,6 +112,7 @@ final class RestrictionSet implements Restrictions, Iterable<SingleRestriction>
         this.restrictions = restrictions;
         // Map.lastEntry allocates an object, so we cache the value to avoid it, restrictions is immutable
         this.lastRestriction = restrictions.isEmpty() ? null : restrictions.lastEntry().getValue();
+        this.allRestrictions = restrictions.values().toArray(new SingleRestriction[0]);
         this.hasMultiColumnRestrictions = hasMultiColumnRestrictions;
         this.hasIn = hasIn;
         this.hasSlice = hasSlice;
@@ -167,6 +175,27 @@ final class RestrictionSet implements Restrictions, Iterable<SingleRestriction>
     public int size()
     {
         return restrictions.size();
+    }
+
+    /**
+     * The restrictions of this set in column order, as a shared array that must not be modified.
+     */
+    SingleRestriction[] restrictionArray()
+    {
+        return allRestrictions;
+    }
+
+    /**
+     * Whether every restriction of this set is a single column {@code =} or {@code IN} restriction.
+     */
+    boolean hasOnlyEqualityRestrictions()
+    {
+        for (SingleRestriction restriction : allRestrictions)
+        {
+            if (!restriction.isColumnLevel() || !(restriction.isEQ() || restriction.isIN()))
+                return false;
+        }
+        return true;
     }
 
     /**
