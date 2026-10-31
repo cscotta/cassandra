@@ -18,11 +18,13 @@
 package org.apache.cassandra.db.filter;
 
 import java.io.IOException;
+import java.util.List;
 import java.util.NavigableSet;
 import java.util.Objects;
 
 import org.apache.cassandra.cql3.Operator;
 import org.apache.cassandra.db.Clustering;
+import org.apache.cassandra.db.ClusteringBound;
 import org.apache.cassandra.db.ClusteringComparator;
 import org.apache.cassandra.db.Slice;
 import org.apache.cassandra.db.Slices;
@@ -175,12 +177,43 @@ public class ClusteringIndexNamesFilter extends AbstractClusteringIndexFilter
 
     public boolean intersects(ClusteringComparator comparator, Slice slice)
     {
+        // A BTreeSet is also a list of its members in clustering order, which is the order the comparator argument
+        // sorts by, so the first member the slice's start bound admits decides the answer: {@link Slice#includes}
+        // admits a suffix of a set ordered that way. One search then finds it, where walking the set allocates a
+        // btree search iterator, and this is asked once per sstable of every read.
+        if (clusterings instanceof List && clusterings.comparator() == comparator)
+        {
+            Clustering<?> first = firstNotBefore((List<Clustering<?>>) clusterings, comparator, slice.start());
+            return first != null && slice.includes(comparator, first);
+        }
+
+        // Any other set, or one ordered differently, may hold a member {@link Slice#includes} admits before the first
+        // one of them that this order reaches, so every member has to be tested.
         for (Clustering<?> clustering : clusterings)
         {
             if (slice.includes(comparator, clustering))
                 return true;
         }
         return false;
+    }
+
+    /**
+     * The first member of {@code ordered} that is not before {@code start}, i.e. the first one {@link Slice#includes}
+     * can admit, or {@code null} if there is none.
+     */
+    private static Clustering<?> firstNotBefore(List<Clustering<?>> ordered, ClusteringComparator comparator, ClusteringBound<?> start)
+    {
+        int lo = 0;
+        int hi = ordered.size() - 1;
+        while (lo <= hi)
+        {
+            int mid = (lo + hi) >>> 1;
+            if (comparator.compare(start, ordered.get(mid)) <= 0)
+                hi = mid - 1;
+            else
+                lo = mid + 1;
+        }
+        return lo < ordered.size() ? ordered.get(lo) : null;
     }
 
     @Override
