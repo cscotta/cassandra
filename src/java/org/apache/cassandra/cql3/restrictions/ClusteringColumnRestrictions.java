@@ -17,6 +17,7 @@
  */
 package org.apache.cassandra.cql3.restrictions;
 
+import java.nio.ByteBuffer;
 import java.util.Collections;
 import java.util.List;
 import java.util.NavigableSet;
@@ -44,6 +45,7 @@ import org.apache.cassandra.index.IndexRegistry;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.ClientState;
+import org.apache.cassandra.utils.btree.BTreeSet;
 
 import static org.apache.cassandra.cql3.statements.RequestValidations.checkFalse;
 import static org.apache.cassandra.cql3.statements.RequestValidations.invalidRequest;
@@ -109,6 +111,61 @@ final class ClusteringColumnRestrictions extends RestrictionSetWrapper
     }
 
     public NavigableSet<Clustering<?>> valuesAsClustering(QueryOptions options, ClientState state) throws InvalidRequestException
+    {
+        NavigableSet<Clustering<?>> clustering = singleValueClustering(options);
+        return clustering != null ? clustering : valuesAsClusteringGeneric(options, state);
+    }
+
+    /**
+     * Builds the single clustering selected when every clustering column is restricted by a plain equality with one
+     * bindable value, which is the shape used by a full primary key lookup, e.g. {@code c1 = ? AND c2 = ?}.
+     * <p>
+     * The general path builds that clustering through a cartesian product of the restrictions' clustering elements,
+     * which allocates, per restricted column, a {@link ClusteringElements} with two {@code ImmutableList}s plus a
+     * singleton list, and a builder copy per column to combine them. As the product has exactly one element, the
+     * values can be bound and the clustering built directly from them.
+     *
+     * @return the single clustering, or {@code null} when a restriction has another shape and the general path is
+     *         needed
+     */
+    @Nullable
+    NavigableSet<Clustering<?>> singleValueClustering(QueryOptions options)
+    {
+        // one map entry per clustering column: covers full keys only, any IN or slice shape has to go through the
+        // builder (an IN also has to be guarded, and a slice does not select clusterings at all)
+        if (restrictions.size() != comparator.size() || restrictions.hasIN())
+            return null;
+
+        // check every shape before binding anything: a term is bound when bindSingleColumnValue is called, and an
+        // impure term (a UDF) must not be evaluated for a value the fallback discards
+        for (SingleRestriction restriction : restrictions)
+        {
+            if (!restriction.isEQ() || restriction.isMultiColumn() || !restriction.isColumnLevel())
+                return null;
+        }
+
+        ByteBuffer[] values = new ByteBuffer[comparator.size()];
+        int count = 0;
+        for (SingleRestriction restriction : restrictions)
+        {
+            ByteBuffer value = restriction.bindSingleColumnValue(options);
+            if (value == null)
+                return null;
+
+            // key by column position rather than iteration order, and reject anything that does not place exactly
+            // one value per clustering column
+            int position = restriction.firstColumn().position();
+            if (position < 0 || position >= values.length || values[position] != null)
+                return null;
+            values[position] = value;
+            count++;
+        }
+        if (count != values.length)
+            return null;
+        return BTreeSet.of(comparator, Clustering.make(values));
+    }
+
+    NavigableSet<Clustering<?>> valuesAsClusteringGeneric(QueryOptions options, ClientState state) throws InvalidRequestException
     {
         // fast path, a typical case when a single full restriction is used
         // for example, when we specify a single clustering key (a single row) to insert/update
