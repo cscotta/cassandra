@@ -55,6 +55,7 @@ import static org.apache.cassandra.metrics.DecayingEstimatedHistogramReservoir.L
 import static org.apache.cassandra.utils.Clock.Global.nanoTime;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertTrue;
 import static org.quicktheories.QuickTheory.qt;
 import static org.quicktheories.generators.SourceDSL.booleans;
@@ -719,6 +720,120 @@ public class DecayingEstimatedHistogramReservoirTest
             boolean success = executors.awaitTermination(maxTestDurationMillis * 2, MILLISECONDS);
             Assert.assertFalse("p50 too high or p99 too low for too long", failed.get());
             Assert.assertTrue("Timeout exceeded the limit", success);
+        }
+
+        private static long decayWeight(long secondsSinceLandmark)
+        {
+            return Math.round(Math.exp(secondsSinceLandmark / DecayingEstimatedHistogramReservoir.MEAN_LIFETIME_IN_S));
+        }
+
+        private static long decayingBucketValue(DecayingEstimatedHistogramReservoir histogram, long value)
+        {
+            int bucket = DecayingEstimatedHistogramReservoir.findIndex(DecayingEstimatedHistogramReservoir.DEFAULT_WITHOUT_ZERO_BUCKET_OFFSETS, value);
+            return histogram.stripedBucketValue(histogram.stripedIndex(bucket, 0), true);
+        }
+
+        private static DecayingEstimatedHistogramReservoir newReservoir(MonotonicClock clock)
+        {
+            return new DecayingEstimatedHistogramReservoir(DecayingEstimatedHistogramReservoir.DEFAULT_ZERO_CONSIDERATION,
+                                                           DecayingEstimatedHistogramReservoir.DEFAULT_BUCKET_COUNT,
+                                                           1, clock);
+        }
+
+        /**
+         * The weight a value is given is a function of the whole second elapsed since the decay landmark, so values
+         * recorded within the same second -- including in the last nanosecond of it -- are weighted equally, and the
+         * first value of the next second gets the next second's weight. This is the contract the memoised weight has
+         * to preserve. The second is chosen where the two weights differ (100 and 102), so a memo that never
+         * invalidates would record 300 in the bucket instead of the expected 302.
+         */
+        @Test
+        public void testDecayWeightIsPerSecond()
+        {
+            TestClock clock = new TestClock();
+            DecayingEstimatedHistogramReservoir histogram = newReservoir(clock);
+            long value = 100;
+            long seconds = 399;
+            assertNotEquals(decayWeight(seconds), decayWeight(seconds + 1));
+
+            clock.addSeconds(seconds);
+            histogram.update(value);
+            clock.addNanos(TimeUnit.SECONDS.toNanos(1) - 1);
+            histogram.update(value);
+            assertEquals(2 * decayWeight(seconds), decayingBucketValue(histogram, value));
+
+            clock.addNanos(1);
+            histogram.update(value);
+            assertEquals(2 * decayWeight(seconds) + decayWeight(seconds + 1), decayingBucketValue(histogram, value));
+        }
+
+        /**
+         * A memoised weight must only be applied to the second it was computed for: values recorded over several
+         * seconds, and after a jump over whole seconds, each get the weight of their own second. Every second in the
+         * range has a different weight, so a stale weight cannot cancel out.
+         */
+        @Test
+        public void testDecayWeightIsNotReusedAcrossSeconds()
+        {
+            TestClock clock = new TestClock();
+            DecayingEstimatedHistogramReservoir histogram = newReservoir(clock);
+            long value = 50;
+            long expected = 0;
+            long previousWeight = -1;
+
+            clock.addSeconds(395);
+            for (long second = 396; second <= 406; second++)
+            {
+                clock.addSeconds(1);
+                assertNotEquals(second + " has a weight that was already recorded", previousWeight, decayWeight(second));
+                previousWeight = decayWeight(second);
+                for (int i = 0; i < 3; i++)
+                {
+                    histogram.update(value);
+                    expected += decayWeight(second);
+                }
+            }
+
+            // a jump of several whole seconds must not keep using the weight of the second before it
+            clock.addSeconds(7);
+            histogram.update(value);
+            expected += decayWeight(413);
+
+            assertEquals(expected, decayingBucketValue(histogram, value));
+        }
+
+        /**
+         * A value recorded in the second a landmark rescaled the buckets is weighted by that landmark's first second
+         * (index 0, weight 1), and recordings that follow must still not reuse a stale weight. Five values recorded
+         * before the rescale, each weighted 4, are rescaled by the weight of the second elapsed at the old landmark
+         * (16), which keeps the division away from the half-up rounding edge of Math.round.
+         */
+        @Test
+        public void testDecayWeightAfterRescale()
+        {
+            TestClock clock = new TestClock();
+            DecayingEstimatedHistogramReservoir histogram =
+                new DecayingEstimatedHistogramReservoir(DecayingEstimatedHistogramReservoir.DEFAULT_ZERO_CONSIDERATION,
+                                                        DecayingEstimatedHistogramReservoir.DEFAULT_BUCKET_COUNT,
+                                                        1, clock, TimeUnit.MINUTES.toNanos(2));
+            long value = 50;
+
+            clock.addSeconds(120);
+            for (int i = 0; i < 5; i++)
+                histogram.update(value);
+            long beforeRescale = decayingBucketValue(histogram, value);
+            assertEquals(5 * decayWeight(120), beforeRescale);
+
+            // the buckets are now more than two minutes old, so this update rescales them by the weight elapsed at the
+            // old landmark and then lands in the first second of the new one
+            clock.addSeconds(121);
+            histogram.update(value);
+            long rescaled = Math.round((double) beforeRescale / decayWeight(241));
+            assertEquals(rescaled + decayWeight(0), decayingBucketValue(histogram, value));
+
+            clock.addSeconds(1);
+            histogram.update(value);
+            assertEquals(rescaled + decayWeight(0) + decayWeight(1), decayingBucketValue(histogram, value));
         }
 
         private void assertEstimatedQuantile(long expectedValue, double actualValue)
