@@ -92,6 +92,23 @@ public class Walker<CONCRETE extends Walker<CONCRETE>> implements AutoCloseable
         source.closeReader();
     }
 
+    /**
+     * Releases the buffer held for the current node while keeping the walker, and the rebufferer it was
+     * created with, usable for a subsequent {@link #follow}. Used by subclass pools that reuse a walker
+     * across lookups instead of recreating it, which would also recreate the rebufferer.
+     *
+     * The empty state is installed before the release so a failing holder cannot leave a stale one behind.
+     * {@link Rebufferer#EMPTY}'s buffer is shared and never written: {@link #go} only reads its limit before
+     * rebuffering, and every walk starts by going to the root.
+     */
+    protected final void releaseBuffer()
+    {
+        BufferHolder holder = bh;
+        bh = Rebufferer.EMPTY;
+        buf = Rebufferer.EMPTY.buffer();
+        holder.release();
+    }
+
     protected final void go(long position)
     {
         long curOffset = position - bh.offset();
