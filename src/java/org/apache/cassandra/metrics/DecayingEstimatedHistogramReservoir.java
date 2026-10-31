@@ -463,6 +463,15 @@ public class DecayingEstimatedHistogramReservoir implements CassandraReservoir
         private final long decayLandmark;
         private final AtomicLongArray decayBuckets;
 
+        /**
+         * The weight of the last second a value was recorded in, with the interval of elapsed time it applies to.
+         * The weight is a function of the whole second elapsed since the landmark only, while values are recorded
+         * orders of magnitude more often than seconds pass, so keeping the last one removes a division, an
+         * {@link Math#exp} and a round from the recording path. Threads racing on a miss each compute the same
+         * weight for the same second, so the outcome does not depend on who stores it last.
+         */
+        private volatile DecayWeight decayWeight;
+
         public DecayingBuckets(long decayLandmark)
         {
             this.decayLandmark = decayLandmark;
@@ -476,7 +485,43 @@ public class DecayingEstimatedHistogramReservoir implements CassandraReservoir
 
         private long forwardDecayWeight(long now)
         {
-            return Math.round(Math.exp(TimeUnit.NANOSECONDS.toSeconds(now - decayLandmark) / MEAN_LIFETIME_IN_S));
+            long elapsedNanos = now - decayLandmark;
+            DecayWeight weight = decayWeight;
+            if (weight != null && weight.contains(elapsedNanos))
+                return weight.weight;
+
+            long seconds = TimeUnit.NANOSECONDS.toSeconds(elapsedNanos);
+            weight = new DecayWeight(seconds, Math.round(Math.exp(seconds / MEAN_LIFETIME_IN_S)));
+            // A time before the landmark is only reachable when a rescale installed a newer landmark while this update
+            // was in flight, and the whole second such a time belongs to is not the half-open interval the memo models
+            // (toSeconds truncates towards zero), so it is computed for every value instead.
+            if (elapsedNanos >= 0)
+                decayWeight = weight;
+            return weight.weight;
+        }
+    }
+
+    /**
+     * The weight given to every value recorded in one whole second since a decay landmark.
+     */
+    private static final class DecayWeight
+    {
+        private static final long NANOS_PER_SECOND = TimeUnit.SECONDS.toNanos(1);
+
+        private final long fromNanos;
+        private final long toNanos;
+        private final long weight;
+
+        private DecayWeight(long secondsSinceLandmark, long weight)
+        {
+            this.fromNanos = secondsSinceLandmark * NANOS_PER_SECOND;
+            this.toNanos = this.fromNanos + NANOS_PER_SECOND;
+            this.weight = weight;
+        }
+
+        private boolean contains(long elapsedNanos)
+        {
+            return elapsedNanos >= fromNanos && elapsedNanos < toNanos;
         }
     }
 
