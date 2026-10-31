@@ -302,13 +302,32 @@ public class PartitionIndex implements SharedCloseable
 
     public Reader openReader()
     {
+        assert !closed : "attempted to read a closed partition index";
         Reader reader = spareReader.getAndSet(null);
-        return reader != null ? reader : new Reader(this);
+        if (reader == null)
+            return new Reader(this);
+
+        reader.taken();
+        return reader;
     }
 
     private void recycle(Reader reader)
     {
-        if (closed || !spareReader.compareAndSet(null, reader))
+        if (closed)
+        {
+            reader.releaseResources();
+            return;
+        }
+
+        if (!spareReader.compareAndSet(null, reader))
+        {
+            reader.releaseResources();
+            return;
+        }
+
+        // The index may have been closed while we were parking: that close drained the slot before we
+        // won the race, so it could not release this reader. Take it back and release it ourselves.
+        if (closed && spareReader.compareAndSet(reader, null))
             reader.releaseResources();
     }
 
@@ -362,6 +381,11 @@ public class PartitionIndex implements SharedCloseable
     {
         private final PartitionIndex index;
 
+        // Set while this reader is idle in the index, cleared when it is taken again. It stops a second
+        // close, which would otherwise release the rebufferer of a parked reader or re-park its slot.
+        // close() is still only expected once per borrow, as for any AutoCloseable.
+        private volatile boolean released;
+
         protected Reader(PartitionIndex index)
         {
             super(index.instantiateRebufferer(), index.root);
@@ -375,8 +399,17 @@ public class PartitionIndex implements SharedCloseable
         @Override
         public void close()
         {
+            if (released)
+                return;
+
+            released = true;
             releaseBuffer();
             index.recycle(this);
+        }
+
+        private void taken()
+        {
+            released = false;
         }
 
         void releaseResources()

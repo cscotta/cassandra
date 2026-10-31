@@ -75,6 +75,7 @@ import org.apache.cassandra.utils.bytecomparable.ByteComparable;
 
 import static org.apache.cassandra.config.CassandraRelevantProperties.BTI_PARTITION_INDEX_PRELOAD_SIZE;
 import static org.assertj.core.api.AssertionsForClassTypes.assertThatThrownBy;
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertSame;
@@ -266,6 +267,81 @@ public class PartitionIndexTest
         }
         // ... but closing the index drops it rather than leaving it pointing at a closed index
         assertFalse(index.hasSpareReader());
+    }
+
+    /**
+     * Reuse must serve every lookup entry point, not just exactCandidate: the branch-remembering walks
+     * (ceiling/floor/prefixAndNeighbours) leave different state behind and reset it on entry.
+     */
+    @Test
+    public void testReusedReaderServesEveryLookup() throws IOException
+    {
+        Pair<List<DecoratedKey>, PartitionIndex> data = generateSequentialIndex(COUNT / 10);
+        List<DecoratedKey> keys = data.left;
+        try (PartitionIndex index = data.right)
+        {
+            int step = Math.max(1, keys.size() / 40);
+            for (int i = 0; i < keys.size(); i += step)
+            {
+                DecoratedKey key = keys.get(i);
+                Long[] reused = new Long[3];
+                Long[] fresh = new Long[3];
+                try (PartitionIndex.Reader reader = index.openReader())
+                {
+                    reused[0] = reader.ceiling(key, (pos, assumeNoMatch, compareKey) -> pos);
+                    reused[1] = reader.floor(key, (pos, assumeNoMatch, compareKey) -> pos);
+                    reused[2] = reader.exactCandidate(key);
+                }
+                try (PartitionIndex.Reader reader = index.openReader())
+                {
+                    fresh[0] = reader.ceiling(key, (pos, assumeNoMatch, compareKey) -> pos);
+                    fresh[1] = reader.floor(key, (pos, assumeNoMatch, compareKey) -> pos);
+                    fresh[2] = reader.exactCandidate(key);
+                }
+                // a reused reader is answering the second block, and it must match the first
+                assertArrayEquals(fresh, reused);
+                assertEquals(i, reused[2].longValue());
+            }
+        }
+    }
+
+    /**
+     * A reader whose index was closed under it, and a reader that is closed twice, must not throw and
+     * must not be left parked on the closed index.
+     */
+    @Test
+    public void testClosingAfterTheIndexIsClosedReleasesTheReader() throws IOException
+    {
+        Pair<List<DecoratedKey>, PartitionIndex> data = generateRandomIndex(COUNT / 10);
+        List<DecoratedKey> keys = data.left;
+        PartitionIndex index = data.right;
+
+        try (PartitionIndex.Reader reader = index.openReader())
+        {
+            assertEquals(0, reader.exactCandidate(keys.get(0)));
+            index.close();
+        }
+        assertFalse(index.hasSpareReader());
+
+        // an idle reader that is closed a second time is a no-op, and staying parked keeps it reusable
+        Pair<List<DecoratedKey>, PartitionIndex> more = generateRandomIndex(COUNT / 10);
+        List<DecoratedKey> moreKeys = more.left;
+        try (PartitionIndex other = more.right)
+        {
+            PartitionIndex.Reader first;
+            try (PartitionIndex.Reader reader = other.openReader())
+            {
+                assertEquals(0, reader.exactCandidate(moreKeys.get(0)));
+                first = reader;
+            }
+            first.close();
+            try (PartitionIndex.Reader reader = other.openReader())
+            {
+                assertSame(first, reader);
+                assertEquals(moreKeys.size() - 1, reader.exactCandidate(moreKeys.get(moreKeys.size() - 1)));
+                assertEquals(0, reader.exactCandidate(moreKeys.get(0)));
+            }
+        }
     }
 
     /**
