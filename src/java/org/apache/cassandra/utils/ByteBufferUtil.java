@@ -238,6 +238,20 @@ public class ByteBufferUtil
     }
 
     /**
+     * Whether the buffer's array holds exactly the buffer's content, so the array can stand in for the value
+     * without exposing bytes that are not part of it. A buffer that only views part of a larger array (a slice
+     * that starts at offset 0, for instance) does not own it.
+     */
+    public static boolean ownsArray(ByteBuffer buffer)
+    {
+        return buffer.hasArray()
+               && buffer.arrayOffset() == 0
+               && buffer.position() == 0
+               && buffer.limit() == buffer.capacity()
+               && buffer.array().length == buffer.capacity();
+    }
+
+    /**
      * You should almost never use this.  Instead, use the write* methods to avoid copies.
      */
     public static byte[] getArrayUnsafe(ByteBuffer buffer, int position, int length)

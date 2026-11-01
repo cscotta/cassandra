@@ -467,9 +467,17 @@ public abstract class Selector
 
         private <V> byte[] valueAsArray(Cell<V> c)
         {
-            return c.isCounterCell()
-                 ? ByteArrayUtil.bytes(CounterContext.instance().total(c.value(), c.accessor()))
-                 : c.accessor().toArray(c.value());
+            if (c.isCounterCell())
+                return ByteArrayUtil.bytes(CounterContext.instance().total(c.value(), c.accessor()));
+
+            V value = c.value();
+            // The result set only reads the values it is given, so a value that owns its backing array can be
+            // handed over as is. The read path clones the cells of a response on the heap, and those clones own
+            // their array, which lets us skip copying every selected value.
+            if (value instanceof ByteBuffer && ByteBufferUtil.ownsArray((ByteBuffer) value))
+                return ((ByteBuffer) value).array();
+
+            return c.accessor().toArray(value);
         }
 
         /**
