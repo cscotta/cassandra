@@ -428,6 +428,22 @@ final class PartitionKeyRestrictions extends RestrictionSetWrapper
         return tokenRestrictions != null ? tokenRestrictions.columns() : restrictions.columns();
     }
 
+    @Override
+    public boolean hasOnlyEqualityRestrictions()
+    {
+        // the columns this wrapper reports are the token restriction's ones when there is a token restriction, so the
+        // answer is the one the restriction set's own (allocation free) check gives only without a token restriction
+        if (tokenRestrictions == null)
+            return super.hasOnlyEqualityRestrictions();
+
+        for (ColumnMetadata column : tokenRestrictions.columns())
+        {
+            if (!isRestrictedByEqualsOrIN(column))
+                return false;
+        }
+        return true;
+    }
+
     /**
      * checks if specified restrictions require filtering
      *

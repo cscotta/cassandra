@@ -51,8 +51,10 @@ import org.apache.cassandra.utils.ByteBufferUtil;
 
 import static java.util.Arrays.asList;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
 public class ClusteringColumnRestrictionsTest
@@ -2023,6 +2025,87 @@ public class ClusteringColumnRestrictionsTest
         for (ByteBuffer value : values)
             terms.add(toTerm(value));
         return Terms.of(terms);
+    }
+
+    /**
+     * The cached restriction array of an immutable {@link RestrictionSet} must report the same restrictions in the
+     * same column order as iterating the set (a multi column restriction is the only shape where they differ, and it
+     * appears once per column it covers in the array).
+     */
+    @Test
+    public void testCachedRestrictionArrayMatchesIterationOrder()
+    {
+        ByteBuffer value0 = ByteBufferUtil.bytes(1);
+        ByteBuffer value1 = ByteBufferUtil.bytes(2);
+
+        for (Sort sort0 : Sort.values())
+        for (Sort sort1 : Sort.values())
+        {
+            TableMetadata tableMetadata = newTableMetadata(sort0, sort1);
+
+            for (ClusteringColumnRestrictions restrictionSet : asList(
+                    restrictions(tableMetadata),
+                    restrictions(tableMetadata, newSingleRestriction(tableMetadata, 0, Operator.EQ, value0)),
+                    restrictions(tableMetadata,
+                                 newSingleRestriction(tableMetadata, 0, Operator.EQ, value0),
+                                 newSingleRestriction(tableMetadata, 1, Operator.IN, value0, value1))))
+            {
+                List<SingleRestriction> iterated = new ArrayList<>();
+                for (SingleRestriction restriction : restrictionSet.restrictions)
+                    iterated.add(restriction);
+
+                // the set is immutable and the array is its cached contents, not a copy
+                assertSame(restrictionSet.restrictions.restrictionArray(), restrictionSet.restrictions.restrictionArray());
+                assertEquals(iterated, asList(restrictionSet.restrictions.restrictionArray()));
+                assertEquals(restrictionSet.size(), restrictionSet.restrictions.restrictionArray().length);
+            }
+
+            // a multi column restriction covers one map entry per column, so the array repeats it while the
+            // de-duplicated iterator does not
+            Restriction multiEq = newMultiEq(tableMetadata, 0, value0, value1);
+            ClusteringColumnRestrictions multiColumn = restrictions(tableMetadata, multiEq);
+            List<SingleRestriction> array = asList(multiColumn.restrictions.restrictionArray());
+            assertEquals(2, array.size());
+            assertSame(array.get(0), array.get(1));
+            assertEquals(2, multiColumn.size());
+
+            List<SingleRestriction> deduplicated = new ArrayList<>();
+            for (SingleRestriction restriction : multiColumn.restrictions)
+                deduplicated.add(restriction);
+            assertEquals(1, deduplicated.size());
+            assertSame(array.get(0), deduplicated.get(0));
+        }
+    }
+
+    /**
+     * {@code hasOnlyEqualityRestrictions} has to keep the meaning it had when it walked the columns of the set: an
+     * empty or fully equality restricted key answers true, an {@code IN} counts as an equality, and a slice or a multi
+     * column restriction answers false.
+     */
+    @Test
+    public void testHasOnlyEqualityRestrictions()
+    {
+        ByteBuffer value0 = ByteBufferUtil.bytes(1);
+        ByteBuffer value1 = ByteBufferUtil.bytes(2);
+        TableMetadata tableMetadata = newTableMetadata(Sort.ASC, Sort.DESC);
+
+        assertTrue(restrictions(tableMetadata).hasOnlyEqualityRestrictions());
+        assertTrue(restrictions(tableMetadata,
+                                newSingleRestriction(tableMetadata, 0, Operator.EQ, value0)).hasOnlyEqualityRestrictions());
+        assertTrue(restrictions(tableMetadata,
+                                newSingleRestriction(tableMetadata, 0, Operator.EQ, value0),
+                                newSingleRestriction(tableMetadata, 1, Operator.EQ, value1)).hasOnlyEqualityRestrictions());
+        assertTrue(restrictions(tableMetadata,
+                                newSingleRestriction(tableMetadata, 1, Operator.IN, value0, value1)).hasOnlyEqualityRestrictions());
+
+        assertFalse(restrictions(tableMetadata,
+                                 newSingleRestriction(tableMetadata, 0, Operator.GT, value0)).hasOnlyEqualityRestrictions());
+        assertFalse(restrictions(tableMetadata,
+                                 newSingleRestriction(tableMetadata, 0, Operator.EQ, value0),
+                                 newSingleRestriction(tableMetadata, 1, Operator.LT, value1)).hasOnlyEqualityRestrictions());
+        // a multi column equality is a column level EQ as well, so it does not need filtering
+        assertTrue(restrictions(tableMetadata,
+                                newMultiEq(tableMetadata, 0, value0, value1)).hasOnlyEqualityRestrictions());
     }
 
     private static ClusteringColumnRestrictions restrictions(TableMetadata table, Restriction... restrictions)

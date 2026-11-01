@@ -132,12 +132,7 @@ class RestrictionSetWrapper implements Restrictions
 
     public boolean hasOnlyEqualityRestrictions()
     {
-        for (ColumnMetadata column : columns())
-        {
-            if (!isRestrictedByEqualsOrIN(column))
-                return false;
-        }
-        return true;
+        return restrictions.hasOnlyEqualityRestrictions();
     }
 
     @Override
